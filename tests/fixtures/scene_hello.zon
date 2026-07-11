@@ -1,0 +1,8 @@
+.{
+    .name = "hello",
+    .entities = .{
+        .{ .name = "player", .pos = .{ .x = 0, .y = 0, .z = 0 } },
+        .{ .name = "crate", .pos = .{ .x = 2, .y = 1, .z = 0 } },
+        .{ .name = "torch", .pos = .{ .x = -3, .y = 4, .z = 1 } },
+    },
+}

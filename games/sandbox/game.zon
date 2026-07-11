@@ -1,0 +1,8 @@
+.{
+    .name = "sandbox",
+    .version = "0.0.1",
+    .entry_scene = "scenes/hello.zon",
+    .scenes = .{
+        "scenes/hello.zon",
+    },
+}

@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# This workflow contains no logic. All real behavior lives in mise tasks and
+# hk.pkl, so the same checks run identically on dev machines, git hooks, and any
+# CI provider. Switching forges (Forgejo/Codeberg, GitLab, Woodpecker) means
+# rewriting only this ~20-line file — nothing else. hk's pre-push hook already
+# runs the full suite locally; CI is a second opinion, not the gatekeeper.
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: mise install
+      - run: hk check --all
+      - run: mise run check
+      - run: mise run cross-win
