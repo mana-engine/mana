@@ -143,8 +143,10 @@ runtime (exe) + tools → engine
 ## Deferred (stubs today; each needs its own task + ADR before wiring)
 Vulkan gpu backend, SDL3 platform adapter, ziglua scripting, Tracy, VMA. Selecting a
 deferred backend (`-Denable-vulkan` / `-Denable-sdl3`) fails the build on purpose.
-**Mandatory before any scripting work:** ADR for the Lua API table shape (events,
-opaque handle semantics, versioning).
+**Scripting API contract:** ADR 0003 (accepted) fixes the Lua API table, event
+list, opaque handle semantics, versioning, sandbox, state/hot-reload, and error
+policy. `src/script` must implement exactly that; any surface change needs a new
+ADR. Building it is a separate task that adds the ziglua dependency (ask first).
 
 ## Hard-won knowledge (append when learned the hard way)
 - **Zig 0.16 build API:** `b.addExecutable(.{ .name, .root_module = b.createModule(

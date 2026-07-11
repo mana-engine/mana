@@ -7,10 +7,11 @@ reference it in the commit that acts on it.
 
 Use `/adr <title>` to scaffold a new numbered record from the template.
 
-**Mandatory ADR before any scripting work:** the shape of the Lua API table (event
-list, opaque handle semantics, versioning policy).
+The mandatory scripting-API ADR (ADR 0003) is **accepted** — `src/script` may be
+built to that contract (as its own task that adds the ziglua dependency).
 
-| ADR | Title |
-|-----|-------|
-| 0001 | ECS: minimal custom over zflecs |
-| 0002 | Native dependencies deferred; ports ship as stubs |
+| ADR | Title | Status |
+|-----|-------|--------|
+| 0001 | ECS: minimal custom over zflecs | accepted |
+| 0002 | Native dependencies deferred; ports ship as stubs | accepted |
+| 0003 | Lua scripting API: table shape, events, handles, versioning | accepted |
