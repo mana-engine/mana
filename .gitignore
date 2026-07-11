@@ -1,0 +1,11 @@
+# Zig build artifacts
+.zig-cache/
+zig-cache/
+zig-out/
+
+# Editor / OS noise
+*.swp
+.DS_Store
+
+# Personal, per-machine Claude Code settings (settings.json IS committed)
+.claude/settings.local.json

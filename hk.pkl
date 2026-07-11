@@ -1,0 +1,49 @@
+amends "package://github.com/jdx/hk/releases/download/v1.50.0/hk@1.50.0#/Config.pkl"
+
+// hk manages git hooks. HK_MISE=1 (set in mise.toml) makes every step run through
+// mise-managed tool versions, so hooks behave identically to CLAUDE.md and CI.
+//
+// pre-commit stays under ~5s (fmt + compile check); the full suite runs on
+// pre-push. `hk check` / `hk fix` (used by CI and by hand) reuse the same steps.
+// All real work lives in mise tasks so there is one source of truth.
+
+local linters = new Mapping<String, Step> {
+    // zig fmt is law. Formats Zig + ZON sources; on ZON this also catches
+    // malformed fixtures. `check` verifies, `fix` rewrites and re-stages.
+    ["zig-fmt"] {
+        glob = "*.{zig,zon}"
+        stage = "*.{zig,zon}"
+        check = "zig fmt --check {{ files }}"
+        fix = "zig fmt {{ files }}"
+    }
+    // Fast compile check whenever Zig sources change. Runs once (the command
+    // does not reference {{ files }}).
+    ["build"] {
+        glob = "*.zig"
+        check = "mise run build"
+    }
+}
+
+hooks {
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps = linters
+    }
+    ["pre-push"] {
+        steps {
+            // Full gate: fmt-check + build + test (determinism runs in the suite).
+            ["check"] {
+                check = "mise run check"
+            }
+        }
+    }
+    // `hk check --all` (CI) and `hk fix` (local) run the shared linters.
+    ["check"] {
+        steps = linters
+    }
+    ["fix"] {
+        fix = true
+        steps = linters
+    }
+}

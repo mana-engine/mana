@@ -1,0 +1,44 @@
+# mise is the single source of truth for the toolchain and all project commands.
+# A fresh machine gets working with `mise install`. Every command CLAUDE.md, hk
+# hooks, and CI invoke is a task defined here, so behavior is identical everywhere.
+
+[tools]
+zig = "0.16.0"
+zls = "0.16.0"
+hk = "1.50.0"
+
+[env]
+# Make hk run every tool through mise-managed versions.
+HK_MISE = "1"
+
+[hooks]
+# Self-install git hooks for anyone who runs `mise install`.
+postinstall = "hk install --mise"
+
+[tasks.build]
+description = "Compile the engine + runner (native target)."
+run = "zig build"
+
+[tasks.test]
+description = "Run all unit + integration tests."
+run = "zig build test"
+
+[tasks.fmt]
+description = "Format all Zig sources in place (zig fmt is law)."
+run = "zig fmt ."
+
+[tasks.fmt-check]
+description = "Verify formatting without writing (fails loudly on drift)."
+run = "zig fmt --check ."
+
+[tasks.check]
+description = "Full gate: fmt-check + build + test. The canonical green check."
+depends = ["fmt-check", "build", "test"]
+
+[tasks.run]
+description = "Run the runner headless: mise run run -- games/sandbox"
+run = "zig build run --"
+
+[tasks.cross-win]
+description = "Cross-compile for x86_64-windows (portability gate)."
+run = "zig build -Dtarget=x86_64-windows"
