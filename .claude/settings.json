@@ -1,0 +1,70 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mise run:*)",
+      "Bash(mise install:*)",
+      "Bash(mise x:*)",
+      "Bash(mise ls:*)",
+      "Bash(mise current:*)",
+      "Bash(zig build:*)",
+      "Bash(zig fmt:*)",
+      "Bash(hk check:*)",
+      "Bash(hk fix:*)",
+      "Bash(hk validate:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Read(./**)"
+    ],
+    "ask": [
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(mise use:*)",
+      "Bash(zig fetch:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "WebFetch",
+      "Edit(./build.zig.zon)",
+      "Write(./build.zig.zon)"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(git push --force:*)",
+      "Bash(git commit --no-verify:*)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Edit(./.env)",
+      "Edit(./.env.*)",
+      "Edit(./secrets/**)",
+      "Write(./.env)",
+      "Write(./.env.*)",
+      "Write(./secrets/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "python .claude/hooks/block_fixture_edit.py" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "python .claude/hooks/post_edit_fmt.py" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python .claude/hooks/stop_run_tests.py" }
+        ]
+      }
+    ]
+  }
+}
