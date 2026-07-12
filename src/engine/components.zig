@@ -20,6 +20,18 @@ pub const Velocity = struct { v: Vec3 };
 /// `current` toward `max`. Genre-neutral: what damage/death mean is content's job.
 pub const Health = struct { current: f32, max: f32 };
 
+/// The set of built-in components a deferred spawn attaches at once — an omitted
+/// (null) field means the spawned entity lacks that component. This is the same
+/// data-attachable set a scene `EntityDef` carries (ADR 0004 §6) and an entity
+/// prototype declares (ADR 0016); the command buffer's `spawn`/`attach` carry a
+/// `Bundle` so any built-in combination spawns in one deferred command. Grows
+/// alongside the built-in components a scene/prototype may declare.
+pub const Bundle = struct {
+    transform: ?Transform = null,
+    velocity: ?Velocity = null,
+    health: ?Health = null,
+};
+
 /// A collision shape attached to an entity for the physics `collision` system
 /// (ADR 0008). `shape` is a *local* collider placed at the entity's `Transform`
 /// (collision is on the XY plane, 2.5D); `layers` filters which colliders may
