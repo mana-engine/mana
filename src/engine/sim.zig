@@ -13,11 +13,16 @@ const event = @import("event.zig");
 const timer = @import("timer.zig");
 const script_runtime = @import("script_runtime.zig");
 const script = @import("script");
+const platform = @import("platform");
 
 const Allocator = std.mem.Allocator;
 
 /// What a system receives each tick. Systems read/iterate `world` and record
 /// deferred changes into `commands` (using `gpa`); they may enqueue `events`.
+/// `input` is this tick's `InputSnapshot` (ADR 0009 §3/§4: sampled once, immutable
+/// for the whole tick — every system reads the same value) — set via `Sim.setInput`
+/// before `tick`; defaults to an all-empty snapshot, so a `Sim` that never calls
+/// `setInput` behaves exactly as before input delivery existed.
 pub const Context = struct {
     world: *World,
     commands: *command.CommandBuffer,
@@ -25,6 +30,7 @@ pub const Context = struct {
     gpa: Allocator,
     dt: f32,
     tick: u64,
+    input: platform.InputSnapshot,
 };
 
 /// A system's own reported failure — the native-system analogue of a Lua handler
@@ -56,6 +62,11 @@ pub const Sim = struct {
     /// This Sim's single script runtime (ADR 0003 §8: one Lua state per Sim). A
     /// comptime no-op unless `-Denable-lua`; starts idle until `loadScript`.
     script_runtime: script_runtime.Runtime = .{},
+    /// The `InputSnapshot` the next `tick` exposes to systems via `Context.input`
+    /// (ADR 0009 §3/§4), set by `setInput`. Defaults to an all-empty snapshot, so a
+    /// `Sim` that never calls `setInput` — every existing caller today — ticks
+    /// exactly as it did before input delivery existed.
+    input: platform.InputSnapshot = .{},
     dt: f32,
     tick_count: u64 = 0,
 
@@ -113,6 +124,16 @@ pub const Sim = struct {
         self.timers.cancel(handle);
     }
 
+    /// Set the `InputSnapshot` the *next* `tick` exposes to systems via
+    /// `Context.input` (ADR 0009 §3/§4). Call once per tick, before `tick()` — e.g.
+    /// from `platform.Window.poll` once the interactive loop lands, or by replaying
+    /// a recorded `[]InputSnapshot` trace one entry per tick for deterministic,
+    /// bit-identical input replay. Overwrites whatever was set before; if never
+    /// called, `tick` sees the all-empty default snapshot.
+    pub fn setInput(self: *Sim, snapshot: platform.InputSnapshot) void {
+        self.input = snapshot;
+    }
+
     /// Advance one fixed step: run systems (each its own rollback transaction),
     /// flush deferred commands (emitting lifecycle events), dispatch all events,
     /// advance timers (firing any now due), then increment the tick counter.
@@ -131,6 +152,7 @@ pub const Sim = struct {
             .gpa = self.gpa,
             .dt = self.dt,
             .tick = self.tick_count,
+            .input = self.input,
         };
         for (self.systems.items) |system| {
             // ADR 0003 §9 / issue #2: each system invocation is a transaction. Mark

@@ -30,6 +30,7 @@ pub const scene = @import("scene.zig");
 pub const render = @import("render.zig");
 pub const collision = @import("collision.zig");
 pub const controller = @import("controller.zig");
+pub const input = @import("input.zig");
 
 pub const World = world.World;
 pub const Sim = sim.Sim;
@@ -61,6 +62,7 @@ test {
     _ = render;
     _ = collision;
     _ = controller;
+    _ = input;
 }
 
 test "engine module assembles all ports" {
