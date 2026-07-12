@@ -24,12 +24,15 @@ description = "Run all unit + integration tests."
 run = "zig build test"
 
 [tasks.fmt]
+# `--exclude zig-pkg`: fetched dependency sources (e.g. ziglua's vendored Lua
+# bindings) are not fmt-clean and are not ours to format. zig eagerly fetches even
+# lazy deps into zig-pkg/, and `zig fmt` recurses into it, so it must be excluded.
 description = "Format all Zig sources in place (zig fmt is law)."
-run = "zig fmt ."
+run = "zig fmt --exclude zig-pkg ."
 
 [tasks.fmt-check]
 description = "Verify formatting without writing (fails loudly on drift)."
-run = "zig fmt --check ."
+run = "zig fmt --check --exclude zig-pkg ."
 
 [tasks.check]
 description = "Full gate: fmt-check + build + test. The canonical green check."
