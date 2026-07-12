@@ -79,6 +79,21 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    // When BOTH the Vulkan backend and the SDL3 adapter are enabled, link the SDL3
+    // artifact into the `gpu` module too: the Vulkan backend calls
+    // `SDL_Vulkan_CreateSurface` (declared as C externs in the backend, NOT a
+    // `platform` import) to turn the window's opaque handle into a `VkSurfaceKHR`
+    // (ADR 0012, "Vulkan surface creation"). This is a build-level *link*, not a module
+    // import, so the DAG (`gpu → core`, never `gpu → platform`) is unchanged, and SDL +
+    // Vulkan stay out of the default/CI build. `lazyDependency` returns the same `sdl`
+    // dep the platform block uses; libc is required for the C symbols.
+    if (enable_vulkan and enable_sdl3) {
+        if (b.lazyDependency("sdl", .{ .target = target, .optimize = optimize })) |sdl| {
+            gpu.link_libc = true;
+            gpu.linkLibrary(sdl.artifact("SDL3"));
+        }
+    }
+
     const platform = b.createModule(.{
         .root_source_file = b.path("src/platform/platform.zig"),
         .target = target,
