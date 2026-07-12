@@ -41,6 +41,7 @@ pub const Runtime = if (script.lua_enabled) LuaRuntime else NoopRuntime;
 /// entry per key the circuit breaker (§9) tracks independently; grow this
 /// alongside `dispatch`'s `switch` as new events gain a v1 handler key.
 const HandlerKey = enum {
+    on_scene_enter,
     on_spawn,
     on_collision_begin,
 };
@@ -117,6 +118,15 @@ const LuaRuntime = struct {
         prototypes: prototype.Registry,
         oom: bool = false,
 
+        fn fromDc(dc: DispatchCtx) HostCtx {
+            return .{
+                .world = dc.world,
+                .commands = dc.commands,
+                .gpa = dc.gpa,
+                .now_seconds = dc.now_seconds,
+                .prototypes = dc.prototypes,
+            };
+        }
         fn cast(ctx: *anyopaque) *HostCtx {
             return @ptrCast(@alignCast(ctx));
         }
@@ -188,13 +198,7 @@ const LuaRuntime = struct {
         };
         if (self.isDisabled(key)) return;
 
-        var host_ctx: HostCtx = .{
-            .world = dc.world,
-            .commands = dc.commands,
-            .gpa = dc.gpa,
-            .now_seconds = dc.now_seconds,
-            .prototypes = dc.prototypes,
-        };
+        var host_ctx: HostCtx = .fromDc(dc);
         s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
         defer s.setHost(null); // the borrowed ctx must not outlive this dispatch
 
@@ -215,6 +219,25 @@ const LuaRuntime = struct {
         if (outcome == .errored) try dc.commands.rollback(dc.world, mark);
         if (host_ctx.oom) return error.OutOfMemory; // a queued mutation hit OOM
         self.report(key, s, outcome);
+    }
+
+    /// Dispatch the per-scene bootstrap event `on_scene_enter(ev = { scene })`
+    /// (ADR 0017) with the host live, so the handler can query the freshly-loaded
+    /// scene and wire timers/rules. Same transaction + OOM discipline as `dispatch`.
+    /// A no-op if no script is loaded, the key is absent, or its breaker tripped.
+    pub fn dispatchSceneEnter(self: *LuaRuntime, scene_name: []const u8, dc: DispatchCtx) Allocator.Error!void {
+        const s = if (self.state) |*st| st else return;
+        if (self.isDisabled(.on_scene_enter)) return;
+
+        var host_ctx: HostCtx = .fromDc(dc);
+        s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
+        defer s.setHost(null);
+
+        const mark = dc.commands.mark();
+        const outcome = s.dispatchSceneEnter(scene_name);
+        if (outcome == .errored) try dc.commands.rollback(dc.world, mark);
+        if (host_ctx.oom) return error.OutOfMemory;
+        self.report(.on_scene_enter, s, outcome);
     }
 
     /// Read integer field `key` off the loaded handler table, or null. Lets the
@@ -311,6 +334,12 @@ const NoopRuntime = struct {
     pub fn dispatch(self: *NoopRuntime, ev: event.Event, dc: DispatchCtx) Allocator.Error!void {
         _ = self;
         _ = ev;
+        _ = dc;
+    }
+
+    pub fn dispatchSceneEnter(self: *NoopRuntime, scene_name: []const u8, dc: DispatchCtx) Allocator.Error!void {
+        _ = self;
+        _ = scene_name;
         _ = dc;
     }
 

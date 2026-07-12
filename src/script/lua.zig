@@ -309,6 +309,20 @@ pub const State = struct {
         return self.invokeHandler(1);
     }
 
+    /// Dispatch the per-scene bootstrap `on_scene_enter(ev)` (ADR 0017) where
+    /// `ev = { scene = <name> }`. Unlike the entity events there is no `self` — the
+    /// handler is scene-level, not entity-level. A missing key is a silent no-op; a
+    /// handler error is caught and reported (§9). `scene_name` is borrowed only for
+    /// the call (copied into the Lua string).
+    pub fn dispatchSceneEnter(self: *State, scene_name: []const u8) DispatchOutcome {
+        if (!self.pushHandler("on_scene_enter")) return .no_handler;
+        const l = self.lua;
+        l.newTable(); // arg 1: ev (no self — scene-level handler)
+        _ = l.pushString(scene_name);
+        l.setField(-2, "scene");
+        return self.invokeHandler(1);
+    }
+
     /// Dispatch `on_collision_begin(self, ev)` (ADR 0003 §3) where `ev = { other,
     /// normal_x, normal_y }`. `self`/`other` are opaque handles (§4); the engine's
     /// `collision_begin` event carries no contact normal yet, so callers pass `0`

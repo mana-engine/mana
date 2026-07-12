@@ -67,6 +67,12 @@ pub const Sim = struct {
     /// default (every `spawn` misses); the runner populates it from package ZON. The
     /// registry borrows its prototype slice — the owner must outlive the `Sim`.
     prototypes: prototype.Registry = .{},
+    /// A scene whose `on_scene_enter` (ADR 0017/0018) is due to fire on the next
+    /// `tick`, or null. Set by `enterScene` when a scene becomes active; consumed and
+    /// dispatched host-live at the start of that tick's dispatch phase. Borrows the
+    /// name — the caller keeps it alive until the following `tick` (the runner holds
+    /// the parsed scene for the Sim's lifetime).
+    pending_scene: ?[]const u8 = null,
     /// The `InputSnapshot` the next `tick` exposes to systems via `Context.input`
     /// (ADR 0009 §3/§4), set by `setInput`. Defaults to an all-empty snapshot, so a
     /// `Sim` that never calls `setInput` — every existing caller today — ticks
@@ -100,6 +106,15 @@ pub const Sim = struct {
     /// allocation failure).
     pub fn loadScript(self: *Sim, source: [:0]const u8) !void {
         try self.script_runtime.loadHandlers(self.gpa, source);
+    }
+
+    /// Mark `scene_name` as newly active, so its `on_scene_enter` (ADR 0017/0018)
+    /// fires on the next `tick` with the host live — the hook a script uses to query
+    /// its entities and wire timers/rules. The runner calls this after loading the
+    /// entry scene; future scene switching calls it per transition. `scene_name` must
+    /// stay alive until the following `tick`. A no-op-yielding null if never called.
+    pub fn enterScene(self: *Sim, scene_name: []const u8) void {
+        self.pending_scene = scene_name;
     }
 
     /// Register a system; systems run each tick in registration order.
@@ -175,23 +190,30 @@ pub const Sim = struct {
         // 0015): tick-derived seconds elapsed at the start of this tick, so it is
         // deterministic and never reads a wall clock.
         const now_seconds: f64 = @as(f64, @floatFromInt(self.tick_count)) * @as(f64, self.dt);
+        // The live world, command buffer, `now`, and prototype registry back the ADR
+        // 0015 host seam for a handler's `mana` reads and deferred mutations (applied
+        // at next tick's flush). All script dispatch below is a comptime no-op — zero
+        // cost, sim bit-identical — unless `-Denable-lua`; handler errors are caught
+        // and their queued mutations rolled back (§9); only OOM propagates.
+        const dc: script_runtime.DispatchCtx = .{
+            .world = &self.world,
+            .commands = &self.commands,
+            .gpa = self.gpa,
+            .now_seconds = now_seconds,
+            .prototypes = self.prototypes,
+        };
+        // A newly-active scene bootstraps first (ADR 0017/0018): its `on_scene_enter`
+        // runs host-live before this tick's other events, so a script can query the
+        // freshly-loaded scene and wire its timers/rules.
+        if (self.pending_scene) |scene_name| {
+            self.pending_scene = null;
+            try self.script_runtime.dispatchSceneEnter(scene_name, dc);
+        }
         // TODO(tracy): bound all script dispatch this frame in one Tracy zone with
         // the ADR 0003 §6 per-frame budget once the Tracy port lands.
         for (self.events.items()) |ev| {
             for (self.handlers.items) |handler| handler(&self.world, ev);
-            // Script dispatch (ADR 0003 §1/§3). A comptime no-op — zero cost, sim
-            // bit-identical — unless `-Denable-lua`; catches handler errors (§9) and
-            // rolls back their queued mutations. The live world, command buffer,
-            // `now`, and prototype registry back the ADR 0015 host seam for the
-            // handler's `mana` reads and deferred mutations (applied at next tick's
-            // flush). Only OOM propagates.
-            try self.script_runtime.dispatch(ev, .{
-                .world = &self.world,
-                .commands = &self.commands,
-                .gpa = self.gpa,
-                .now_seconds = now_seconds,
-                .prototypes = self.prototypes,
-            });
+            try self.script_runtime.dispatch(ev, dc);
         }
         self.events.clear();
         try self.timers.advance(self.gpa, &self.world, self.dt);
@@ -431,6 +453,55 @@ test "sim: on_spawn reads its entity's position and sim time via the mana host s
     try testing.expectEqual(@as(i64, 7), sim.script_runtime.handlerFieldInt("px").?);
     try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("valid").?);
     try testing.expectEqual(@as(i64, 3), sim.script_runtime.handlerFieldInt("seen_now").?);
+}
+
+test "sim: on_scene_enter fires host-live with ev.scene and bootstraps via mana (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    // A prototype the bootstrap handler spawns — proving the host is live during
+    // on_scene_enter (spawn works) and that ev.scene carries the scene name.
+    const protos = [_]prototype.Prototype{
+        .{ .name = "thing", .health = .{ .current = 2, .max = 2 } },
+    };
+
+    var sim = Sim.init(testing.allocator, 1.0);
+    defer sim.deinit();
+    sim.prototypes = .{ .prototypes = &protos };
+    try sim.loadScript(
+        \\local t = { name_ok = 0, valid = 0 }
+        \\function t.on_scene_enter(ev)
+        \\  t.name_ok = (ev.scene == "board") and 1 or 0
+        \\  local h = mana.spawn("thing", 3, 4, 0)
+        \\  t.valid = mana.is_valid(h) and 1 or 0
+        \\end
+        \\return t
+    );
+    sim.enterScene("board");
+
+    try sim.tick(); // tick 0: on_scene_enter fires host-live → spawns "thing" (reserved)
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("name_ok").?); // ev.scene passed
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("valid").?); // reserved handle valid
+    try sim.tick(); // tick 1: flush attaches the prototype's components
+
+    try testing.expectEqual(@as(usize, 1), sim.world.count());
+    const e = sim.world.entityAt(0);
+    try testing.expect(sim.world.getTransform(e).?.pos.approxEql(.{ .x = 3, .y = 4, .z = 0 }, 1e-6));
+    try testing.expectEqual(@as(f32, 2), sim.world.getHealth(e).?.current);
+}
+
+test "sim: on_scene_enter is a no-op when enterScene was never called (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    var sim = Sim.init(testing.allocator, 1.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = { fired = 0 }
+        \\function t.on_scene_enter(ev) t.fired = 1 end
+        \\return t
+    );
+    // No enterScene: the handler must never run.
+    try sim.run(3);
+    try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("fired").?);
 }
 
 /// A one-shot system that spawns a single transform-only entity on its first tick,

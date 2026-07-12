@@ -28,5 +28,5 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0014 | Camera/projection is a configurable view; rendering stops hardcoding isometric | accepted |
 | 0015 | Script↔engine host seam: how `mana` reaches the live Sim | accepted |
 | 0016 | Entity prototypes: named component templates for `mana.spawn` | accepted |
-| 0017 | `on_scene_enter`: a per-scene bootstrap event | proposed |
+| 0017 | `on_scene_enter`: a per-scene bootstrap event | accepted |
 | 0018 | A game is data: prototypes are prefabs, scenes instance them, scripts query and drive | proposed |

@@ -94,10 +94,9 @@ local function start()
 end
 
 return {
-    -- GAP: no start hook. `on_room_enter` (ADR 0003 §3) is the closest fit but is
-    -- never dispatched (rooms unimplemented). Without a bootstrap event fired during
-    -- a tick, none of the mana calls above can run (the host is only live mid-dispatch).
-    on_room_enter = function(self, ev)
+    -- Bootstrap (ADR 0017): on_scene_enter fires once when the board loads, host-live,
+    -- so start() can spawn the snake + food and schedule the move timer.
+    on_scene_enter = function(ev)
         start()
     end,
 
