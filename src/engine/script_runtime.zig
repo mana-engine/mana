@@ -35,6 +35,9 @@ pub const DispatchCtx = struct {
     /// The Sim's timer wheel, so `mana.after`/`every` can schedule Lua callbacks on
     /// it and `advanceTimers` can fire them host-live (ADR 0019).
     timers: *timer.Timers,
+    /// The Sim's seeded RNG stream, so `mana.random`/`random_int` draw from it
+    /// (ADR 0022, issue #47) instead of a fresh/nondeterministic source.
+    rng: *core.Rng,
 };
 
 /// The Sim's script runtime: the Lua-backed one under `-Denable-lua`, else a
@@ -192,6 +195,7 @@ const LuaRuntime = struct {
         prototypes: prototype.Registry,
         timers: *timer.Timers,
         runtime: *LuaRuntime,
+        rng: *core.Rng,
         oom: bool = false,
 
         fn init(dc: DispatchCtx, runtime: *LuaRuntime) HostCtx {
@@ -203,6 +207,7 @@ const LuaRuntime = struct {
                 .prototypes = dc.prototypes,
                 .timers = dc.timers,
                 .runtime = runtime,
+                .rng = dc.rng,
             };
         }
         fn cast(ctx: *anyopaque) *HostCtx {
@@ -288,6 +293,17 @@ const LuaRuntime = struct {
             hc.timers.cancel(h);
             hc.runtime.retireByHandle(hc.gpa, h);
         }
+        /// `mana.random` (ADR 0022): an immediate read of the sim's seeded RNG
+        /// stream, never queued — reading advances the stream itself, which is the
+        /// whole point (a fresh draw each call).
+        fn random(ctx: *anyopaque) f32 {
+            return cast(ctx).rng.float01();
+        }
+        /// `mana.random_int` (ADR 0022): see `core.Rng.intRange` for the exact,
+        /// version-stable mapping.
+        fn randomInt(ctx: *anyopaque, lo: i64, hi: i64) i64 {
+            return cast(ctx).rng.intRange(lo, hi);
+        }
         const vtable: script.lua.Host.VTable = .{
             .is_valid = isValid,
             .position = position,
@@ -299,6 +315,8 @@ const LuaRuntime = struct {
             .timer_after = timerAfter,
             .timer_every = timerEvery,
             .timer_cancel = timerCancel,
+            .random = random,
+            .random_int = randomInt,
         };
     };
 
@@ -563,12 +581,14 @@ test "circuit breaker: a handler disabled after breaker_threshold consecutive er
     defer commands.deinit(std.testing.allocator);
     var timers: timer.Timers = .{};
     defer timers.deinit(std.testing.allocator);
+    var rng: core.Rng = core.Rng.init(0);
     try rt.dispatch(.{ .spawned = .{ .index = 1, .generation = 0 } }, .{
         .world = &world,
         .commands = &commands,
         .gpa = std.testing.allocator,
         .now_seconds = 0,
         .timers = &timers,
+        .rng = &rng,
     });
     try std.testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("spawns").?);
 }
@@ -595,6 +615,7 @@ test "circuit breaker: disabling one handler key leaves a different key unaffect
     defer commands.deinit(std.testing.allocator);
     var timers: timer.Timers = .{};
     defer timers.deinit(std.testing.allocator);
+    var rng: core.Rng = core.Rng.init(0);
     try rt.dispatch(.{ .collision_begin = .{
         .a = .{ .index = 1, .generation = 0 },
         .b = .{ .index = 2, .generation = 0 },
@@ -604,6 +625,7 @@ test "circuit breaker: disabling one handler key leaves a different key unaffect
         .gpa = std.testing.allocator,
         .now_seconds = 0,
         .timers = &timers,
+        .rng = &rng,
     });
     try std.testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("collisions").?);
 }

@@ -7,6 +7,7 @@
 //! Rendering is separate (render-side, ADR 0006).
 
 const std = @import("std");
+const core = @import("core");
 const World = @import("world.zig").World;
 const command = @import("command.zig");
 const event = @import("event.zig");
@@ -52,6 +53,13 @@ pub const System = *const fn (*Context) SystemError!void;
 /// scripting-era extension.
 pub const Handler = *const fn (world: *World, ev: event.Event) void;
 
+/// Default seed for `Sim.rng` (ADR 0022): a fixed constant, not derived from the
+/// scene/clock, so a `Sim` that never calls `setRngSeed` is still fully
+/// deterministic and reproducible run-to-run. Threading a per-scene/manifest seed
+/// through is a follow-up (no game needs it yet — CLAUDE.md "no speculative
+/// flexibility").
+pub const default_rng_seed: u64 = 0x6D616E615F726E67; // "mana_rng" in ASCII hex
+
 pub const Sim = struct {
     gpa: Allocator,
     world: World,
@@ -84,6 +92,12 @@ pub const Sim = struct {
     prev_input: platform.InputSnapshot = .{},
     dt: f32,
     tick_count: u64 = 0,
+    /// The seeded stream `mana.random`/`random_int` draw from (ADR 0022, issue #47).
+    /// Defaults to `default_rng_seed`, so an unseeded `Sim` is still deterministic;
+    /// `setRngSeed` overrides it before the first draw (e.g. per-run reproducible
+    /// seeds). Advancing it is the *only* effect `mana.random`/`random_int` have —
+    /// they never touch `world`/`commands`, so they need no command-buffer entry.
+    rng: core.Rng = core.Rng.init(default_rng_seed),
 
     /// A sim with an empty world at fixed step `dt`. Populate `world` (e.g. via
     /// `engine.scene.load`) and register systems, then `run`/`tick`.
@@ -158,6 +172,14 @@ pub const Sim = struct {
         self.input = snapshot;
     }
 
+    /// Re-seed `mana.random`/`random_int`'s stream (ADR 0022). Call before the
+    /// first script dispatch that draws from it; a `Sim` that never calls this uses
+    /// `default_rng_seed`. Two sims seeded identically (and driven by identical
+    /// inputs) draw an identical sequence — the determinism contract this exists for.
+    pub fn setRngSeed(self: *Sim, seed: u64) void {
+        self.rng = core.Rng.init(seed);
+    }
+
     /// Advance one fixed step: run systems (each its own rollback transaction),
     /// flush deferred commands (emitting lifecycle events), dispatch all events,
     /// advance timers (firing any now due), then increment the tick counter.
@@ -206,6 +228,7 @@ pub const Sim = struct {
             .now_seconds = now_seconds,
             .prototypes = self.prototypes,
             .timers = &self.timers,
+            .rng = &self.rng,
         };
         // A newly-active scene bootstraps first (ADR 0017/0018): its `on_scene_enter`
         // runs host-live before this tick's other events, so a script can query the
@@ -721,4 +744,91 @@ test "sim: on_spawn spawns a prototype via mana; its components attach at the ne
     try testing.expect(sim.world.getTransform(b).?.pos.approxEql(.{ .x = 5, .y = 6, .z = 7 }, 1e-6)); // spawn point
     try testing.expect(sim.world.getVelocity(b).?.v.approxEql(.{ .x = 1, .y = 0, .z = 0 }, 1e-6)); // from prototype
     try testing.expectEqual(@as(f32, 3), sim.world.getHealth(b).?.current); // from prototype
+}
+
+test "sim: mana.random/random_int draw from the sim's seeded core.Rng, in range (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    var sim = Sim.init(testing.allocator, 1.0);
+    defer sim.deinit();
+    sim.setRngSeed(12345);
+    try sim.loadScript(
+        \\local t = { in_range = 1, in_unit = 1, sample = -1 }
+        \\function t.on_scene_enter(ev)
+        \\  for i = 1, 20 do
+        \\    local f = mana.random()
+        \\    if f < 0 or f >= 1 then t.in_unit = 0 end
+        \\    local n = mana.random_int(10, 20)
+        \\    if n < 10 or n > 20 then t.in_range = 0 end
+        \\  end
+        \\  -- scale to an integer so the test can read it back (handlerFieldInt is
+        \\  -- int-only); locks the first draw's magnitude loosely, not exactly.
+        \\  t.sample = math.floor(mana.random() * 1000000)
+        \\end
+        \\return t
+    );
+    sim.enterScene("board");
+
+    try sim.tick();
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("in_unit").?);
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("in_range").?);
+    const sample = sim.script_runtime.handlerFieldInt("sample").?;
+    try testing.expect(sample >= 0 and sample < 1000000);
+}
+
+/// Runs `on_scene_enter` once and returns `mana.random_int(1, 1000000)`'s draw via
+/// `handlerFieldInt`, for the determinism test below.
+fn firstRandomIntDraw(seed: u64) !i64 {
+    var sim = Sim.init(testing.allocator, 1.0);
+    defer sim.deinit();
+    sim.setRngSeed(seed);
+    try sim.loadScript(
+        \\local t = { draw = -1 }
+        \\function t.on_scene_enter(ev) t.draw = mana.random_int(1, 1000000) end
+        \\return t
+    );
+    sim.enterScene("board");
+    try sim.tick();
+    return sim.script_runtime.handlerFieldInt("draw").?;
+}
+
+test "sim: mana.random_int is deterministic — same seed, same draw; a different seed diverges (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    const a = try firstRandomIntDraw(777);
+    const b = try firstRandomIntDraw(777);
+    try testing.expectEqual(a, b);
+
+    const c = try firstRandomIntDraw(778);
+    try testing.expect(a != c);
+}
+
+test "sim: an unseeded Sim's mana.random_int still runs deterministically off default_rng_seed (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    // No `setRngSeed` call on either sim: both fall back to `default_rng_seed`.
+    var sim_a = Sim.init(testing.allocator, 1.0);
+    defer sim_a.deinit();
+    try sim_a.loadScript(
+        \\local t = { draw = -1 }
+        \\function t.on_scene_enter(ev) t.draw = mana.random_int(1, 1000000) end
+        \\return t
+    );
+    sim_a.enterScene("board");
+    try sim_a.tick();
+
+    var sim_b = Sim.init(testing.allocator, 1.0);
+    defer sim_b.deinit();
+    try sim_b.loadScript(
+        \\local t = { draw = -1 }
+        \\function t.on_scene_enter(ev) t.draw = mana.random_int(1, 1000000) end
+        \\return t
+    );
+    sim_b.enterScene("board");
+    try sim_b.tick();
+
+    try testing.expectEqual(
+        sim_a.script_runtime.handlerFieldInt("draw").?,
+        sim_b.script_runtime.handlerFieldInt("draw").?,
+    );
 }

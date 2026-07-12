@@ -32,6 +32,29 @@ pub const Rng = struct {
     pub fn signedUnit(self: *Rng) f32 {
         return self.float01() * 2.0 - 1.0;
     }
+
+    /// Uniform integer in the inclusive range `[min(lo, hi), max(lo, hi)]` (ADR 0022
+    /// `mana.random_int`). `lo > hi` is treated as the swapped range rather than an
+    /// error, and `lo == hi` always returns that value — either way this draws
+    /// exactly one `next()`, so the RNG's advance count never depends on argument
+    /// order. Maps the draw with Lemire's multiply-high trick (`next() as u128 *
+    /// range, top 64 bits`) instead of modulo, which would bias low results; this
+    /// exact formula is the version-stable mapping (locked by test below) — it must
+    /// never change without a version bump (ADR 0003 §5).
+    ///
+    /// `range` is carried as `u128`: the full-i64-domain call
+    /// `intRange(minInt(i64), maxInt(i64))` has an inclusive width of 2^64, which
+    /// does not fit `u64` — a `u64` cast there would trap (a Zig panic bypasses the
+    /// script pcall and would crash the engine, ADR 0003 §9). In that case
+    /// `scaled >> 64 == next()`, so the draw maps uniformly across the whole domain.
+    pub fn intRange(self: *Rng, lo_in: i64, hi_in: i64) i64 {
+        const lo = @min(lo_in, hi_in);
+        const hi = @max(lo_in, hi_in);
+        const range: u128 = @intCast(@as(i128, hi) - @as(i128, lo) + 1);
+        const scaled: u128 = @as(u128, self.next()) * range;
+        const offset: u64 = @intCast(scaled >> 64);
+        return @intCast(@as(i128, lo) + @as(i128, offset));
+    }
 };
 
 const testing = std.testing;
@@ -59,5 +82,60 @@ test "rng: float01 stays in [0,1)" {
     for (0..1000) |_| {
         const f = r.float01();
         try testing.expect(f >= 0.0 and f < 1.0);
+    }
+}
+
+test "rng: intRange stays within [lo, hi] inclusive over many draws" {
+    var r = Rng.init(7);
+    var saw_lo = false;
+    var saw_hi = false;
+    for (0..2000) |_| {
+        const v = r.intRange(3, 5);
+        try testing.expect(v >= 3 and v <= 5);
+        if (v == 3) saw_lo = true;
+        if (v == 5) saw_hi = true;
+    }
+    // Both inclusive endpoints are reachable (a common off-by-one to catch).
+    try testing.expect(saw_lo and saw_hi);
+}
+
+test "rng: intRange(lo, lo) always returns lo and still advances the state" {
+    var r = Rng.init(1);
+    const before = r.state;
+    try testing.expectEqual(@as(i64, 9), r.intRange(9, 9));
+    try testing.expect(r.state != before); // one next() consumed, same as any other call
+}
+
+test "rng: intRange with lo > hi uses the swapped range, not an error" {
+    var a = Rng.init(99);
+    var b = Rng.init(99);
+    try testing.expectEqual(a.intRange(10, 2), b.intRange(2, 10));
+}
+
+test "rng: intRange same seed yields the same sequence (determinism contract)" {
+    var a = Rng.init(2026);
+    var b = Rng.init(2026);
+    for (0..64) |_| try testing.expectEqual(a.intRange(-50, 50), b.intRange(-50, 50));
+}
+
+test "rng: intRange known mapping for seed 0, range [0, 9] (locks the formula)" {
+    // Hardcoded literal, NOT re-derived from the formula, so a drift in the
+    // implementation (shift amount, inclusive-width) fails here. Derivation:
+    // splitmix64(0)'s first output is 0xE220A8397B1DCDAF (locked above); the
+    // multiply-high map is (0xE220A8397B1DCDAF * 10) >> 64 == 8.
+    var r = Rng.init(0);
+    try testing.expectEqual(@as(i64, 8), r.intRange(0, 9));
+}
+
+test "rng: intRange over the full i64 domain does not trap and stays in range" {
+    // Inclusive width here is 2^64, which does not fit u64 — the u128 `range`
+    // (see intRange doc) is what keeps this from trapping (ADR 0003 §9: a script
+    // calling mana.random_int(math.mininteger, math.maxinteger) must not crash the
+    // engine). Every result trivially lies in [minInt, maxInt]; the real assertion
+    // is simply that the call returns.
+    var r = Rng.init(0);
+    for (0..1000) |_| {
+        const v = r.intRange(std.math.minInt(i64), std.math.maxInt(i64));
+        try testing.expect(v >= std.math.minInt(i64) and v <= std.math.maxInt(i64));
     }
 }
