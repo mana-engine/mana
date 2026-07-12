@@ -25,4 +25,5 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0011 | Character controller: move-and-slide via the command buffer | proposed |
 | 0012 | Windowed presentation: gpu swapchain + platform window surface | accepted (surface + null/SDL3 window + Vulkan swapchain) |
 | 0013 | SDL3 dependency + platform adapter (phase 1: window + input) | accepted |
-| 0014 | Camera/projection is a configurable view; rendering stops hardcoding isometric | proposed |
+| 0014 | Camera/projection is a configurable view; rendering stops hardcoding isometric | accepted |
+| 0015 | Script↔engine host seam: how `mana` reaches the live Sim | proposed |
