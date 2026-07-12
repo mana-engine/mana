@@ -135,6 +135,7 @@ fn runOnce(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     defer sim.deinit();
     try engine.scene.load(parsed, &sim.world);
     try sim.addSystem(engine.systems.movementSystem);
+    try sim.addSystem(engine.systems.regenSystem);
     try sim.run(tick_steps);
 
     try out.print(

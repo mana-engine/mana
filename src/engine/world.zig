@@ -11,6 +11,7 @@ const components = @import("components.zig");
 
 const Transform = components.Transform;
 const Velocity = components.Velocity;
+const Health = components.Health;
 const Entity = ecs.Entity;
 const Allocator = std.mem.Allocator;
 
@@ -22,6 +23,7 @@ pub const World = struct {
     entities: ecs.EntityAllocator = .{},
     transforms: ecs.SparseSet(Transform) = .{},
     velocities: ecs.SparseSet(Velocity) = .{},
+    healths: ecs.SparseSet(Health) = .{},
 
     /// An empty world. `gpa` owns all component storage; call `deinit`.
     pub fn init(gpa: Allocator) World {
@@ -31,6 +33,7 @@ pub const World = struct {
     pub fn deinit(self: *World) void {
         self.transforms.deinit(self.gpa);
         self.velocities.deinit(self.gpa);
+        self.healths.deinit(self.gpa);
         self.entities.deinit(self.gpa);
         self.* = undefined;
     }
@@ -45,6 +48,7 @@ pub const World = struct {
         if (!self.entities.isValid(e)) return;
         self.transforms.remove(e.index);
         self.velocities.remove(e.index);
+        self.healths.remove(e.index);
         try self.entities.free_entity(self.gpa, e);
     }
 
@@ -80,12 +84,27 @@ pub const World = struct {
         return self.velocities.get(e.index);
     }
 
-    /// Stable hash of observable state (entity transforms). Same state ⇒ same hash;
-    /// this is the determinism fingerprint checked in CI.
+    pub fn setHealth(self: *World, e: Entity, h: Health) Error!void {
+        if (!self.entities.isValid(e)) return error.InvalidEntity;
+        try self.healths.put(self.gpa, e.index, h);
+    }
+
+    /// Mutable pointer to `e`'s `Health`, or null if absent/stale. Invalidated by
+    /// subsequent component adds/removes.
+    pub fn getHealth(self: *World, e: Entity) ?*Health {
+        if (!self.entities.isValid(e)) return null;
+        return self.healths.get(e.index);
+    }
+
+    /// Stable hash of observable state (entity transforms and healths). Same state ⇒
+    /// same hash; this is the determinism fingerprint checked in CI. Covering the
+    /// health column keeps the regen system's output inside the guarantee.
     pub fn stateHash(self: *World) u64 {
         var h = std.hash.Wyhash.init(0);
         h.update(std.mem.sliceAsBytes(self.transforms.entities()));
         h.update(std.mem.sliceAsBytes(self.transforms.slice()));
+        h.update(std.mem.sliceAsBytes(self.healths.entities()));
+        h.update(std.mem.sliceAsBytes(self.healths.slice()));
         return h.final();
     }
 };
@@ -106,6 +125,21 @@ test "world: spawn, set, get, despawn" {
     try testing.expect(!w.isValid(e));
     try testing.expect(w.getTransform(e) == null);
     try testing.expectEqual(@as(usize, 0), w.count());
+}
+
+test "world: health round-trips and is dropped on despawn" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+
+    const e = try w.spawn();
+    try w.setHealth(e, .{ .current = 30, .max = 100 });
+    try testing.expectEqual(@as(f32, 30), w.getHealth(e).?.current);
+    try testing.expectEqual(@as(f32, 100), w.getHealth(e).?.max);
+    try testing.expectEqual(@as(usize, 1), w.healths.count());
+
+    try w.despawn(e);
+    try testing.expect(w.getHealth(e) == null);
+    try testing.expectEqual(@as(usize, 0), w.healths.count());
 }
 
 test "world: stale handle is rejected by writers" {

@@ -7,6 +7,7 @@
 const std = @import("std");
 const core = @import("core");
 const data = @import("data");
+const ecs = @import("ecs");
 const components = @import("components.zig");
 const World = @import("world.zig").World;
 
@@ -19,6 +20,7 @@ pub const EntityDef = struct {
     name: []const u8,
     transform: ?components.Transform = null,
     velocity: ?components.Velocity = null,
+    health: ?components.Health = null,
 };
 
 /// A named collection of entity definitions — the unit a runtime loads.
@@ -44,6 +46,7 @@ pub fn load(scene: Scene, world: *World) World.Error!void {
         const e = try world.spawn();
         if (def.transform) |t| try world.setTransform(e, t);
         if (def.velocity) |v| try world.setVelocity(e, v);
+        if (def.health) |h| try world.setHealth(e, h);
     }
 }
 
@@ -113,4 +116,29 @@ test "scene: load into a world adds the right components" {
     try testing.expectEqual(@as(usize, 2), world.count());
     try testing.expectEqual(@as(usize, 1), world.velocities.count()); // only "a" moves
     try testing.expectEqual(@as(usize, 2), world.transforms.count());
+}
+
+test "scene: health round-trips through the ZON scene into a world" {
+    const src =
+        \\.{
+        \\    .name = "hp",
+        \\    .entities = .{
+        \\        .{ .name = "hero", .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } }, .health = .{ .current = 40, .max = 100 } },
+        \\        .{ .name = "prop", .transform = .{ .pos = .{ .x = 1, .y = 0, .z = 0 } } },
+        \\    },
+        \\}
+    ;
+    const scene = try parse(testing.allocator, src);
+    defer free(testing.allocator, scene);
+    try testing.expect(scene.entities[0].health != null);
+    try testing.expect(scene.entities[1].health == null); // prop has no health
+
+    var world = try toWorld(testing.allocator, scene);
+    defer world.deinit();
+    try testing.expectEqual(@as(usize, 1), world.healths.count()); // only "hero" has hp
+    // Entities are spawned in scene order into a fresh world, so "hero" is the
+    // first slot: index 0, generation 0.
+    const hero: ecs.Entity = .{ .index = 0, .generation = 0 };
+    try testing.expectEqual(@as(f32, 40), world.getHealth(hero).?.current);
+    try testing.expectEqual(@as(f32, 100), world.getHealth(hero).?.max);
 }
