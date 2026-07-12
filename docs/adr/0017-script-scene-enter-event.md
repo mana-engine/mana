@@ -1,6 +1,6 @@
 # 0017. `on_scene_enter`: a per-scene bootstrap event
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-12
 
 ## Context

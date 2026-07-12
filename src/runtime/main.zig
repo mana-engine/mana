@@ -202,6 +202,7 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
     try engine.scene.load(parsed, &sim.world);
     try loadPackageScript(io, gpa, pkg, manifest, &sim); // #51: package Lua handlers
+    sim.enterScene(parsed.name); // #54/ADR 0017: fire on_scene_enter on the first tick
     try sim.addSystem(engine.input.inputMoveSystem); // #30: held keys → velocity
     try sim.addSystem(engine.systems.movementSystem);
     try sim.addSystem(engine.systems.regenSystem);
@@ -296,6 +297,7 @@ fn runOnce(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
     try engine.scene.load(parsed, &sim.world);
     try loadPackageScript(io, gpa, pkg, manifest, &sim); // #51: package Lua handlers
+    sim.enterScene(parsed.name); // #54/ADR 0017: fire on_scene_enter on the first tick
     try sim.addSystem(engine.systems.movementSystem);
     try sim.addSystem(engine.systems.regenSystem);
     try sim.run(tick_steps);
