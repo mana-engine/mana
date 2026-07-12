@@ -178,3 +178,11 @@ ADR. Building it is a separate task that adds the ziglua dependency (ask first).
   `readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0)` for a `[:0]u8`,
   `writeFile(io, .{ .sub_path, .data })`, `deleteFile`). `std.testing.io` +
   `std.testing.tmpDir(.{})` give a real Io and temp dir for file tests.
+- **vulkan-zig on Zig 0.16:** its `master` targets Zig 0.17-dev; use the
+  maintainer's **`zig-0.16-compat`** branch (supported path, not a workaround). It
+  needs a `vk.xml` registry — depend on **Vulkan-Headers** and pass
+  `b.dependency("vulkan_headers",.{}).path("registry/vk.xml")` as the `.registry`
+  option to `b.dependency("vulkan_zig", .{...}).module("vulkan-zig")`. Both deps are
+  marked **`.lazy = true`** and only referenced under `-Denable-vulkan`, so the
+  default/CI build never fetches or compiles them. The Vulkan backend lives under
+  `src/gpu/vulkan/`, imported by `gpu.zig` only when the flag is set.

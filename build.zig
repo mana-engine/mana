@@ -60,6 +60,17 @@ pub fn build(b: *std.Build) void {
     gpu.addImport("core", core);
     gpu.addImport("build_options", build_options);
 
+    // The Vulkan backend and its bindings are only wired in when enabled. The deps
+    // are lazy, so the default/CI build neither fetches nor compiles them.
+    if (enable_vulkan) {
+        if (b.lazyDependency("vulkan_headers", .{})) |vk_headers| {
+            const registry = vk_headers.path("registry/vk.xml");
+            if (b.lazyDependency("vulkan_zig", .{ .registry = registry })) |vulkan_zig| {
+                gpu.addImport("vulkan", vulkan_zig.module("vulkan-zig"));
+            }
+        }
+    }
+
     const platform = b.createModule(.{
         .root_source_file = b.path("src/platform/platform.zig"),
         .target = target,
