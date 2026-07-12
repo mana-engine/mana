@@ -24,6 +24,7 @@ pub const world = @import("world.zig");
 pub const systems = @import("systems.zig");
 pub const command = @import("command.zig");
 pub const event = @import("event.zig");
+pub const timer = @import("timer.zig");
 pub const sim = @import("sim.zig");
 pub const scene = @import("scene.zig");
 pub const render = @import("render.zig");
@@ -38,6 +39,7 @@ pub const Transform = components.Transform;
 pub const Velocity = components.Velocity;
 pub const Health = components.Health;
 pub const Collider = components.Collider;
+pub const Timers = timer.Timers;
 
 /// Marker verifying the module is wired into the build graph and can see every port
 /// it assembles.
@@ -51,6 +53,7 @@ test {
     _ = systems;
     _ = command;
     _ = event;
+    _ = timer;
     _ = sim;
     _ = scene;
     _ = render;
