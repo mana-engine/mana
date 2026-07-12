@@ -1,6 +1,6 @@
 # 0014. Camera/projection is a configurable view; rendering stops hardcoding isometric
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-12
 
 ## Context
