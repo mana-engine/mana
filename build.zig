@@ -1,8 +1,8 @@
 //! Build graph for `mana`. This function mutates the build graph; it does not
 //! build directly. It wires the enforced module import DAG:
 //!   core → (nothing above)
-//!   data, ecs, gpu, platform, script → core
-//!   engine → core + data + ecs + gpu + platform
+//!   data, ecs, gpu, platform, physics, script → core
+//!   engine → core + data + ecs + gpu + platform + physics
 //!   runtime (exe) → engine
 //! Backend/adapter selection for the `gpu` and `platform` ports happens here at
 //! comptime via build options; both default to their stub/null adapter.
@@ -79,6 +79,13 @@ pub fn build(b: *std.Build) void {
     platform.addImport("core", core);
     platform.addImport("build_options", build_options);
 
+    const physics = b.createModule(.{
+        .root_source_file = b.path("src/physics/physics.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    physics.addImport("core", core);
+
     const script = b.createModule(.{
         .root_source_file = b.path("src/script/script.zig"),
         .target = target,
@@ -96,6 +103,7 @@ pub fn build(b: *std.Build) void {
     engine.addImport("ecs", ecs);
     engine.addImport("gpu", gpu);
     engine.addImport("platform", platform);
+    engine.addImport("physics", physics);
 
     // --- Runner executable --------------------------------------------------
     const exe = b.addExecutable(.{
@@ -123,7 +131,7 @@ pub fn build(b: *std.Build) void {
     // Zig tests one module (compilation unit) at a time, so we add a test run
     // per module. Each module's root file pulls in its sibling files' tests.
     const test_step = b.step("test", "Run all unit + integration tests");
-    const tested = [_]*std.Build.Module{ core, data, ecs, gpu, platform, script, engine };
+    const tested = [_]*std.Build.Module{ core, data, ecs, gpu, platform, physics, script, engine };
     for (tested) |m| {
         const unit = b.addTest(.{ .root_module = m });
         test_step.dependOn(&b.addRunArtifact(unit).step);

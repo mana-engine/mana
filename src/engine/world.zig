@@ -12,6 +12,7 @@ const components = @import("components.zig");
 const Transform = components.Transform;
 const Velocity = components.Velocity;
 const Health = components.Health;
+const Collider = components.Collider;
 const Entity = ecs.Entity;
 const Allocator = std.mem.Allocator;
 
@@ -24,6 +25,7 @@ pub const World = struct {
     transforms: ecs.SparseSet(Transform) = .{},
     velocities: ecs.SparseSet(Velocity) = .{},
     healths: ecs.SparseSet(Health) = .{},
+    colliders: ecs.SparseSet(Collider) = .{},
 
     /// An empty world. `gpa` owns all component storage; call `deinit`.
     pub fn init(gpa: Allocator) World {
@@ -34,6 +36,7 @@ pub const World = struct {
         self.transforms.deinit(self.gpa);
         self.velocities.deinit(self.gpa);
         self.healths.deinit(self.gpa);
+        self.colliders.deinit(self.gpa);
         self.entities.deinit(self.gpa);
         self.* = undefined;
     }
@@ -49,12 +52,20 @@ pub const World = struct {
         self.transforms.remove(e.index);
         self.velocities.remove(e.index);
         self.healths.remove(e.index);
+        self.colliders.remove(e.index);
         try self.entities.free_entity(self.gpa, e);
     }
 
     /// True if `e` is a live handle.
     pub fn isValid(self: *const World, e: Entity) bool {
         return self.entities.isValid(e);
+    }
+
+    /// The live handle occupying slot `index` (with its current generation). Only
+    /// meaningful for an index known to be live — e.g. one yielded by iterating a
+    /// component set, which is how the collision system recovers full handles.
+    pub fn entityAt(self: *const World, index: u32) Entity {
+        return self.entities.at(index);
     }
 
     /// Number of live entities.
@@ -96,9 +107,20 @@ pub const World = struct {
         return self.healths.get(e.index);
     }
 
+    pub fn setCollider(self: *World, e: Entity, c: Collider) Error!void {
+        if (!self.entities.isValid(e)) return error.InvalidEntity;
+        try self.colliders.put(self.gpa, e.index, c);
+    }
+
+    pub fn getCollider(self: *World, e: Entity) ?*Collider {
+        if (!self.entities.isValid(e)) return null;
+        return self.colliders.get(e.index);
+    }
+
     /// Stable hash of observable state (entity transforms and healths). Same state ⇒
     /// same hash; this is the determinism fingerprint checked in CI. Covering the
-    /// health column keeps the regen system's output inside the guarantee.
+    /// health column keeps the regen system's output inside the guarantee. Colliders
+    /// are read-only sim state (collision only emits events) and stay out of the hash.
     pub fn stateHash(self: *World) u64 {
         var h = std.hash.Wyhash.init(0);
         h.update(std.mem.sliceAsBytes(self.transforms.entities()));

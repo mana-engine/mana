@@ -14,6 +14,10 @@ const Allocator = std.mem.Allocator;
 pub const Event = union(enum) {
     spawned: Entity,
     despawned: Entity,
+    /// Two colliders were found overlapping this tick by the collision system
+    /// (physics, ADR 0008). `a`/`b` are the involved entities; the ordering is
+    /// deterministic for a given world state.
+    collision_begin: struct { a: Entity, b: Entity },
 };
 
 /// FIFO of events for one tick. Cleared after dispatch.
