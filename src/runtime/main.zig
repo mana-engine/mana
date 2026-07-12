@@ -105,7 +105,7 @@ fn runRender(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, path: []c
         const quads = try engine.render.project(gpa, &world, view, &engine.render.default_palette);
         defer gpa.free(quads);
 
-        const pixels = try engine.gpu.vk.renderScene(gpa, view.width, view.height, quads, .{ 0.09, 0.10, 0.14, 1.0 });
+        const pixels = try engine.gpu.renderScene(gpa, view.width, view.height, quads, .{ 0.09, 0.10, 0.14, 1.0 });
         defer gpa.free(pixels);
         const bytes = try data.png.encode(gpa, view.width, view.height, pixels);
         defer gpa.free(bytes);
