@@ -1,0 +1,16 @@
+.{
+    .name = "snake",
+    .version = "0.0.1",
+    .entry_scene = "scenes/board.zon",
+    .scenes = .{
+        "scenes/board.zon",
+    },
+    .prototypes = "prototypes.zon",
+    .script = "rules.lua",
+    // Requires the mana v1 scripting API (ADR 0003). A build without -Denable-lua
+    // is refused rather than running scriptless.
+    .script_api = 1,
+    // Top-down grid — the projection ADR 0014 added so a grid game is not forced
+    // into an isometric diamond. (Orthographic is the default; stated for clarity.)
+    .projection = .{ .orthographic = .{ .scale = 24 } },
+}

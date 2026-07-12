@@ -1,0 +1,12 @@
+// The Snake board's initial scene. Deliberately minimal: the snake head, body, and
+// food are all spawned by rules.lua at start (via mana.spawn) so growth and respawn
+// go through the one code path. An empty entity list is a valid scene.
+//
+// NOTE (discovered gap): scene entities are loaded with world.spawn directly, which
+// emits no `spawned` event, so a scene-declared head would never reach the script's
+// on_spawn. The snake therefore needs a *start* hook to bootstrap — see rules.lua and
+// the filed gap issues.
+.{
+    .name = "board",
+    .entities = .{},
+}
