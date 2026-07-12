@@ -778,10 +778,14 @@ pub const Swapchain = struct {
     /// the GPU objects. Waits for the device to idle first so nothing is in use.
     pub fn deinit(self: *Swapchain, dev: *Device) void {
         const d = dev.device();
-        // Proof: creation and every wait path already synchronised the queue, but a
-        // caller may deinit right after `acquire`; idling covers that. Ignoring the
-        // wait result is safe here — we are tearing everything down regardless.
-        d.deviceWaitIdle() catch {};
+        // Idle so nothing is in use before destroy (a caller may deinit right after
+        // `acquire`). Proof for the discard: on teardown a failed idle-wait is
+        // unrecoverable and changes nothing we release — the same objects are destroyed
+        // regardless — and `deinit` has no error channel, so the error is intentionally
+        // dropped.
+        d.deviceWaitIdle() catch |err| {
+            _ = err; // intentionally dropped: unrecoverable during teardown (see above)
+        };
         d.destroyFence(self.acquire_fence, null);
         destroyChain(dev, self.images, self.handle);
         dev.instanceProxy().destroySurfaceKHR(self.surface, null);
