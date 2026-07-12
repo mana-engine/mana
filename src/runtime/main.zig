@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const tracy = core.tracy;
 const data = @import("data");
 const engine = @import("engine");
 const manifest_mod = @import("manifest.zig");
@@ -25,7 +26,11 @@ const watch_poll_ms: i64 = 100;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const gpa = init.gpa;
+    // Route the engine allocator through Tracy's memory profiler (ADR 0023). Under a
+    // default build this hands back `init.gpa` unchanged (zero overhead); under
+    // `-Denable-tracy` every alloc/free is reported. `tracing` outlives the whole run.
+    var tracing = tracy.TracingAllocator.init(init.gpa);
+    const gpa = tracing.allocator();
     const arena = init.arena.allocator();
 
     var stdout_buf: [512]u8 = undefined;
@@ -243,7 +248,14 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     var title_buf: [128]u8 = undefined;
 
     while (!window.shouldClose()) {
-        sim.setInput(window.poll());
+        // One Tracy frame boundary per loop iteration (ADR 0023), marked first so
+        // every iteration — including the out-of-date `continue` below — counts.
+        tracy.frameMark();
+        {
+            const z = tracy.zone(@src(), "poll");
+            defer z.end();
+            sim.setInput(window.poll());
+        }
 
         // Advance the sim by whole fixed steps for the real time elapsed since the last
         // frame (`.awake` = the monotonic clock). The step count is deterministic per
@@ -251,22 +263,42 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
         const now = Io.Timestamp.now(io, .awake);
         const elapsed_s: f32 = @as(f32, @floatFromInt(prev.durationTo(now).nanoseconds)) / std.time.ns_per_s;
         prev = now;
-        for (0..ts.advance(elapsed_s)) |_| try sim.tick();
+        const steps = ts.advance(elapsed_s);
+        {
+            const z = tracy.zone(@src(), "tick");
+            defer z.end();
+            for (0..steps) |_| try sim.tick();
+        }
+
+        // Plots (ADR 0023): live app-state time series. fps guards a zero-length frame;
+        // tick_rate is steps advanced this frame; entities is the live world count.
+        // Script cost is surfaced via the `script.*`/`sim.dispatch` zones instead.
+        if (elapsed_s > 0) tracy.plot("fps", 1.0 / @as(f64, elapsed_s));
+        tracy.plot("tick_rate", @floatFromInt(steps));
+        tracy.plot("entities", @floatFromInt(sim.world.count()));
 
         const frame = try swapchain.acquire(&dev);
         if (frame.status == .out_of_date) {
             try resizeToWindow(&swapchain, &dev, &window);
             continue;
         }
-        _ = frame_arena.reset(.retain_capacity);
-        const fa = frame_arena.allocator();
-        const size = window.size();
-        const view: engine.render.View = .{ .width = size[0], .height = size[1], .projection = manifest.projection };
-        const quads = try engine.render.project(fa, &sim.world, view, &engine.render.default_palette);
-        try engine.gpu.renderQuads(fa, &dev, &pipeline, frame.target, quads, clear);
-        switch (try swapchain.present(&dev, frame)) {
-            .out_of_date, .suboptimal => try resizeToWindow(&swapchain, &dev, &window),
-            .optimal => {},
+        {
+            const z = tracy.zone(@src(), "render");
+            defer z.end();
+            _ = frame_arena.reset(.retain_capacity);
+            const fa = frame_arena.allocator();
+            const size = window.size();
+            const view: engine.render.View = .{ .width = size[0], .height = size[1], .projection = manifest.projection };
+            const quads = try engine.render.project(fa, &sim.world, view, &engine.render.default_palette);
+            try engine.gpu.renderQuads(fa, &dev, &pipeline, frame.target, quads, clear);
+        }
+        {
+            const z = tracy.zone(@src(), "present");
+            defer z.end();
+            switch (try swapchain.present(&dev, frame)) {
+                .out_of_date, .suboptimal => try resizeToWindow(&swapchain, &dev, &window),
+                .optimal => {},
+            }
         }
 
         frames += 1;

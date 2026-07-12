@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const tracy = core.tracy;
 const script = @import("script");
 const ecs = @import("ecs");
 const event = @import("event.zig");
@@ -157,6 +158,8 @@ const LuaRuntime = struct {
         const host = s.host orelse return;
         const host_ctx: *HostCtx = @ptrCast(@alignCast(host.ctx));
 
+        const z = tracy.zone(@src(), "script.timer");
+        defer z.end();
         const mark = host_ctx.commands.mark();
         const outcome = s.invokeTimerRef(rec.ref);
         if (outcome == .errored) host_ctx.commands.rollback(host_ctx.world, mark) catch {
@@ -344,6 +347,8 @@ const LuaRuntime = struct {
         };
         if (self.isDisabled(key)) return;
 
+        const z = tracy.zone(@src(), "script.dispatch");
+        defer z.end();
         var host_ctx: HostCtx = .init(dc, self);
         s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
         defer s.setHost(null); // the borrowed ctx must not outlive this dispatch
@@ -375,6 +380,8 @@ const LuaRuntime = struct {
         const s = if (self.state) |*st| st else return;
         if (self.isDisabled(.on_scene_enter)) return;
 
+        const z = tracy.zone(@src(), "script.scene_enter");
+        defer z.end();
         var host_ctx: HostCtx = .init(dc, self);
         s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
         defer s.setHost(null);
@@ -395,6 +402,8 @@ const LuaRuntime = struct {
         const s = if (self.state) |*st| st else return;
         if (self.isDisabled(.on_key)) return;
 
+        const z = tracy.zone(@src(), "script.on_key");
+        defer z.end();
         var host_ctx: HostCtx = .init(dc, self);
         s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
         defer s.setHost(null);
