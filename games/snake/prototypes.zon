@@ -1,0 +1,11 @@
+// Entity prototypes (ADR 0016) mana.spawn instantiates. Genre lives here in content,
+// never in src/. Positions are supplied by the spawn call; templates carry only the
+// non-spatial component defaults (here, none beyond an implicit transform).
+.{
+    .prototypes = .{
+        // One body cell of the snake. Spawned per growth step at the tail cell.
+        .{ .name = "segment" },
+        // The pickup. Spawned once at start and re-spawned on each eat.
+        .{ .name = "food" },
+    },
+}
