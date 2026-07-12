@@ -1,0 +1,9 @@
+.{
+    .name = "archive",
+    .entities = .{
+        .{ .name = "save_slot_1", .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } }, .health = .{ .current = 35, .max = 100 } },
+        .{ .name = "save_slot_2", .transform = .{ .pos = .{ .x = 1, .y = 0, .z = 0 } }, .health = .{ .current = 100, .max = 100 } },
+        .{ .name = "save_slot_3", .transform = .{ .pos = .{ .x = 2, .y = 0, .z = 0 } } },
+        .{ .name = "archive_cursor", .transform = .{ .pos = .{ .x = 0, .y = -1, .z = 0 } }, .velocity = .{ .v = .{ .x = 0.5, .y = 0, .z = 0 } } },
+    },
+}
