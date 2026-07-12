@@ -33,16 +33,18 @@ test "lua 5.4: evaluating `return 1 + 1` yields 2" {
 
 // --- Sandboxing (ADR 0003 §7, §8) -------------------------------------------
 
-/// Base-library function names exposed inside a sandboxed script `_ENV` (ADR
-/// 0003 §7). Deliberately excludes `load`/`loadfile`/`dofile` (arbitrary code
-/// loading), `collectgarbage`, raw `print` (see `sandboxPrint` below), and
-/// `_G`/`_VERSION` (either would hand back the real, unsandboxed global table).
+/// Base-library function names exposed *by reference* inside a sandboxed script
+/// `_ENV` (ADR 0003 §7). Deliberately excludes `load`/`loadfile`/`dofile`
+/// (arbitrary code loading), `collectgarbage`, raw `print` (see `sandboxPrint`),
+/// and `_G`/`_VERSION` (either would hand back the real, unsandboxed global
+/// table). `getmetatable` is *not* here: it is installed as a wrapper
+/// (`sandboxGetmetatable`) that denies the shared string metatable, so it must
+/// not also be copied verbatim.
 const sandbox_base_fns = [_][:0]const u8{
-    "pairs",        "ipairs",   "next",     "select",
-    "type",         "tostring", "tonumber", "assert",
-    "error",        "pcall",    "xpcall",   "setmetatable",
-    "getmetatable", "rawget",   "rawset",   "rawequal",
-    "rawlen",
+    "pairs",  "ipairs",   "next",     "select",
+    "type",   "tostring", "tonumber", "assert",
+    "error",  "pcall",    "xpcall",   "setmetatable",
+    "rawget", "rawset",   "rawequal", "rawlen",
 };
 
 /// Whole library tables exposed in a sandboxed `_ENV` (as a per-`_ENV` copy, see
@@ -136,6 +138,14 @@ pub const State = struct {
 
         l.pushFunction(zlua.wrap(sandboxPrint));
         l.setField(-2, "print");
+
+        // `getmetatable` wrapped to deny the shared string metatable (§8; see
+        // `sandboxGetmetatable`). The real `getmetatable` is captured as the
+        // closure's sole upvalue so tables/userdata keep full behaviour.
+        // Proof: `getmetatable` is a base function `openBase` installed in `init`.
+        std.debug.assert(l.getGlobal("getmetatable") == .function);
+        l.pushClosure(zlua.wrap(sandboxGetmetatable), 1); // consumes the upvalue
+        l.setField(-2, "getmetatable");
     }
 
     /// Push a fresh shallow copy of the library table currently bound to global
@@ -205,6 +215,36 @@ fn sandboxPrint(l: *Lua) !i32 {
     return 0;
 }
 
+/// The sandbox's `getmetatable`, installed as a closure whose sole upvalue is
+/// the real `getmetatable`. It returns `nil` for any *string* argument, and
+/// delegates everything else to the real function.
+///
+/// Why strings are special (ADR 0003 §8 isolation): `getmetatable("")` yields
+/// the single interpreter-wide string metatable, whose `__index` is the master
+/// `string` table that backs both method-call dispatch (`("x"):upper()`) and
+/// every script's per-`_ENV` copy. Since `rawset` is allowlisted, a script
+/// handed that table could `rawset(getmetatable("").__index, "upper", …)` and
+/// permanently poison `string.*` for every sibling script on the shared
+/// `lua_State`. Denying the reference is the load-bearing invariant; with no
+/// script-reachable handle to that table, neither assignment nor `rawset` can
+/// reach it, while `("x"):upper()` keeps resolving through the untouched master.
+/// `getmetatable` stays fully functional for tables/userdata, so §7 holds.
+fn sandboxGetmetatable(l: *Lua) i32 {
+    // No argument: mirror a nil result rather than indexing an invalid slot.
+    if (l.getTop() == 0) {
+        l.pushNil();
+        return 1;
+    }
+    if (l.typeOf(1) == .string) {
+        l.pushNil();
+        return 1;
+    }
+    l.pushValue(Lua.upvalueIndex(1)); // the real getmetatable
+    l.pushValue(1); // its argument
+    l.call(.{ .args = 1, .results = 1 }); // preserves __metatable protection etc.
+    return 1;
+}
+
 test "sandbox: pushSandboxEnv builds exactly the allowlisted table shape" {
     var state = try State.init(std.testing.allocator);
     defer state.deinit();
@@ -223,6 +263,9 @@ test "sandbox: pushSandboxEnv builds exactly the allowlisted table shape" {
     try std.testing.expectEqual(zlua.LuaType.table, state.lua.getField(env, "math"));
     state.lua.pop(1);
     try std.testing.expectEqual(zlua.LuaType.function, state.lua.getField(env, "print"));
+    state.lua.pop(1);
+    // `getmetatable` is present as the string-denying wrapper (a function).
+    try std.testing.expectEqual(zlua.LuaType.function, state.lua.getField(env, "getmetatable"));
     state.lua.pop(1);
 
     // Nothing else leaks in: no `os`/`io`/`debug`/`_G`/raw `load`/`print` aliasing.
@@ -351,6 +394,57 @@ test "sandbox: one script cannot corrupt a stdlib function for a sibling in the 
     try state.loadSandboxed("return string.upper('ok'), string.lower('OK')");
     try state.lua.protectedCall(.{ .results = 2 });
     try std.testing.expectEqualStrings("ok", try state.lua.toString(-1));
+    try std.testing.expectEqualStrings("OK", try state.lua.toString(-2));
+    state.lua.pop(2);
+}
+
+test "sandbox: getmetatable on a string returns nil (string metatable denied)" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    try state.loadSandboxed("return getmetatable(''), getmetatable('abc')");
+    try state.lua.protectedCall(.{ .results = 2 });
+    try std.testing.expectEqual(zlua.LuaType.nil, state.lua.typeOf(-1));
+    try std.testing.expectEqual(zlua.LuaType.nil, state.lua.typeOf(-2));
+    state.lua.pop(2);
+}
+
+test "sandbox: getmetatable still works for tables (ADR §7 capability intact)" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    // Set a metatable on a fresh table, then confirm getmetatable returns the
+    // very same table (identity), proving the delegation path is faithful.
+    try state.loadSandboxed(
+        \\local mt = {}
+        \\local t = setmetatable({}, mt)
+        \\return getmetatable(t) == mt
+    );
+    try state.lua.protectedCall(.{ .results = 1 });
+    try std.testing.expect(state.lua.toBoolean(-1));
+    state.lua.pop(1);
+}
+
+test "sandbox: the string metatable cannot be reached to corrupt a sibling" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    // Script A tries to reach the master string table through the string
+    // metatable, via both plain assignment and rawset. Both attempts index a
+    // nil `getmetatable("")`, so each raises rather than mutating anything.
+    try state.loadSandboxed("getmetatable('').__index.upper = function() return 'PWNED' end");
+    try std.testing.expectError(error.LuaRuntime, state.lua.protectedCall(.{ .results = 0 }));
+    state.lua.pop(1); // error object
+
+    try state.loadSandboxed("rawset(getmetatable('').__index, 'upper', function() return 'PWNED' end)");
+    try std.testing.expectError(error.LuaRuntime, state.lua.protectedCall(.{ .results = 0 }));
+    state.lua.pop(1);
+
+    // Sibling B on the SAME State still sees the real `string.upper` via BOTH
+    // library access and method-call dispatch.
+    try state.loadSandboxed("return string.upper('ok'), ('ok'):upper()");
+    try state.lua.protectedCall(.{ .results = 2 });
+    try std.testing.expectEqualStrings("OK", try state.lua.toString(-1));
     try std.testing.expectEqualStrings("OK", try state.lua.toString(-2));
     state.lua.pop(2);
 }
