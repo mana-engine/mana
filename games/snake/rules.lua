@@ -100,10 +100,10 @@ return {
         start()
     end,
 
-    -- GAP: no script input. Arrow keys reach native systems via Context.input, but
-    -- there is no input event or mana.input for a script, so the heading can never
-    -- change. A grid game is unplayable without directional input in Lua.
-    on_key = function(self, ev)
+    -- Directional input (ADR 0021): on_key fires on each key edge; turn on a press,
+    -- and never reverse straight back onto the neck.
+    on_key = function(ev)
+        if not ev.pressed then return end
         if ev.key == "up" and dir.y == 0 then pending = { x = 0, y = -1 } end
         if ev.key == "down" and dir.y == 0 then pending = { x = 0, y = 1 } end
         if ev.key == "left" and dir.x == 0 then pending = { x = -1, y = 0 } end

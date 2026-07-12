@@ -350,6 +350,21 @@ pub const State = struct {
         return self.invokeHandler(2);
     }
 
+    /// Dispatch a keyboard edge `on_key(ev)` (ADR 0021) where `ev = { key, pressed }`.
+    /// `key` is the neutral key-name string (no `platform` type crosses down); no
+    /// `self` (input is global, like `on_scene_enter`). A missing key is a no-op; a
+    /// handler error is caught and reported (§9). `key_name` is borrowed for the call.
+    pub fn dispatchKey(self: *State, key_name: []const u8, pressed: bool) DispatchOutcome {
+        if (!self.pushHandler("on_key")) return .no_handler;
+        const l = self.lua;
+        l.newTable(); // arg 1: ev (no self — global input)
+        _ = l.pushString(key_name);
+        l.setField(-2, "key");
+        l.pushBoolean(pressed);
+        l.setField(-2, "pressed");
+        return self.invokeHandler(1);
+    }
+
     /// Invoke a Lua timer callback by its registry `ref` (ADR 0019 `mana.after`/
     /// `every`). Pushes the referenced function and calls it in protected mode with
     /// no arguments; a throwing callback is caught and reported via the return value
