@@ -166,13 +166,19 @@ pub const Sim = struct {
             };
         }
         try self.commands.flush(self.gpa, &self.world, &self.events);
+        // Sim time exposed to script `mana.now` this dispatch (ADR 0003 §2 / ADR
+        // 0015): tick-derived seconds elapsed at the start of this tick, so it is
+        // deterministic and never reads a wall clock.
+        const now_seconds: f64 = @as(f64, @floatFromInt(self.tick_count)) * @as(f64, self.dt);
         // TODO(tracy): bound all script dispatch this frame in one Tracy zone with
         // the ADR 0003 §6 per-frame budget once the Tracy port lands.
         for (self.events.items()) |ev| {
             for (self.handlers.items) |handler| handler(&self.world, ev);
             // Script dispatch (ADR 0003 §1/§3). A comptime no-op — zero cost, sim
             // bit-identical — unless `-Denable-lua`; catches handler errors (§9).
-            self.script_runtime.dispatch(ev);
+            // The live world + `now` back the ADR 0015 host seam for the handler's
+            // `mana` reads.
+            self.script_runtime.dispatch(ev, &self.world, now_seconds);
         }
         self.events.clear();
         try self.timers.advance(self.gpa, &self.world, self.dt);
@@ -375,4 +381,41 @@ test "sim: a spawned entity fires the Lua on_spawn handler (requires -Denable-lu
 
     try sim.tick(); // one-shot: no further spawn, so no further on_spawn
     try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("spawns").?);
+}
+
+test "sim: on_spawn reads its entity's position and sim time via the mana host seam (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+    // Spawn one entity with a known transform on tick 3 (of a dt=1s sim), so the
+    // handler observes position (7,0,0), a valid handle, and now == 3 — the latter
+    // distinct from the no-host fallback (0), proving the engine really installed
+    // the ADR 0015 host around dispatch.
+    const Spawner = struct {
+        var did: bool = false;
+        fn system(ctx: *Context) SystemError!void {
+            if (!did and ctx.tick == 3) {
+                _ = try ctx.commands.spawn(ctx.gpa, ctx.world, .{ .pos = .{ .x = 7, .y = 0, .z = 0 } }, null);
+                did = true;
+            }
+        }
+    };
+    Spawner.did = false;
+
+    var sim = Sim.init(testing.allocator, 1.0); // dt = 1s → now is a whole number
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = { px = -1, valid = -1, seen_now = -1 }
+        \\function t.on_spawn(self)
+        \\  local x, y, z = mana.position(self)
+        \\  t.px = x
+        \\  t.valid = mana.is_valid(self) and 1 or 0
+        \\  t.seen_now = mana.now()
+        \\end
+        \\return t
+    );
+    try sim.addSystem(Spawner.system);
+
+    try sim.run(4); // ticks 0..3; the tick-3 spawn flushes → on_spawn reads via mana
+    try testing.expectEqual(@as(i64, 7), sim.script_runtime.handlerFieldInt("px").?);
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("valid").?);
+    try testing.expectEqual(@as(i64, 3), sim.script_runtime.handlerFieldInt("seen_now").?);
 }

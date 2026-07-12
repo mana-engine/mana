@@ -67,12 +67,18 @@ deferred (see the last bullet below).
   log alone. Returning the outcome lets that fragile path be asserted with no
   `.err` emission; `lastError()` carries the message across the unwind for the
   engine to log. Same reason `mana.zig` never invokes its `.err` branch in a test.
-- **Most of ADR 0003 §2's v1 surface needs a live `Sim`/`World` `script` cannot
-  reach yet** (`position`, `set_velocity`, `get`, `set`, `spawn`, `despawn`,
-  `after`, `every`, `cancel`, `now`, `random`, `random_int`) — component
-  storage, the sim clock, the sim's seeded `core.Rng`, a spawn/despawn command
-  buffer, and the timer wheel are all engine-owned, and nothing wires a
-  `script.State` into `Sim` yet. Do not add fake/stub implementations for these;
-  an absent `mana` key is the honest, checkable signal, exactly like a missing
-  event-handler key meaning "no handler" elsewhere in the ADR. That wiring is
-  its own future task.
+- **The live-`Sim` `mana` surface reaches the engine through the host seam
+  (ADR 0015, `host.zig`).** `script` still imports `core` only; it cannot name
+  `World`/`CommandBuffer`, so it declares a `core`-typed `Host` (opaque ctx +
+  fn-pointer vtable) that `engine` fills for the duration of each dispatch
+  (`script_runtime.zig` builds a `HostCtx` over the live world + tick-derived
+  `now` and calls `State.setHost` around dispatch; the `mana` closures capture a
+  pointer to the `State`'s `host` slot). **Wired so far (issue #5, read slice):**
+  `position`, `now`, and the authoritative `is_valid` (host when a Sim is
+  dispatching, `handle.Registry` fallback otherwise). **Still deferred** —
+  add as additive vtable entries, do NOT stub: deferred mutations
+  (`set_velocity`, `set`, `spawn`, `despawn`) through the command buffer with
+  ADR 0003 §9 per-handler rollback and OOM-vs-content-error handling; `get`
+  (named data components — needs a data-component store); `random`/`random_int`
+  (needs a seeded `core.Rng` on `Sim`); `after`/`every`/`cancel` (timer wheel).
+  An absent `mana` key remains the honest signal that a member is not yet wired.

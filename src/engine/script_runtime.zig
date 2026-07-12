@@ -9,9 +9,11 @@
 //! `script`), so the "nothing above `script` sees a Lua type" invariant holds.
 
 const std = @import("std");
+const core = @import("core");
 const script = @import("script");
 const ecs = @import("ecs");
 const event = @import("event.zig");
+const World = @import("world.zig").World;
 
 const Entity = ecs.Entity;
 const Allocator = std.mem.Allocator;
@@ -83,12 +85,42 @@ const LuaRuntime = struct {
         self.breakers = .initFill(.{});
     }
 
-    /// Forward one Sim event to the matching handler-table key (ADR 0003 §3). A
-    /// no-op if no script is loaded, the key is absent, or the key's circuit
-    /// breaker has disabled it (§9); a handler error is caught and logged, never
-    /// propagated.
-    pub fn dispatch(self: *LuaRuntime, ev: event.Event) void {
+    /// Engine-side backing for the read-only host seam (ADR 0015): the concrete
+    /// vtable the `mana` accessors call through, over the live `world` and this
+    /// tick's `now_seconds`. Lives inside `LuaRuntime` (only instantiated under
+    /// `-Denable-lua`), so it names `script.lua.Host` only where that type exists.
+    /// Reads resolve immediately; a stale handle degrades to null/false, never a
+    /// deref of freed storage.
+    const HostCtx = struct {
+        world: *World,
+        now_seconds: f64,
+
+        fn cast(ctx: *anyopaque) *HostCtx {
+            return @ptrCast(@alignCast(ctx));
+        }
+        fn isValid(ctx: *anyopaque, handle: u64) bool {
+            return cast(ctx).world.isValid(Entity.unpack(handle));
+        }
+        fn position(ctx: *anyopaque, handle: u64) ?core.Vec3 {
+            const t = cast(ctx).world.getTransform(Entity.unpack(handle)) orelse return null;
+            return t.pos;
+        }
+        fn now(ctx: *anyopaque) f64 {
+            return cast(ctx).now_seconds;
+        }
+        const vtable: script.lua.Host.VTable = .{ .is_valid = isValid, .position = position, .now = now };
+    };
+
+    /// Forward one Sim event to the matching handler-table key (ADR 0003 §3),
+    /// installing the live host seam (ADR 0015) for the duration of the call so the
+    /// handler's `mana` reads see `world` at `now_seconds`. A no-op if no script is
+    /// loaded, the key is absent, or the key's circuit breaker has disabled it (§9);
+    /// a handler error is caught and logged, never propagated.
+    pub fn dispatch(self: *LuaRuntime, ev: event.Event, world: *World, now_seconds: f64) void {
         const s = if (self.state) |*st| st else return;
+        var host_ctx: HostCtx = .{ .world = world, .now_seconds = now_seconds };
+        s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
+        defer s.setHost(null); // the borrowed ctx must not outlive this dispatch
         switch (ev) {
             .spawned => |e| {
                 if (self.isDisabled(.on_spawn)) return;
@@ -202,9 +234,11 @@ const NoopRuntime = struct {
         _ = source;
     }
 
-    pub fn dispatch(self: *NoopRuntime, ev: event.Event) void {
+    pub fn dispatch(self: *NoopRuntime, ev: event.Event, world: *World, now_seconds: f64) void {
         _ = self;
         _ = ev;
+        _ = world;
+        _ = now_seconds;
     }
 
     pub fn handlerFieldInt(self: *NoopRuntime, key: [:0]const u8) ?i64 {
@@ -244,7 +278,9 @@ test "circuit breaker: a handler disabled after breaker_threshold consecutive er
 
     // With `on_spawn` disabled, `dispatch` must skip the (otherwise working)
     // handler entirely: the spawn counter stays at 0, proving it never ran.
-    rt.dispatch(.{ .spawned = .{ .index = 1, .generation = 0 } });
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+    rt.dispatch(.{ .spawned = .{ .index = 1, .generation = 0 } }, &world, 0);
     try std.testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("spawns").?);
 }
 
@@ -264,10 +300,12 @@ test "circuit breaker: disabling one handler key leaves a different key unaffect
     try std.testing.expect(!rt.isDisabled(.on_collision_begin));
 
     // The healthy on_collision_begin handler still dispatches normally.
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
     rt.dispatch(.{ .collision_begin = .{
         .a = .{ .index = 1, .generation = 0 },
         .b = .{ .index = 2, .generation = 0 },
-    } });
+    } }, &world, 0);
     try std.testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("collisions").?);
 }
 

@@ -19,6 +19,10 @@ const mana = @import("mana.zig");
 /// The Lua binding type, re-exported so callers need not import `zlua` directly.
 pub const Lua = zlua.Lua;
 
+/// The host seam type (ADR 0015), re-exported so the engine can build a `Host`
+/// (`script.lua.Host`) and hand it to `State.setHost` without importing `host.zig`.
+pub const Host = mana.Host;
+
 test {
     // `script.zig`'s `if (build_options.enable_lua) @import("lua.zig")` does not
     // pull a comptime-conditionally-imported file's tests into the test binary
@@ -83,13 +87,19 @@ const sandbox_math_excluded = [_][:0]const u8{ "random", "randomseed" };
 /// their real `_G` (see the isolation tests below).
 pub const State = struct {
     lua: *Lua,
-    /// This State's own live-entity generation table, backing the `mana`
-    /// table's `is_valid` (ADR 0003 §2, §4; see `mana.zig`). Starts empty; a
-    /// later engine → script wiring task will keep it in sync with real
-    /// spawns/despawns. Address must stay stable for as long as any script
-    /// `_ENV` built from this `State` exists — `pushManaTable` captures a
-    /// pointer to it.
+    /// This State's own live-entity generation table, the `is_valid` fallback used
+    /// when no `Host` is installed (ADR 0003 §2, §4; see `mana.zig`). Address must
+    /// stay stable for as long as any script `_ENV` built from this `State` exists —
+    /// `pushManaTable` captures a pointer to it.
     entities: mana.Registry = .{},
+
+    /// The live-Sim host seam (ADR 0015), or null when no Sim is dispatching. The
+    /// engine sets this via `setHost` immediately before invoking a handler and
+    /// clears it after, so the `mana` accessors (`position`, `now`, and the
+    /// authoritative `is_valid`) reach the live world only during a dispatch.
+    /// `pushManaTable` captures a pointer to this slot; its address must stay stable
+    /// for the `State`'s lifetime (same requirement as `entities`).
+    host: ?mana.Host = null,
 
     /// Registry reference (`luaL_ref`) to this Sim's single loaded handler table
     /// (ADR 0003 §1), or null before `loadHandlerTable` runs. One table per
@@ -190,8 +200,16 @@ pub const State = struct {
         l.pushClosure(zlua.wrap(sandboxGetmetatable), 1); // consumes the upvalue
         l.setField(-2, "getmetatable");
 
-        mana.pushManaTable(l, &self.entities);
+        mana.pushManaTable(l, &self.entities, &self.host);
         l.setField(-2, "mana");
+    }
+
+    /// Install (or clear, with `null`) the live-Sim host seam (ADR 0015) the `mana`
+    /// accessors call through. The engine sets a live `Host` around each event
+    /// dispatch and clears it after, so a `mana` read reaches the world only while a
+    /// handler is running. Cheap: a single optional assignment.
+    pub fn setHost(self: *State, h: ?mana.Host) void {
+        self.host = h;
     }
 
     /// Push a fresh shallow copy of the library table currently bound to global
