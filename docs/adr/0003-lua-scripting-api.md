@@ -158,8 +158,16 @@ with dangerous bits removed. `_ENV` contains only:
   `tostring`, `tonumber`, `assert`, `error`, `pcall`, `xpcall`, `setmetatable`,
   `getmetatable`, `rawget`, `rawset`, `rawequal`, `rawlen`, `#`/operators. **Not**
   `load`/`loadfile`/`dofile` (arbitrary code), `collectgarbage`, or raw `print`
-  (`print` is aliased to `mana.log(.info, …)`).
-- `string`, `table`, `coroutine`, `utf8` — safe and deterministic.
+  (`print` is aliased to `mana.log(.info, …)`). The sandbox's `getmetatable`
+  intentionally returns `nil` for **string** arguments: the primitive string
+  metatable is shared process-wide and its `__index` is the master `string`
+  table, so exposing it would let one script `rawset` into it and corrupt
+  `string.*` for every sibling on the same `lua_State`, breaking the §8
+  isolation guarantee. `getmetatable` remains fully functional for tables and
+  userdata.
+- `string`, `table`, `coroutine`, `utf8` — safe and deterministic. Each script
+  receives its **own copy** of these library tables (and of `math`) in its
+  `_ENV`, so one script mutating a library entry cannot affect a sibling (§8).
 - `math` **minus** `random`/`randomseed` (those are nondeterministic global state;
   use `mana.random`). Transcendental libm results are the sim's determinism
   responsibility, not the sandbox's — scripts make discrete decisions, not hot-path
