@@ -483,6 +483,66 @@ pub const Device = struct {
         try d.queueSubmit(self.queue, &.{info}, .null_handle);
         try d.queueWaitIdle(self.queue);
     }
+
+    /// Create a presentation swapchain over `desc.surface` (ADR 0012). Deferred: the
+    /// real `VkSurfaceKHR`/`VkSwapchainKHR` bring-up (SDL_Vulkan_CreateSurface, image
+    /// acquisition, present queue) lands with the supervised SDL3 windowing lane, so
+    /// this backend only pins the interface today. Errors: `error.NotImplemented`.
+    pub fn createSwapchain(self: *Device, desc: port.SwapchainDesc) !Swapchain {
+        _ = self;
+        _ = desc;
+        return error.NotImplemented;
+    }
+};
+
+/// One acquired swapchain image for the frame being rendered (ADR 0012). Method
+/// shapes mirror the null backend so a future present driver is backend-agnostic.
+pub const Frame = struct {
+    /// The swapchain image to render into this frame.
+    target: *Texture,
+    /// Index of the acquired image in the swapchain.
+    index: u32,
+    /// Whether the acquired image is optimal for the surface.
+    status: port.AcquireStatus,
+};
+
+/// A Vulkan presentation swapchain (`VkSwapchainKHR` over a `VkSurfaceKHR`). Deferred:
+/// the real acquire/present/resize path is the supervised SDL3 windowing lane (ADR
+/// 0012); this backend pins the interface so the shared surface stays in lockstep and
+/// the flagged build compiles. Every method is currently `error.NotImplemented`.
+pub const Swapchain = struct {
+    /// Destroy the swapchain and surface. No-op until the real path lands.
+    pub fn deinit(self: *Swapchain, dev: *Device) void {
+        _ = self;
+        _ = dev;
+    }
+
+    /// Acquire the next image (`vkAcquireNextImageKHR`). Deferred.
+    /// Errors: `error.NotImplemented`.
+    pub fn acquire(self: *Swapchain, dev: *Device) !Frame {
+        _ = self;
+        _ = dev;
+        return error.NotImplemented;
+    }
+
+    /// Present `frame` (`vkQueuePresentKHR`). Deferred.
+    /// Errors: `error.NotImplemented`.
+    pub fn present(self: *Swapchain, dev: *Device, frame: Frame) !port.AcquireStatus {
+        _ = self;
+        _ = dev;
+        _ = frame;
+        return error.NotImplemented;
+    }
+
+    /// Recreate the swapchain for a new drawable size (on resize/out-of-date).
+    /// Deferred. Errors: `error.NotImplemented`.
+    pub fn resize(self: *Swapchain, dev: *Device, width: u32, height: u32) !void {
+        _ = self;
+        _ = dev;
+        _ = width;
+        _ = height;
+        return error.NotImplemented;
+    }
 };
 
 fn graphicsFamily(instance: vk.InstanceProxy, pdev: vk.PhysicalDevice, gpa: Allocator) !u32 {
