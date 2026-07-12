@@ -7,14 +7,14 @@
 //! host seam (`host.zig`): the engine installs a `Host` on the owning `State` for
 //! the duration of each event dispatch, and these accessors call through it. Wired
 //! so far (issue #5): the reads `is_valid`, `position`, `now`, and the deferred
-//! mutations `set_velocity`, `despawn` (queued on the command buffer, applied at the
-//! next flush — never a mid-dispatch world mutation). `is_valid` prefers the host
-//! when present (authoritative live-world check) and falls back to this `State`'s
-//! own `handle.Registry` when no Sim is dispatching, so its pre-seam behavior and
-//! tests still hold; mutations with no host installed are simply dropped.
+//! mutations `set_velocity`, `despawn`, `spawn` (queued on the command buffer,
+//! applied at the next flush — never a mid-dispatch world mutation). `is_valid`
+//! prefers the host when present (authoritative live-world check) and falls back to
+//! this `State`'s own `handle.Registry` when no Sim is dispatching, so its pre-seam
+//! behavior and tests still hold; mutations with no host installed are dropped
+//! (`spawn` returns an invalid handle).
 //!
-//! The remaining §2 members — `spawn`, `set` (deferred mutations still needing an
-//! entity-prototype registry and a data-component store respectively), `get`, and
+//! The remaining §2 members — `set` (needs a data-component store), `get`, and
 //! `random`/`random_int` (seeded `core.Rng`), plus `after`/`every`/`cancel` — land
 //! as additive host-vtable entries in follow-up slices. Do not add stub/fake
 //! behavior for them; an absent `mana` key is the honest, checkable signal that a
@@ -75,6 +75,10 @@ pub fn pushManaTable(l: *Lua, entities: *const Registry, host: *const ?Host) voi
     l.pushLightUserdata(@ptrCast(host));
     l.pushClosure(zlua.wrap(manaDespawn), 1);
     l.setField(-2, "despawn");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaSpawn), 1);
+    l.setField(-2, "spawn");
 }
 
 /// Read a `*const ?Host` back from closure upvalue `idx` (a light-userdata pointer
@@ -183,6 +187,30 @@ fn manaDespawn(l: *Lua) !i32 {
     return 0;
 }
 
+/// A packed handle that is never valid (max index) — what `mana.spawn` returns when
+/// it cannot reserve an entity (no Sim dispatching, or an unknown prototype). Matches
+/// `ecs.Entity.none`'s layout so `mana.is_valid` reports it false.
+const invalid_handle: u64 = Handle.pack(.{ .index = std.math.maxInt(u32), .generation = 0 });
+
+/// `mana.spawn(prototype, x, y, z)` (ADR 0003 §2; ADR 0016): spawn the named
+/// `prototype` at `(x, y, z)` and return its handle. The entity is reserved
+/// immediately (the handle is valid at once) and its components attach at the next
+/// flush (deferred). Returns an invalid handle if no Sim is dispatching or the
+/// prototype name is unknown (a content bug the engine logs) — never raises for a
+/// bad name, so a script can `mana.is_valid` the result.
+fn manaSpawn(l: *Lua) !i32 {
+    const name = l.checkString(1);
+    const x: f32 = @floatCast(l.checkNumber(2));
+    const y: f32 = @floatCast(l.checkNumber(3));
+    const z: f32 = @floatCast(l.checkNumber(4));
+    const packed_handle: u64 = if (hostSlot(l, Lua.upvalueIndex(1)).*) |h|
+        h.spawn(name, .{ .x = x, .y = y, .z = z })
+    else
+        invalid_handle;
+    l.pushInteger(@bitCast(packed_handle));
+    return 1;
+}
+
 const testing = std.testing;
 
 test "mana: table shape exposes exactly the wired members (version..despawn); version == 1" {
@@ -203,12 +231,12 @@ test "mana: table shape exposes exactly the wired members (version..despawn); ve
         key_count += 1;
         l.pop(1); // drop value; keep key on the stack to advance `next`
     }
-    try testing.expectEqual(@as(usize, 7), key_count);
+    try testing.expectEqual(@as(usize, 8), key_count);
 
     try testing.expectEqual(zlua.LuaType.number, l.getField(t, "version"));
     try testing.expectEqual(@as(i64, 1), try l.toInteger(-1));
     l.pop(1);
-    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "despawn" }) |name| {
+    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "despawn", "spawn" }) |name| {
         try testing.expectEqual(zlua.LuaType.function, l.getField(t, name));
         l.pop(1);
     }

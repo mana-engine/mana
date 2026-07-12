@@ -12,10 +12,11 @@ const event = @import("event.zig");
 const Entity = ecs.Entity;
 const Transform = components.Transform;
 const Velocity = components.Velocity;
+const Bundle = components.Bundle;
 const Allocator = std.mem.Allocator;
 
 const Command = union(enum) {
-    attach: struct { entity: Entity, transform: ?Transform, velocity: ?Velocity },
+    attach: struct { entity: Entity, bundle: Bundle },
     despawn: Entity,
     set_transform: struct { entity: Entity, value: Transform },
     set_velocity: struct { entity: Entity, value: Velocity },
@@ -33,11 +34,12 @@ pub const CommandBuffer = struct {
     }
 
     /// Reserve a new entity immediately (so callers can reference the handle) and
-    /// queue its components to attach at flush (ADR 0003 "resolves next tick").
-    pub fn spawn(self: *CommandBuffer, gpa: Allocator, world: *World, transform: ?Transform, velocity: ?Velocity) !Entity {
+    /// queue its components — any built-in set (ADR 0016 `Bundle`) — to attach at
+    /// flush (ADR 0003 "resolves next tick").
+    pub fn spawn(self: *CommandBuffer, gpa: Allocator, world: *World, bundle: Bundle) !Entity {
         const e = try world.spawn();
         try self.reserved.append(gpa, e);
-        try self.commands.append(gpa, .{ .attach = .{ .entity = e, .transform = transform, .velocity = velocity } });
+        try self.commands.append(gpa, .{ .attach = .{ .entity = e, .bundle = bundle } });
         return e;
     }
 
@@ -90,8 +92,9 @@ pub const CommandBuffer = struct {
         for (self.reserved.items) |e| try events.push(gpa, .{ .spawned = e });
         for (self.commands.items) |cmd| switch (cmd) {
             .attach => |a| {
-                if (a.transform) |t| try ignoreInvalid(world.setTransform(a.entity, t));
-                if (a.velocity) |v| try ignoreInvalid(world.setVelocity(a.entity, v));
+                if (a.bundle.transform) |t| try ignoreInvalid(world.setTransform(a.entity, t));
+                if (a.bundle.velocity) |v| try ignoreInvalid(world.setVelocity(a.entity, v));
+                if (a.bundle.health) |h| try ignoreInvalid(world.setHealth(a.entity, h));
             },
             .set_transform => |s| try ignoreInvalid(world.setTransform(s.entity, s.value)),
             .set_velocity => |s| try ignoreInvalid(world.setVelocity(s.entity, s.value)),
@@ -145,13 +148,36 @@ test "command buffer: deferred spawn reserves a handle, attaches at flush, emits
     var events: event.Queue = .{};
     defer events.deinit(testing.allocator);
 
-    const e = try cb.spawn(testing.allocator, &world, .{ .pos = .{ .x = 5, .y = 0, .z = 0 } }, null);
+    const e = try cb.spawn(testing.allocator, &world, .{ .transform = .{ .pos = .{ .x = 5, .y = 0, .z = 0 } } });
     try testing.expect(world.isValid(e)); // handle valid immediately
     try testing.expect(world.getTransform(e) == null); // component not attached yet
 
     try cb.flush(testing.allocator, &world, &events);
     try testing.expect(world.getTransform(e).?.pos.approxEql(.{ .x = 5, .y = 0, .z = 0 }, 1e-6));
     try testing.expect(events.items()[0] == .spawned);
+}
+
+test "command buffer: a spawn bundle attaches every present built-in component at flush" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+
+    var cb: CommandBuffer = .{};
+    defer cb.deinit(testing.allocator);
+    var events: event.Queue = .{};
+    defer events.deinit(testing.allocator);
+
+    // A multi-component prototype-style spawn (ADR 0016): transform + velocity +
+    // health all land in one deferred command.
+    const e = try cb.spawn(testing.allocator, &world, .{
+        .transform = .{ .pos = .{ .x = 1, .y = 2, .z = 3 } },
+        .velocity = .{ .v = .{ .x = 4, .y = 5, .z = 6 } },
+        .health = .{ .current = 7, .max = 10 },
+    });
+    try cb.flush(testing.allocator, &world, &events);
+
+    try testing.expect(world.getTransform(e).?.pos.approxEql(.{ .x = 1, .y = 2, .z = 3 }, 1e-6));
+    try testing.expect(world.getVelocity(e).?.v.approxEql(.{ .x = 4, .y = 5, .z = 6 }, 1e-6));
+    try testing.expectEqual(@as(f32, 7), world.getHealth(e).?.current);
 }
 
 test "command buffer: a set on an entity despawned the same tick is dropped" {
@@ -198,7 +224,7 @@ test "command buffer: rollback voids an entity reserved via spawn since the mark
     defer cb.deinit(testing.allocator);
 
     const m = cb.mark();
-    const e = try cb.spawn(testing.allocator, &world, .{ .pos = .{ .x = 5, .y = 0, .z = 0 } }, null);
+    const e = try cb.spawn(testing.allocator, &world, .{ .transform = .{ .pos = .{ .x = 5, .y = 0, .z = 0 } } });
     try testing.expect(world.isValid(e)); // reserved immediately, per ADR 0003 "resolves next tick"
 
     try cb.rollback(&world, m);

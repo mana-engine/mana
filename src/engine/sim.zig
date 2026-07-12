@@ -14,6 +14,7 @@ const timer = @import("timer.zig");
 const script_runtime = @import("script_runtime.zig");
 const script = @import("script");
 const platform = @import("platform");
+const prototype = @import("prototype.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -62,6 +63,10 @@ pub const Sim = struct {
     /// This Sim's single script runtime (ADR 0003 §8: one Lua state per Sim). A
     /// comptime no-op unless `-Denable-lua`; starts idle until `loadScript`.
     script_runtime: script_runtime.Runtime = .{},
+    /// Named entity prototypes `mana.spawn` resolves against (ADR 0016). Empty by
+    /// default (every `spawn` misses); the runner populates it from package ZON. The
+    /// registry borrows its prototype slice — the owner must outlive the `Sim`.
+    prototypes: prototype.Registry = .{},
     /// The `InputSnapshot` the next `tick` exposes to systems via `Context.input`
     /// (ADR 0009 §3/§4), set by `setInput`. Defaults to an all-empty snapshot, so a
     /// `Sim` that never calls `setInput` — every existing caller today — ticks
@@ -176,10 +181,17 @@ pub const Sim = struct {
             for (self.handlers.items) |handler| handler(&self.world, ev);
             // Script dispatch (ADR 0003 §1/§3). A comptime no-op — zero cost, sim
             // bit-identical — unless `-Denable-lua`; catches handler errors (§9) and
-            // rolls back their queued mutations. The live world, command buffer, and
-            // `now` back the ADR 0015 host seam for the handler's `mana` reads and
-            // deferred mutations (applied at next tick's flush). Only OOM propagates.
-            try self.script_runtime.dispatch(ev, &self.world, &self.commands, self.gpa, now_seconds);
+            // rolls back their queued mutations. The live world, command buffer,
+            // `now`, and prototype registry back the ADR 0015 host seam for the
+            // handler's `mana` reads and deferred mutations (applied at next tick's
+            // flush). Only OOM propagates.
+            try self.script_runtime.dispatch(ev, .{
+                .world = &self.world,
+                .commands = &self.commands,
+                .gpa = self.gpa,
+                .now_seconds = now_seconds,
+                .prototypes = self.prototypes,
+            });
         }
         self.events.clear();
         try self.timers.advance(self.gpa, &self.world, self.dt);
@@ -344,7 +356,7 @@ const OneShotSpawner = struct {
     var did: bool = false;
     fn system(ctx: *Context) SystemError!void {
         if (!did) {
-            _ = try ctx.commands.spawn(ctx.gpa, ctx.world, null, null);
+            _ = try ctx.commands.spawn(ctx.gpa, ctx.world, .{});
             did = true;
         }
     }
@@ -394,7 +406,7 @@ test "sim: on_spawn reads its entity's position and sim time via the mana host s
         var did: bool = false;
         fn system(ctx: *Context) SystemError!void {
             if (!did and ctx.tick == 3) {
-                _ = try ctx.commands.spawn(ctx.gpa, ctx.world, .{ .pos = .{ .x = 7, .y = 0, .z = 0 } }, null);
+                _ = try ctx.commands.spawn(ctx.gpa, ctx.world, .{ .transform = .{ .pos = .{ .x = 7, .y = 0, .z = 0 } } });
                 did = true;
             }
         }
@@ -427,7 +439,7 @@ const OneShotTransformSpawner = struct {
     var did: bool = false;
     fn system(ctx: *Context) SystemError!void {
         if (!did) {
-            _ = try ctx.commands.spawn(ctx.gpa, ctx.world, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } }, null);
+            _ = try ctx.commands.spawn(ctx.gpa, ctx.world, .{ .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } } });
             did = true;
         }
     }
@@ -470,4 +482,42 @@ test "sim: on_spawn queues mana.despawn(self); the entity is removed at the next
     try testing.expectEqual(@as(usize, 1), sim.world.count()); // still alive this tick
     try sim.tick(); // next flush applies the despawn
     try testing.expectEqual(@as(usize, 0), sim.world.count());
+}
+
+test "sim: on_spawn spawns a prototype via mana; its components attach at the next flush (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+    OneShotTransformSpawner.did = false;
+
+    // A "food" prototype with velocity + health but no template transform (so the
+    // spawn point supplies its position). Outlives `sim` — the registry borrows it.
+    const protos = [_]prototype.Prototype{
+        .{ .name = "food", .velocity = .{ .v = .{ .x = 1, .y = 0, .z = 0 } }, .health = .{ .current = 3, .max = 3 } },
+    };
+
+    var sim = Sim.init(testing.allocator, 1.0 / 60.0);
+    defer sim.deinit();
+    sim.prototypes = .{ .prototypes = &protos };
+    try sim.loadScript(
+        \\local t = { done = false, handle = 0, valid = 0 }
+        \\function t.on_spawn(self)
+        \\  if not t.done then           -- spawn exactly once, so the food's own
+        \\    t.done = true              -- on_spawn does not spawn again (no loop)
+        \\    t.handle = mana.spawn("food", 5, 6, 7)
+        \\    t.valid = mana.is_valid(t.handle) and 1 or 0
+        \\  end
+        \\end
+        \\return t
+    );
+    try sim.addSystem(OneShotTransformSpawner.system);
+
+    try sim.tick(); // system spawns entity A → on_spawn(A) → mana.spawn("food") reserves B
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("valid").?); // B valid at once
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("handle").?); // B = index 1, gen 0 → 1
+    try sim.tick(); // next flush attaches B's prototype components
+
+    try testing.expectEqual(@as(usize, 2), sim.world.count()); // A + B
+    const b = sim.world.entityAt(1);
+    try testing.expect(sim.world.getTransform(b).?.pos.approxEql(.{ .x = 5, .y = 6, .z = 7 }, 1e-6)); // spawn point
+    try testing.expect(sim.world.getVelocity(b).?.v.approxEql(.{ .x = 1, .y = 0, .z = 0 }, 1e-6)); // from prototype
+    try testing.expectEqual(@as(f32, 3), sim.world.getHealth(b).?.current); // from prototype
 }

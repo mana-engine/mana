@@ -9,9 +9,9 @@
 //! dependency itself, so this file is plain, dependency-free Zig over `core`.
 //!
 //! Wired so far (issue #5): the read surface — `is_valid`, `position`, `now` — and
-//! the deferred-mutation surface — `set_velocity`, `despawn` (queued on the engine's
-//! command buffer, applied at the next flush). The remaining accessors (`spawn`,
-//! `set`, `get`, `random`) land as additive vtable entries in follow-up slices; the
+//! the deferred-mutation surface — `set_velocity`, `despawn`, `spawn` (queued on the
+//! engine's command buffer, applied at the next flush). The remaining accessors
+//! (`set`, `get`, `random`) land as additive vtable entries in follow-up slices; the
 //! *mechanism* here is fixed by ADR 0015 and does not churn.
 //!
 //! Mutations return nothing: they are fire-and-forget deferred commands (ADR 0003
@@ -52,6 +52,11 @@ pub const Host = struct {
         /// Queue a despawn of `handle`, applied at the next flush (deferred). A stale
         /// handle is dropped at flush.
         despawn: *const fn (ctx: *anyopaque, handle: u64) void,
+        /// Spawn the prototype named `name` at `pos` (ADR 0016). Reserves an entity
+        /// immediately and returns its packed handle (valid at once, components
+        /// attach at the next flush, ADR 0003 §2). An unknown prototype returns a
+        /// packed invalid handle (a content bug the engine logs), never a crash.
+        spawn: *const fn (ctx: *anyopaque, name: []const u8, pos: core.Vec3) u64,
     };
 
     /// Thin forwarders so callers read `host.position(h)` rather than threading
@@ -71,6 +76,9 @@ pub const Host = struct {
     pub fn despawn(self: Host, handle: u64) void {
         self.vtable.despawn(self.ctx, handle);
     }
+    pub fn spawn(self: Host, name: []const u8, pos: core.Vec3) u64 {
+        return self.vtable.spawn(self.ctx, name, pos);
+    }
 };
 
 const testing = @import("std").testing;
@@ -84,6 +92,8 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         t: f64,
         last_despawned: u64 = 0,
         last_vel: core.Vec3 = .{ .x = 0, .y = 0, .z = 0 },
+        last_spawn_name: []const u8 = "",
+        last_spawn_pos: core.Vec3 = .{ .x = 0, .y = 0, .z = 0 },
 
         fn isValid(ctx: *anyopaque, handle: u64) bool {
             _ = handle;
@@ -103,6 +113,12 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         fn despawn(ctx: *anyopaque, handle: u64) void {
             fromOpaque(ctx).last_despawned = handle;
         }
+        fn spawn(ctx: *anyopaque, name: []const u8, pos: core.Vec3) u64 {
+            const self = fromOpaque(ctx);
+            self.last_spawn_name = name;
+            self.last_spawn_pos = pos;
+            return 77;
+        }
         fn fromOpaque(ctx: *anyopaque) *@This() {
             return @ptrCast(@alignCast(ctx));
         }
@@ -112,6 +128,7 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
             .now = now,
             .set_velocity = setVelocity,
             .despawn = despawn,
+            .spawn = spawn,
         };
     };
 
@@ -126,4 +143,7 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
     try testing.expect(fake.last_vel.approxEql(.{ .x = 4, .y = 5, .z = 6 }, 1e-6));
     host.despawn(42);
     try testing.expectEqual(@as(u64, 42), fake.last_despawned);
+    try testing.expectEqual(@as(u64, 77), host.spawn("segment", .{ .x = 7, .y = 8, .z = 9 }));
+    try testing.expectEqualStrings("segment", fake.last_spawn_name);
+    try testing.expect(fake.last_spawn_pos.approxEql(.{ .x = 7, .y = 8, .z = 9 }, 1e-6));
 }

@@ -1,6 +1,6 @@
 # 0016. Entity prototypes: named component templates for `mana.spawn`
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-12
 
 ## Context

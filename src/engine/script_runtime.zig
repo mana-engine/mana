@@ -14,10 +14,24 @@ const script = @import("script");
 const ecs = @import("ecs");
 const event = @import("event.zig");
 const command = @import("command.zig");
+const prototype = @import("prototype.zig");
 const World = @import("world.zig").World;
 
 const Entity = ecs.Entity;
 const Allocator = std.mem.Allocator;
+
+/// The live-Sim state one event dispatch needs to build the host seam (ADR 0015):
+/// the world + command buffer a handler's `mana` reads/mutations act on, this tick's
+/// sim time, and the prototype registry `mana.spawn` resolves against. Bundled so
+/// the dispatch signature stays stable as the seam grows (future slices add e.g. the
+/// sim RNG here, not another positional arg). `Sim.tick` fills it each tick.
+pub const DispatchCtx = struct {
+    world: *World,
+    commands: *command.CommandBuffer,
+    gpa: Allocator,
+    now_seconds: f64,
+    prototypes: prototype.Registry = .{},
+};
 
 /// The Sim's script runtime: the Lua-backed one under `-Denable-lua`, else a
 /// no-op with the same shape so `Sim` code is backend-agnostic.
@@ -100,6 +114,7 @@ const LuaRuntime = struct {
         commands: *command.CommandBuffer,
         gpa: Allocator,
         now_seconds: f64,
+        prototypes: prototype.Registry,
         oom: bool = false,
 
         fn cast(ctx: *anyopaque) *HostCtx {
@@ -127,12 +142,25 @@ const LuaRuntime = struct {
                 hc.oom = true;
             };
         }
+        fn spawn(ctx: *anyopaque, name: []const u8, pos: core.Vec3) u64 {
+            const hc = cast(ctx);
+            const proto = hc.prototypes.lookup(name) orelse {
+                std.log.scoped(.script).warn("mana.spawn: unknown prototype '{s}'", .{name});
+                return Entity.none.pack();
+            };
+            const e = hc.commands.spawn(hc.gpa, hc.world, prototype.bundleAt(proto, pos)) catch {
+                hc.oom = true;
+                return Entity.none.pack();
+            };
+            return e.pack();
+        }
         const vtable: script.lua.Host.VTable = .{
             .is_valid = isValid,
             .position = position,
             .now = now,
             .set_velocity = setVelocity,
             .despawn = despawn,
+            .spawn = spawn,
         };
     };
 
@@ -148,14 +176,7 @@ const LuaRuntime = struct {
     /// handler error is otherwise caught and logged, never propagated; only an
     /// allocation failure (a queued mutation hitting OOM, never a content bug)
     /// propagates and aborts the tick.
-    pub fn dispatch(
-        self: *LuaRuntime,
-        ev: event.Event,
-        world: *World,
-        commands: *command.CommandBuffer,
-        gpa: Allocator,
-        now_seconds: f64,
-    ) Allocator.Error!void {
+    pub fn dispatch(self: *LuaRuntime, ev: event.Event, dc: DispatchCtx) Allocator.Error!void {
         const s = if (self.state) |*st| st else return;
 
         // Map the event to its v1 handler key; events without one (despawn: no
@@ -167,12 +188,18 @@ const LuaRuntime = struct {
         };
         if (self.isDisabled(key)) return;
 
-        var host_ctx: HostCtx = .{ .world = world, .commands = commands, .gpa = gpa, .now_seconds = now_seconds };
+        var host_ctx: HostCtx = .{
+            .world = dc.world,
+            .commands = dc.commands,
+            .gpa = dc.gpa,
+            .now_seconds = dc.now_seconds,
+            .prototypes = dc.prototypes,
+        };
         s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
         defer s.setHost(null); // the borrowed ctx must not outlive this dispatch
 
         // §9 transaction: discard this handler's queued mutations if it throws.
-        const mark = commands.mark();
+        const mark = dc.commands.mark();
         const outcome = switch (ev) {
             .spawned => |e| s.dispatchSpawn(e.index, e.generation),
             .collision_begin => |c| s.dispatchCollisionBegin(
@@ -185,7 +212,7 @@ const LuaRuntime = struct {
             ),
             .despawned => unreachable, // returned above: no handler key
         };
-        if (outcome == .errored) try commands.rollback(world, mark);
+        if (outcome == .errored) try dc.commands.rollback(dc.world, mark);
         if (host_ctx.oom) return error.OutOfMemory; // a queued mutation hit OOM
         self.report(key, s, outcome);
     }
@@ -281,20 +308,10 @@ const NoopRuntime = struct {
         _ = source;
     }
 
-    pub fn dispatch(
-        self: *NoopRuntime,
-        ev: event.Event,
-        world: *World,
-        commands: *command.CommandBuffer,
-        gpa: Allocator,
-        now_seconds: f64,
-    ) Allocator.Error!void {
+    pub fn dispatch(self: *NoopRuntime, ev: event.Event, dc: DispatchCtx) Allocator.Error!void {
         _ = self;
         _ = ev;
-        _ = world;
-        _ = commands;
-        _ = gpa;
-        _ = now_seconds;
+        _ = dc;
     }
 
     pub fn handlerFieldInt(self: *NoopRuntime, key: [:0]const u8) ?i64 {
@@ -338,7 +355,12 @@ test "circuit breaker: a handler disabled after breaker_threshold consecutive er
     defer world.deinit();
     var commands: command.CommandBuffer = .{};
     defer commands.deinit(std.testing.allocator);
-    try rt.dispatch(.{ .spawned = .{ .index = 1, .generation = 0 } }, &world, &commands, std.testing.allocator, 0);
+    try rt.dispatch(.{ .spawned = .{ .index = 1, .generation = 0 } }, .{
+        .world = &world,
+        .commands = &commands,
+        .gpa = std.testing.allocator,
+        .now_seconds = 0,
+    });
     try std.testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("spawns").?);
 }
 
@@ -365,7 +387,12 @@ test "circuit breaker: disabling one handler key leaves a different key unaffect
     try rt.dispatch(.{ .collision_begin = .{
         .a = .{ .index = 1, .generation = 0 },
         .b = .{ .index = 2, .generation = 0 },
-    } }, &world, &commands, std.testing.allocator, 0);
+    } }, .{
+        .world = &world,
+        .commands = &commands,
+        .gpa = std.testing.allocator,
+        .now_seconds = 0,
+    });
     try std.testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("collisions").?);
 }
 
