@@ -12,5 +12,7 @@
     .script_api = 1,
     // Top-down grid — the projection ADR 0014 added so a grid game is not forced
     // into an isometric diamond. (Orthographic is the default; stated for clarity.)
-    .projection = .{ .orthographic = .{ .scale = 24 } },
+    // Cells wider than the 32px entity quads so grid boxes don't overlap. (Proper
+    // fix — world-relative entity sizing in the renderer — is a follow-up.)
+    .projection = .{ .orthographic = .{ .scale = 40 } },
 }

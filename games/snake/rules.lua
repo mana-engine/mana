@@ -104,10 +104,12 @@ local function step()
     end
 end
 
--- Turn, unless it reverses the last intended heading straight onto the neck (only a
--- snake with a body can reverse into itself; a lone head may turn freely).
+-- Turn, unless it is a 180° reversal of the *committed* heading. Checking `dir`, not
+-- `pending`, is what stops a fast up-then-left (from a rightward snake) sneaking a
+-- reversal through the intermediate turn: left is always a reversal of right,
+-- whatever was queued between. One effective turn per step, never an about-face.
 local function try_turn(nx, ny)
-    if #body > 1 and nx == -pending.x and ny == -pending.y then return end
+    if nx == -dir.x and ny == -dir.y then return end
     pending = { x = nx, y = ny }
 end
 
