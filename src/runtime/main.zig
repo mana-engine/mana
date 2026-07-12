@@ -80,6 +80,19 @@ fn loadManifest(io: Io, gpa: Allocator, pkg: []const u8) !Manifest {
     return manifest_mod.parse(gpa, src);
 }
 
+/// Load a package's prototype file (ADR 0016) into a parsed `File`, or null if the
+/// manifest declares none. Caller owns the result and must `engine.prototype.free`
+/// it *after* the `Sim` that borrows its prototypes is torn down (the registry
+/// borrows the prototype slice).
+fn loadPrototypes(io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest) !?engine.prototype.File {
+    const rel = manifest.prototypes orelse return null;
+    const path = try std.fs.path.join(gpa, &.{ pkg, rel });
+    defer gpa.free(path);
+    const src = try Io.Dir.cwd().readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0);
+    defer gpa.free(src);
+    return try engine.prototype.parse(gpa, src);
+}
+
 /// Refuse a package that needs a newer scripting API than this build provides.
 fn checkScriptApi(out: *Io.Writer, manifest: Manifest) !void {
     if (manifest.script_api > provided_script_api) {
@@ -164,8 +177,14 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     const parsed = try engine.scene.parse(gpa, scene_src);
     defer engine.scene.free(gpa, parsed);
 
+    // Prototypes (ADR 0016): parsed before the Sim, freed after it (the registry
+    // borrows the slice), so `mana.spawn` can resolve package templates.
+    const proto_file = try loadPrototypes(io, gpa, pkg, manifest);
+    defer if (proto_file) |f| engine.prototype.free(gpa, f);
+
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
+    if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
     try engine.scene.load(parsed, &sim.world);
     try sim.addSystem(engine.input.inputMoveSystem); // #30: held keys → velocity
     try sim.addSystem(engine.systems.movementSystem);
@@ -251,8 +270,14 @@ fn runOnce(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     const parsed = try engine.scene.parse(gpa, scene_src);
     defer engine.scene.free(gpa, parsed);
 
+    // Prototypes (ADR 0016): parsed before the Sim and freed after it (the registry
+    // borrows the slice), so `mana.spawn` can resolve package templates.
+    const proto_file = try loadPrototypes(io, gpa, pkg, manifest);
+    defer if (proto_file) |f| engine.prototype.free(gpa, f);
+
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
+    if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
     try engine.scene.load(parsed, &sim.world);
     try sim.addSystem(engine.systems.movementSystem);
     try sim.addSystem(engine.systems.regenSystem);
