@@ -10,6 +10,7 @@
 //! type ever crosses this boundary.
 
 const std = @import("std");
+const build_options = @import("build_options");
 const port = @import("../port.zig");
 const Allocator = std.mem.Allocator;
 
@@ -70,7 +71,14 @@ pub const Window = struct {
         const title_z = try gpa.dupeZ(u8, config.title);
         defer gpa.free(title_z);
 
-        const flags: u64 = if (config.resizable) c.SDL_WINDOW_RESIZABLE else 0;
+        // `SDL_WINDOW_VULKAN` is required for `SDL_Vulkan_CreateSurface`, which the
+        // `gpu` Vulkan backend calls to build its `VkSurfaceKHR` (ADR 0012 phase 2). It
+        // also makes SDL load the Vulkan loader, so `SDL_Vulkan_GetInstanceExtensions`
+        // works. Requested only when the Vulkan backend is compiled in (`enable_vulkan`),
+        // so an SDL3-only (no-Vulkan) build opens a plain window unchanged. No Vulkan
+        // type crosses this boundary — this is an SDL window flag, not a Vulkan handle.
+        const vulkan_flag: u64 = if (build_options.enable_vulkan) c.SDL_WINDOW_VULKAN else 0;
+        const flags: u64 = vulkan_flag | (if (config.resizable) c.SDL_WINDOW_RESIZABLE else 0);
         const handle = c.SDL_CreateWindow(
             title_z.ptr,
             @intCast(config.width),

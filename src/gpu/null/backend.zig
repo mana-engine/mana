@@ -252,7 +252,11 @@ pub const Swapchain = struct {
     presented: []u8,
     /// Count of frames presented; a headless present is a no-op beyond this capture.
     present_count: u64,
+    /// Format of the image, reused when `resize` reallocates the target.
     format: port.TextureFormat,
+    /// The requested present mode. Retained only for surface parity with the Vulkan
+    /// backend (which selects a `VkPresentModeKHR` from it); a headless present has no
+    /// display queue, so nothing here reads it — `.optimal` is always reported.
     present_mode: port.PresentMode,
 
     /// Release the image and the presented-frame capture. `dev` owns the allocator.

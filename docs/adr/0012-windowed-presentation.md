@@ -1,6 +1,8 @@
 # 0012. Windowed presentation: gpu swapchain + platform window surface
 
-- Status: accepted (port surface) / proposed (SDL3 + Vulkan swapchain impl, deferred)
+- Status: accepted (port surface + null/headless impl) / accepted (SDL3 window impl,
+  phase 1, #33) / accepted (Vulkan swapchain impl, phase 2 — §3/§8; runtime present is
+  a manual display+GPU acceptance step)
 - Date: 2026-07-12
 
 ## Context
@@ -93,13 +95,23 @@ reallocates the target. An in-file test drives acquire → render (clear) → pr
 asserts the captured pixels, then resizes and re-acquires — the parity harness for the
 surface, GPU-free, in every headless/CI build.
 
-### 3. The Vulkan backend stubs the same surface (deferred)
+### 3. The Vulkan backend implements the same surface (phase 2)
 
-`src/gpu/vulkan/backend.zig` pins the identical `Swapchain`/`Frame`/`createSwapchain`
-interface with every method returning `error.NotImplemented`. This keeps the flagged
-build (`zig build -Denable-vulkan`) compiling and the two surfaces in lockstep, while
-the real `VkSurfaceKHR`/`VkSwapchainKHR` bring-up — which needs SDL3 for the surface
-and real acquire/present/sync code — is deferred to the supervised windowing lane.
+`src/gpu/vulkan/backend.zig` implements the identical `Swapchain`/`Frame`/
+`createSwapchain` surface with the real `VkSurfaceKHR`/`VkSwapchainKHR` path:
+`createSwapchain` builds the surface (see §8), queries surface capabilities/formats/
+present modes to choose format (prefer the port format), present mode (prefer the
+request, else FIFO), extent, and image count, then creates the swapchain and one view
+per image; `acquire` signals+waits an acquire fence and translates the result to an
+`AcquireStatus`; `present` transitions the rendered image to `PRESENT_SRC` and queue-
+presents; `resize` recreates the chain (reusing the surface + `oldSwapchain`); `deinit`
+tears it all down. This bring-up is **synchronous** — acquire waits on a fence and the
+render is submitted with `queueWaitIdle` (mirroring the offscreen `Device.submit`), so
+present needs no wait semaphore. Multi-frame-in-flight pipelining (per-image semaphores)
+stays internal to this type and is deferred (§7). A vulkan-only build (no SDL3) has no
+window system, so `createSwapchain` returns `error.NotImplemented` there; only the
+SDL3+Vulkan build presents. The real window-open + cleared-frame acceptance requires a
+local display + GPU and is a manual check (headless CI cannot open a window).
 
 ### 4. The `platform` port gains a `Window` (vocabulary + headless adapter)
 
@@ -162,10 +174,11 @@ while (!window.shouldClose()) {
         sim.tick(ctx.with(input));              // input translated to command-buffer writes
         accumulator -= sim.dt;
     }
-    const frame = swapchain.acquire(dev) catch |e| switch (e) {
-        error.OutOfDate => { try swapchain.resize(dev, window.size()); continue; },
-        else => return e,
-    };
+    const frame = try swapchain.acquire(dev);   // out-of-date is a status, not an error
+    if (frame.status == .out_of_date) {         // resize / minimize / display change
+        try swapchain.resize(dev, window.size());
+        continue;
+    }
     render(frame.target, alpha);                // cosmetic; excluded from the state hash
     switch (try swapchain.present(dev, frame)) {
         .out_of_date, .suboptimal => try swapchain.resize(dev, window.size()),
@@ -183,14 +196,37 @@ implementation task (it needs a `Sim`, which `platform` does not import), not th
 
 ### 7. Not decided / deferred here
 
-- The **SDL3 adapter** (real window + event pump + `SDL_Vulkan_CreateSurface`) and the
-  **Vulkan swapchain** (`vkCreateSwapchainKHR`, image acquisition, present queue,
-  per-frame semaphores/fences, recreation) — the supervised lane that adds the SDL3
-  dependency (ADR 0002/0006 policy: ask first).
-- Multi-frame-in-flight synchronization, swapchain image count, HDR/colour-space, and
-  present-queue-vs-graphics-queue selection — internal to the Vulkan backend when it
-  lands; none belong in the port vocabulary until a game needs a choice.
+- The **SDL3 adapter** (real window + event pump + `surfaceHandle`) landed in phase 1
+  (ADR 0013, #33); the **Vulkan swapchain** (surface, `vkCreateSwapchainKHR`, acquire/
+  present/resize) landed in phase 2 (this lane, §3/§8). Still deferred:
+- Multi-frame-in-flight synchronization (per-image semaphores; this bring-up is
+  synchronous), swapchain image count, HDR/colour-space, and present-queue-vs-graphics-
+  queue selection — internal to the Vulkan backend, none belong in the port vocabulary
+  until a game needs a choice.
+- Migrating `runtime/main.zig` onto the §6 loop, and the engine input-translation
+  system (needs a `Sim`; not in this lane).
 - Gamepad input and input-replay/demo recording (ADR 0009 named follow-ons).
+
+### 8. Vulkan surface creation without importing `platform`
+
+The Vulkan backend must call `SDL_Vulkan_CreateSurface(SDL_Window*, VkInstance, …)` to
+turn the window's opaque handle (§5) into a `VkSurfaceKHR` — but `gpu` may **not**
+import `platform` (the DAG is `gpu → core`, `platform → core`; they never import each
+other, §5). Decision: the backend **declares the SDL Vulkan C symbols as `extern`
+functions itself** (`SDL_Vulkan_CreateSurface`, `SDL_Vulkan_GetInstanceExtensions`) and
+`build.zig` **links the SDL3 artifact into the `gpu` module** — a build-level *link*,
+not a module import — **only when both `-Denable-sdl3` and `-Denable-vulkan`** are set.
+The symbols are *referenced* only under `build_options.enable_sdl3` (a comptime-guarded
+branch), so a vulkan-only or default build never links SDL and never analyzes the SDL
+calls; `createSwapchain` returns `error.NotImplemented` there.
+
+This keeps invariant #4 and the DAG intact: no `platform` import crosses into `gpu`, no
+Vulkan type crosses into `platform`, and SDL + Vulkan stay out of the default/CI build.
+The instance is created with the surface extensions SDL reports
+(`SDL_Vulkan_GetInstanceExtensions`) and the device with `VK_KHR_swapchain`, both
+enabled only under the SDL3 build — so the headless vulkan-only device is byte-for-byte
+unchanged. Consequence: SDL video must be initialised (the `platform.Window` opened)
+before `Device.init` in `engine`'s composition root, since the extension query needs it.
 
 ## Consequences
 
@@ -199,10 +235,13 @@ implementation task (it needs a `Sim`, which `platform` does not import), not th
   present harness in every headless build; the real-time loop has a named seam that
   reuses `Sim.tick` and the existing `CommandList` unchanged.
 - **Harder / accepted:** the two gpu backends (and two platform adapters) must keep the
-  present/window signatures identical — enforced for gpu by both re-exporting through
-  `gpu.zig` and the flagged build compiling the Vulkan stub; the Vulkan `Swapchain` is
-  `error.NotImplemented` until its lane, so `-Denable-vulkan` compiles but cannot yet
-  present.
+  present/window surface method-compatible by **convention**, not a shared driver —
+  there is no cross-backend present driver yet (the §6 loop is the only caller shape,
+  and it lives in `engine`, not `gpu`). Parity is kept honest by both backends re-
+  exporting through `gpu.zig` and by the flagged build (`-Denable-sdl3 -Denable-vulkan`)
+  compiling the real Vulkan swapchain; a signature drift would fail that build. The
+  present path itself can only be exercised on a machine with a display + GPU, so it is
+  a manual acceptance step, not a headless-CI gate.
 - **Committed to:** the vocabulary in §1/§4 as the pinned present/window surface;
   additions go through a new ADR. The opaque-handle boundary (§5) is the load-bearing
   rule that keeps invariant #4 intact once real windowing lands.

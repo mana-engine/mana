@@ -1,24 +1,55 @@
-//! Vulkan gpu backend (ADR 0006), compiled only under `-Denable-vulkan`. Renders
-//! offscreen — no window, no swapchain. It implements the engine-owned port surface
-//! (ADR 0010): a `Device` creates `Texture`/`Buffer`/`Pipeline` resources and a
-//! `CommandList`, and the shared `gpu.renderScene` driver records draws + a readback
-//! through them. Here those types are Vulkan handles (image/view/memory, buffer,
-//! graphics pipeline, command buffer) driven via dynamic rendering; Vulkan types
-//! stay inside this subtree — the port surface above is plain data. The loader
-//! (`vulkan-1`) is loaded dynamically at runtime, so no import library / Vulkan SDK
-//! is needed.
+//! Vulkan gpu backend (ADR 0006 offscreen; ADR 0012 present), compiled only under
+//! `-Denable-vulkan`. It implements the engine-owned port surface (ADR 0010): a
+//! `Device` creates `Texture`/`Buffer`/`Pipeline` resources and a `CommandList`, and
+//! the shared `gpu.renderScene` driver records draws + a readback through them. Here
+//! those types are Vulkan handles (image/view/memory, buffer, graphics pipeline,
+//! command buffer) driven via dynamic rendering; Vulkan types stay inside this subtree
+//! — the port surface above is plain data. The loader (`vulkan-1`) is loaded
+//! dynamically at runtime, so no import library / Vulkan SDK is needed.
+//!
+//! It also implements the ADR 0012 presentation surface — `Device.createSwapchain` and
+//! the `Swapchain`/`Frame` acquire → render → present → resize path over a real
+//! `VkSurfaceKHR`/`VkSwapchainKHR`. The surface is built from the platform's opaque
+//! `SDL_Window*` via `SDL_Vulkan_CreateSurface`, declared as C externs so this backend
+//! never imports `platform` (ADR 0012 §8); the SDL3 artifact is linked into `gpu` only
+//! under `-Denable-sdl3 -Denable-vulkan`. A vulkan-only build has no window system, so
+//! `createSwapchain` returns `error.NotImplemented`. Present cannot be exercised on
+//! headless CI (no display/GPU); it is a manual acceptance step.
 //!
 //! Over the ~500-line soft limit by design: this is one irreducibly verbose Vulkan
-//! backend — device/pipeline/command/barrier boilerplate — kept as a single unit
-//! behind the `gpu` port. Splitting the handles across files would scatter tightly
+//! backend — device/pipeline/command/barrier + swapchain boilerplate — kept as a single
+//! unit behind the `gpu` port. Splitting the handles across files would scatter tightly
 //! coupled boilerplate without reducing it.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const vk = @import("vulkan");
+const build_options = @import("build_options");
 const windows = std.os.windows;
 const port = @import("../port.zig");
 const Allocator = std.mem.Allocator;
+
+// SDL3 Vulkan interop, declared as C externs so this backend can build a
+// `VkSurfaceKHR` from the platform's opaque `SDL_Window*` WITHOUT importing the
+// `platform` module — the module DAG (`gpu → core`, never `gpu → platform`) stays
+// intact (ADR 0012, "Vulkan surface creation"). These symbols are *referenced* only
+// under `build_options.enable_sdl3`; `build.zig` links the SDL3 artifact into the
+// `gpu` module exactly when both `-Denable-sdl3` and `-Denable-vulkan` are set, so a
+// vulkan-only or default build never needs (or links) them. Signatures mirror
+// `<SDL3/SDL_vulkan.h>`: `bool` is C `_Bool`, `?*anyopaque` the `SDL_Window*`.
+extern fn SDL_WasInit(flags: u32) callconv(.c) u32;
+extern fn SDL_Vulkan_GetInstanceExtensions(count: *u32) callconv(.c) ?[*]const [*:0]const u8;
+extern fn SDL_Vulkan_CreateSurface(
+    window: ?*anyopaque,
+    instance: vk.Instance,
+    allocator: ?*const vk.AllocationCallbacks,
+    surface: *vk.SurfaceKHR,
+) callconv(.c) bool;
+
+/// `SDL_INIT_VIDEO` (from `<SDL3/SDL_init.h>`): the subsystem whose presence means a
+/// window can exist, hence a surface can be built. `SDL_Vulkan_GetInstanceExtensions`
+/// dereferences the video device, so it must not be called before video is initialised.
+const SDL_INIT_VIDEO: u32 = 0x0000_0020;
 
 /// Vulkan API version this backend targets (1.3 for core dynamic rendering).
 pub const target_api_version: u32 = @bitCast(vk.API_VERSION_1_3);
@@ -254,7 +285,27 @@ pub const Device = struct {
             .engine_version = @bitCast(vk.makeApiVersion(0, 0, 1, 0)),
             .api_version = target_api_version,
         };
-        const instance_handle = try vkb.createInstance(&.{ .p_application_info = &app_info }, null);
+        // A Device created *after* a window exists (SDL video initialised) is
+        // present-capable; one created headless (offscreen `renderScene`) is not. Gate
+        // the surface/swapchain extensions on that so the offscreen path never touches
+        // SDL's Vulkan surface machinery (which crashes if video is uninitialised). The
+        // outer `enable_sdl3` guard is comptime, so a vulkan-only/default build never
+        // references an SDL symbol and `window_present` folds to a comptime `false` —
+        // making the headless vulkan-only device byte-for-byte its prior self.
+        const window_present = if (build_options.enable_sdl3) (SDL_WasInit(SDL_INIT_VIDEO) != 0) else false;
+
+        // Windowed present (ADR 0012) needs the platform surface instance extensions;
+        // SDL reports exactly which. Only queried when a window exists.
+        var surface_ext_count: u32 = 0;
+        const surface_exts: ?[*]const [*:0]const u8 = if (window_present)
+            (SDL_Vulkan_GetInstanceExtensions(&surface_ext_count) orelse return error.SdlVulkanExtensions)
+        else
+            null;
+        const instance_handle = try vkb.createInstance(&.{
+            .p_application_info = &app_info,
+            .enabled_extension_count = surface_ext_count,
+            .pp_enabled_extension_names = surface_exts,
+        }, null);
         var vki = vk.InstanceWrapper.load(instance_handle, vkb.dispatch.vkGetInstanceProcAddr.?);
         const instance = vk.InstanceProxy.init(instance_handle, &vki);
         errdefer instance.destroyInstance(null);
@@ -269,10 +320,17 @@ pub const Device = struct {
         const priority = [_]f32{1.0};
         const queue_ci: vk.DeviceQueueCreateInfo = .{ .queue_family_index = family, .queue_count = 1, .p_queue_priorities = &priority };
         var features13: vk.PhysicalDeviceVulkan13Features = .{ .s_type = .physical_device_vulkan_1_3_features, .dynamic_rendering = .true };
+        // The swapchain device extension is enabled only for a present-capable device
+        // (a window exists); a headless device keeps its exact prior form (no extensions).
+        const swapchain_ext: [*:0]const u8 = "VK_KHR_swapchain";
+        const device_ext_count: u32 = if (window_present) 1 else 0;
+        const device_exts: ?[*]const [*:0]const u8 = if (window_present) @ptrCast(&swapchain_ext) else null;
         const device_handle = try instance.createDevice(pdev, &.{
             .p_next = &features13,
             .queue_create_info_count = 1,
             .p_queue_create_infos = @ptrCast(&queue_ci),
+            .enabled_extension_count = device_ext_count,
+            .pp_enabled_extension_names = device_exts,
         }, null);
         var vkd = vk.DeviceWrapper.load(device_handle, vki.dispatch.vkGetDeviceProcAddr.?);
         const dev = vk.DeviceProxy.init(device_handle, &vkd);
@@ -484,19 +542,199 @@ pub const Device = struct {
         try d.queueWaitIdle(self.queue);
     }
 
-    /// Create a presentation swapchain over `desc.surface` (ADR 0012). Deferred: the
-    /// real `VkSurfaceKHR`/`VkSwapchainKHR` bring-up (SDL_Vulkan_CreateSurface, image
-    /// acquisition, present queue) lands with the supervised SDL3 windowing lane, so
-    /// this backend only pins the interface today. Errors: `error.NotImplemented`.
+    /// Create a presentation swapchain over `desc.surface` (ADR 0012): build a
+    /// `VkSurfaceKHR` from the opaque `SDL_Window*` (`SDL_Vulkan_CreateSurface`), then a
+    /// `VkSwapchainKHR` (format/present-mode chosen from `desc`, `fifo` = vsync). Only a
+    /// windowed (SDL3-linked) build can create one — a vulkan-only build has no window
+    /// system, so it returns `error.NotImplemented` (the `enable_sdl3`-false branch is
+    /// the only one compiled then, so no SDL symbol is referenced or linked). Caller
+    /// frees via `Swapchain.deinit`. Errors: `error.NotImplemented`, `error.NoSurfaceHandle`,
+    /// `error.SdlCreateSurface`, `error.NoPresentQueue`, plus surface/swapchain creation.
     pub fn createSwapchain(self: *Device, desc: port.SwapchainDesc) !Swapchain {
-        _ = self;
-        _ = desc;
-        return error.NotImplemented;
+        if (build_options.enable_sdl3) {
+            const window = desc.surface.native orelse return error.NoSurfaceHandle;
+            var surface: vk.SurfaceKHR = .null_handle;
+            if (!SDL_Vulkan_CreateSurface(window, self.instance_handle, null, &surface))
+                return error.SdlCreateSurface;
+            errdefer self.instanceProxy().destroySurfaceKHR(surface, null);
+
+            // The graphics queue must be able to present to this surface. On the desktop
+            // GPUs this bring-up targets, the graphics family also presents; a separate
+            // present-queue selection is deferred (ADR 0012 §7) until a device needs it.
+            const present_ok = try self.instanceProxy().getPhysicalDeviceSurfaceSupportKHR(self.pdev, self.family, surface);
+            if (present_ok != .true) return error.NoPresentQueue;
+
+            const parts = try buildChain(self, surface, desc.format, desc.present_mode, desc.width, desc.height, .null_handle);
+            errdefer destroyChain(self, parts.images, parts.handle);
+
+            const fence = try self.device().createFence(&.{}, null);
+            return .{
+                .surface = surface,
+                .handle = parts.handle,
+                .format = parts.format,
+                .color_space = parts.color_space,
+                .present_mode = parts.present_mode,
+                .port_format = desc.format,
+                .requested_mode = desc.present_mode,
+                .extent = parts.extent,
+                .images = parts.images,
+                .acquire_fence = fence,
+                .current = 0,
+            };
+        } else {
+            // Vulkan-only build (no SDL3 linked): there is no window system to build a
+            // surface from, so the present path is unavailable. `_ = &desc` marks the
+            // parameter used on this comptime branch without a pointless discard on the
+            // other (where it *is* used).
+            _ = &desc;
+            return error.NotImplemented;
+        }
     }
 };
 
-/// One acquired swapchain image for the frame being rendered (ADR 0012). Method
-/// shapes mirror the null backend so a future present driver is backend-agnostic.
+/// The Vulkan objects a swapchain (re)creation produces, shared by `createSwapchain`
+/// and `Swapchain.resize`. Pure Vulkan (no SDL) — the surface it renders onto is
+/// created once, up front, and reused across recreations. Owns nothing on return; the
+/// caller (`Swapchain`) takes ownership of `handle`/`images`.
+const ChainParts = struct {
+    handle: vk.SwapchainKHR,
+    format: vk.Format,
+    color_space: vk.ColorSpaceKHR,
+    present_mode: vk.PresentModeKHR,
+    extent: vk.Extent2D,
+    /// Per-image render targets: swapchain-owned `image` (never destroyed by us; freed
+    /// by `destroySwapchainKHR`) + a `view` we own, `memory = .null_handle`.
+    images: []Texture,
+};
+
+/// Map the port's present mode to its Vulkan enum. `fifo` (vsync) is the only mode
+/// Vulkan guarantees; the caller falls back to it when a requested mode is absent.
+fn presentModeToVk(m: port.PresentMode) vk.PresentModeKHR {
+    return switch (m) {
+        .fifo => .fifo_khr,
+        .mailbox => .mailbox_khr,
+        .immediate => .immediate_khr,
+    };
+}
+
+/// Build a `VkSwapchainKHR` and its per-image views over `surface`, choosing the
+/// surface format (prefer `port_format`, else the surface's first), present mode
+/// (prefer `requested`, else `fifo`), extent (the surface's current extent, else the
+/// `width`/`height` request clamped to caps), and image count (`minImageCount + 1`).
+/// `old` is passed as `oldSwapchain` for driver resource reuse (`.null_handle` on
+/// first build). `dev`'s allocator owns the returned `images` slice. On error every
+/// object created here is released before returning. Errors: surface capability/format/
+/// present-mode queries, swapchain/image-view creation, `error.NoSurfaceFormat`,
+/// `error.OutOfMemory`.
+// Over the ~60-line soft limit by design: swapchain creation is one atomic operation —
+// capabilities/format/present-mode negotiation, then chain + per-image view creation
+// with matched error cleanup. Splitting it would scatter the negotiation from the
+// creation it feeds without cutting the boilerplate.
+fn buildChain(
+    dev: *Device,
+    surface: vk.SurfaceKHR,
+    port_format: port.TextureFormat,
+    requested: port.PresentMode,
+    width: u32,
+    height: u32,
+    old: vk.SwapchainKHR,
+) !ChainParts {
+    const d = dev.device();
+    const inst = dev.instanceProxy();
+    const caps = try inst.getPhysicalDeviceSurfaceCapabilitiesKHR(dev.pdev, surface);
+
+    // Surface format: prefer the port's format; else the surface's first advertised.
+    const wanted = formatToVk(port_format);
+    const formats = try inst.getPhysicalDeviceSurfaceFormatsAllocKHR(dev.pdev, surface, dev.gpa);
+    defer dev.gpa.free(formats);
+    if (formats.len == 0) return error.NoSurfaceFormat;
+    var chosen = formats[0];
+    for (formats) |f| {
+        if (f.format == wanted) {
+            chosen = f;
+            break;
+        }
+    }
+
+    // Present mode: prefer the requested mode; fall back to FIFO (always available).
+    const want_mode = presentModeToVk(requested);
+    const modes = try inst.getPhysicalDeviceSurfacePresentModesAllocKHR(dev.pdev, surface, dev.gpa);
+    defer dev.gpa.free(modes);
+    var mode: vk.PresentModeKHR = .fifo_khr;
+    for (modes) |m| {
+        if (m == want_mode) {
+            mode = want_mode;
+            break;
+        }
+    }
+
+    // Extent: the surface's current extent when defined (0xFFFFFFFF means "the app
+    // chooses"), else the requested size clamped to the surface's allowed range.
+    const extent: vk.Extent2D = if (caps.current_extent.width != 0xFFFF_FFFF)
+        caps.current_extent
+    else
+        .{
+            .width = std.math.clamp(width, caps.min_image_extent.width, caps.max_image_extent.width),
+            .height = std.math.clamp(height, caps.min_image_extent.height, caps.max_image_extent.height),
+        };
+
+    var image_count = caps.min_image_count + 1;
+    if (caps.max_image_count != 0 and image_count > caps.max_image_count) image_count = caps.max_image_count;
+
+    const handle = try d.createSwapchainKHR(&.{
+        .surface = surface,
+        .min_image_count = image_count,
+        .image_format = chosen.format,
+        .image_color_space = chosen.color_space,
+        .image_extent = extent,
+        .image_array_layers = 1,
+        .image_usage = .{ .color_attachment_bit = true },
+        .image_sharing_mode = .exclusive,
+        .pre_transform = caps.current_transform,
+        .composite_alpha = .{ .opaque_bit_khr = true },
+        .present_mode = mode,
+        .clipped = .true,
+        .old_swapchain = old,
+    }, null);
+    errdefer d.destroySwapchainKHR(handle, null);
+
+    const vk_images = try d.getSwapchainImagesAllocKHR(handle, dev.gpa);
+    defer dev.gpa.free(vk_images);
+    const images = try dev.gpa.alloc(Texture, vk_images.len);
+    errdefer dev.gpa.free(images);
+    var made: usize = 0;
+    errdefer for (images[0..made]) |*t| d.destroyImageView(t.view, null);
+    for (vk_images, 0..) |img, i| {
+        const view = try d.createImageView(&.{
+            .image = img,
+            .view_type = .@"2d",
+            .format = chosen.format,
+            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+            .subresource_range = full_range,
+        }, null);
+        images[i] = .{ .image = img, .view = view, .memory = .null_handle, .width = extent.width, .height = extent.height, .format = chosen.format };
+        made = i + 1;
+    }
+
+    return .{ .handle = handle, .format = chosen.format, .color_space = chosen.color_space, .present_mode = mode, .extent = extent, .images = images };
+}
+
+/// Release a chain built by `buildChain`: destroy the image views we own (never the
+/// swapchain images themselves — `destroySwapchainKHR` owns those), free the `images`
+/// slice, then destroy the swapchain. The surface outlives this and is freed by
+/// `Swapchain.deinit`.
+fn destroyChain(dev: *Device, images: []Texture, handle: vk.SwapchainKHR) void {
+    const d = dev.device();
+    for (images) |*t| d.destroyImageView(t.view, null);
+    dev.gpa.free(images);
+    d.destroySwapchainKHR(handle, null);
+}
+
+/// One acquired swapchain image for the frame being rendered (ADR 0012). `target` is
+/// the acquired image (record the shared `CommandList` into it, then `present`);
+/// borrowed — valid until the matching `present`. `status` mirrors the null backend so
+/// the driver is backend-agnostic. On `.out_of_date` the surface must be recreated
+/// before rendering, and `target` points at a still-valid image but must not be used.
 pub const Frame = struct {
     /// The swapchain image to render into this frame.
     target: *Texture,
@@ -506,44 +744,146 @@ pub const Frame = struct {
     status: port.AcquireStatus,
 };
 
-/// A Vulkan presentation swapchain (`VkSwapchainKHR` over a `VkSurfaceKHR`). Deferred:
-/// the real acquire/present/resize path is the supervised SDL3 windowing lane (ADR
-/// 0012); this backend pins the interface so the shared surface stays in lockstep and
-/// the flagged build compiles. Every method is currently `error.NotImplemented`.
+/// A Vulkan presentation swapchain (`VkSwapchainKHR` over a `VkSurfaceKHR`) driving the
+/// acquire → render → present loop with resize/out-of-date recreation (ADR 0012),
+/// matching the null backend's surface. Synchronous by design for this bring-up: acquire
+/// waits on a fence and rendering is submitted with `queueWaitIdle` (mirroring the
+/// offscreen `Device.submit`), so present needs no wait semaphore. Multi-frame-in-flight
+/// pipelining (per-image semaphores) is a deferred optimisation (ADR 0012 §7), internal
+/// to this type when it lands. Built by `Device.createSwapchain`; owns its surface,
+/// swapchain handle, per-image views, and one acquire fence.
 pub const Swapchain = struct {
-    /// Destroy the swapchain and surface. No-op until the real path lands.
+    /// The presentation surface built from the window (owned; freed in `deinit`).
+    surface: vk.SurfaceKHR,
+    /// The current swapchain handle (recreated by `resize`).
+    handle: vk.SwapchainKHR,
+    /// The chosen surface image format and colour space.
+    format: vk.Format,
+    color_space: vk.ColorSpaceKHR,
+    /// The active present mode (the requested one, or FIFO if it was unavailable).
+    present_mode: vk.PresentModeKHR,
+    /// The port-level create parameters, retained so `resize` rebuilds consistently.
+    port_format: port.TextureFormat,
+    requested_mode: port.PresentMode,
+    /// The current drawable extent in pixels.
+    extent: vk.Extent2D,
+    /// Per-image render targets (swapchain-owned images + our views).
+    images: []Texture,
+    /// Signalled by `acquire`; waited on then reset each frame (synchronous acquire).
+    acquire_fence: vk.Fence,
+    /// Index of the most recently acquired image.
+    current: u32,
+
+    /// Destroy the acquire fence, per-image views, swapchain, and surface. `dev` owns
+    /// the GPU objects. Waits for the device to idle first so nothing is in use.
     pub fn deinit(self: *Swapchain, dev: *Device) void {
-        _ = self;
-        _ = dev;
+        const d = dev.device();
+        // Idle so nothing is in use before destroy (a caller may deinit right after
+        // `acquire`). Proof for the discard: on teardown a failed idle-wait is
+        // unrecoverable and changes nothing we release — the same objects are destroyed
+        // regardless — and `deinit` has no error channel, so the error is intentionally
+        // dropped.
+        d.deviceWaitIdle() catch |err| {
+            _ = err; // intentionally dropped: unrecoverable during teardown (see above)
+        };
+        d.destroyFence(self.acquire_fence, null);
+        destroyChain(dev, self.images, self.handle);
+        dev.instanceProxy().destroySurfaceKHR(self.surface, null);
     }
 
-    /// Acquire the next image (`vkAcquireNextImageKHR`). Deferred.
-    /// Errors: `error.NotImplemented`.
+    /// Acquire the next image to render into (`vkAcquireNextImageKHR`). Signals the
+    /// acquire fence, waits on it (so the image is ready when the caller records), and
+    /// returns the image as a `Frame` with a translated `AcquireStatus`. On
+    /// `VK_ERROR_OUT_OF_DATE_KHR` it returns `status = .out_of_date` (never a Zig error —
+    /// ADR 0012 models it as a status enum) with `target` at the current image; the
+    /// caller must `resize` before rendering. Errors: acquire/wait/reset failures other
+    /// than out-of-date.
     pub fn acquire(self: *Swapchain, dev: *Device) !Frame {
-        _ = self;
-        _ = dev;
-        return error.NotImplemented;
+        const d = dev.device();
+        const timeout: u64 = std.math.maxInt(u64);
+        const res = d.acquireNextImageKHR(self.handle, timeout, .null_handle, self.acquire_fence) catch |err| switch (err) {
+            error.OutOfDateKHR => return .{ .target = &self.images[self.current], .index = self.current, .status = .out_of_date },
+            else => return err,
+        };
+        self.current = res.image_index;
+        _ = try d.waitForFences(&.{self.acquire_fence}, .true, timeout);
+        try d.resetFences(&.{self.acquire_fence});
+        const status: port.AcquireStatus = switch (res.result) {
+            .suboptimal_khr => .suboptimal,
+            else => .optimal,
+        };
+        return .{ .target = &self.images[res.image_index], .index = res.image_index, .status = status };
     }
 
-    /// Present `frame` (`vkQueuePresentKHR`). Deferred.
-    /// Errors: `error.NotImplemented`.
+    /// Present `frame` (`vkQueuePresentKHR`). Transitions the rendered image to
+    /// `PRESENT_SRC` (its own one-time submission, so the shared render `CommandList`
+    /// stays swapchain-agnostic), then queues it for display. Returns the translated
+    /// `AcquireStatus`: `.suboptimal`/`.out_of_date` ask the caller to recreate. Assumes
+    /// `frame` came from this swapchain's `acquire` and its image was already rendered
+    /// (submitted with `queueWaitIdle`, so no wait semaphore is needed). Errors:
+    /// transition submit / present failures other than out-of-date.
     pub fn present(self: *Swapchain, dev: *Device, frame: Frame) !port.AcquireStatus {
-        _ = self;
-        _ = dev;
-        _ = frame;
-        return error.NotImplemented;
+        const d = dev.device();
+        var cmd = try dev.beginCommands();
+        defer cmd.deinit(dev);
+        transition(d, cmd.cmd, self.images[frame.index].image, .color_attachment_optimal, .present_src_khr, .{ .color_attachment_write_bit = true }, .{}, .{ .color_attachment_output_bit = true }, .{ .bottom_of_pipe_bit = true });
+        try dev.submit(&cmd);
+
+        const present_info: vk.PresentInfoKHR = .{
+            .swapchain_count = 1,
+            .p_swapchains = @ptrCast(&self.handle),
+            .p_image_indices = @ptrCast(&frame.index),
+        };
+        const res = d.queuePresentKHR(dev.queue, &present_info) catch |err| switch (err) {
+            error.OutOfDateKHR => return .out_of_date,
+            else => return err,
+        };
+        return switch (res) {
+            .suboptimal_khr => .suboptimal,
+            else => .optimal,
+        };
     }
 
-    /// Recreate the swapchain for a new drawable size (on resize/out-of-date).
-    /// Deferred. Errors: `error.NotImplemented`.
+    /// Recreate the swapchain for a new drawable size (on resize / out-of-date). Idles
+    /// the device, builds a fresh chain (reusing the surface and the old handle as
+    /// `oldSwapchain`), then destroys the old chain. The surface and acquire fence are
+    /// retained. Errors: `deviceWaitIdle`, plus any `buildChain` failure (the old chain
+    /// is left intact on failure).
     pub fn resize(self: *Swapchain, dev: *Device, width: u32, height: u32) !void {
-        _ = self;
-        _ = dev;
-        _ = width;
-        _ = height;
-        return error.NotImplemented;
+        try dev.device().deviceWaitIdle();
+        const parts = try buildChain(dev, self.surface, self.port_format, self.requested_mode, width, height, self.handle);
+        destroyChain(dev, self.images, self.handle);
+        self.handle = parts.handle;
+        self.format = parts.format;
+        self.color_space = parts.color_space;
+        self.present_mode = parts.present_mode;
+        self.extent = parts.extent;
+        self.images = parts.images;
+        self.current = 0;
     }
 };
+
+// Compile-time surface parity with the null backend (ADR 0012): the two backends'
+// present surfaces must stay method-for-method compatible, but headless CI can only
+// *run* the null one — so lock the shape here, checked whenever the flagged build
+// (`-Denable-vulkan`) compiles this module. Importing the null backend is within the
+// `gpu` module (no DAG crossing); `@hasDecl`/`@hasField` don't force analysis of the
+// referenced bodies, so this stays a cheap, GPU-free assertion.
+const null_backend = @import("../null/backend.zig");
+comptime {
+    for (.{"createSwapchain"}) |name| {
+        if (!@hasDecl(Device, name) or !@hasDecl(null_backend.Device, name))
+            @compileError("swapchain surface drift: Device." ++ name);
+    }
+    for (.{ "acquire", "present", "resize", "deinit" }) |name| {
+        if (!@hasDecl(Swapchain, name) or !@hasDecl(null_backend.Swapchain, name))
+            @compileError("swapchain surface drift: Swapchain." ++ name);
+    }
+    for (std.meta.fieldNames(Frame)) |name| {
+        if (!@hasField(null_backend.Frame, name))
+            @compileError("Frame field absent from null backend: " ++ name);
+    }
+}
 
 fn graphicsFamily(instance: vk.InstanceProxy, pdev: vk.PhysicalDevice, gpa: Allocator) !u32 {
     const families = try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(pdev, gpa);
