@@ -11,6 +11,8 @@ const World = @import("world.zig").World;
 const command = @import("command.zig");
 const event = @import("event.zig");
 const timer = @import("timer.zig");
+const script_runtime = @import("script_runtime.zig");
+const script = @import("script");
 
 const Allocator = std.mem.Allocator;
 
@@ -51,6 +53,9 @@ pub const Sim = struct {
     systems: std.ArrayList(System) = .empty,
     handlers: std.ArrayList(Handler) = .empty,
     timers: timer.Timers = .{},
+    /// This Sim's single script runtime (ADR 0003 §8: one Lua state per Sim). A
+    /// comptime no-op unless `-Denable-lua`; starts idle until `loadScript`.
+    script_runtime: script_runtime.Runtime = .{},
     dt: f32,
     tick_count: u64 = 0,
 
@@ -61,6 +66,7 @@ pub const Sim = struct {
     }
 
     pub fn deinit(self: *Sim) void {
+        self.script_runtime.deinit(self.gpa);
         self.systems.deinit(self.gpa);
         self.handlers.deinit(self.gpa);
         self.events.deinit(self.gpa);
@@ -68,6 +74,16 @@ pub const Sim = struct {
         self.timers.deinit(self.gpa);
         self.world.deinit();
         self.* = undefined;
+    }
+
+    /// Load `source` as this Sim's single event-handler table (ADR 0003 §1). The
+    /// runtime dispatches `spawned`/`collision_begin` events to its matching keys
+    /// each `tick`. Under a default (no-`-Denable-lua`) build this is a no-op.
+    /// `source` is a NUL-terminated Lua chunk, borrowed only for the call. Errors
+    /// propagate from loading/running the module (bad Lua, a non-table return, or
+    /// allocation failure).
+    pub fn loadScript(self: *Sim, source: [:0]const u8) !void {
+        try self.script_runtime.loadHandlers(self.gpa, source);
     }
 
     /// Register a system; systems run each tick in registration order.
@@ -128,8 +144,13 @@ pub const Sim = struct {
             };
         }
         try self.commands.flush(self.gpa, &self.world, &self.events);
+        // TODO(tracy): bound all script dispatch this frame in one Tracy zone with
+        // the ADR 0003 §6 per-frame budget once the Tracy port lands.
         for (self.events.items()) |ev| {
             for (self.handlers.items) |handler| handler(&self.world, ev);
+            // Script dispatch (ADR 0003 §1/§3). A comptime no-op — zero cost, sim
+            // bit-identical — unless `-Denable-lua`; catches handler errors (§9).
+            self.script_runtime.dispatch(ev);
         }
         self.events.clear();
         try self.timers.advance(self.gpa, &self.world, self.dt);
@@ -286,4 +307,50 @@ test "sim: a tick with no scheduled timers does not perturb the world's state ha
     for (0..60) |_| @import("systems.zig").movement(&reference, sim.dt);
 
     try testing.expectEqual(reference.stateHash(), sim.stateHash());
+}
+
+/// A one-shot system that queues a single deferred spawn on its first tick, so a
+/// `spawned` event is emitted at flush for the dispatch tests below.
+const OneShotSpawner = struct {
+    var did: bool = false;
+    fn system(ctx: *Context) SystemError!void {
+        if (!did) {
+            _ = try ctx.commands.spawn(ctx.gpa, ctx.world, null, null);
+            did = true;
+        }
+    }
+};
+
+test "sim: event dispatch is a no-op when no script is loaded" {
+    // Runs in every build (default included): a Sim with no handler table must
+    // dispatch its `spawned` event harmlessly.
+    OneShotSpawner.did = false;
+
+    var sim = Sim.init(testing.allocator, 1.0 / 60.0);
+    defer sim.deinit();
+    try sim.addSystem(OneShotSpawner.system);
+
+    try sim.tick();
+    try testing.expectEqual(@as(usize, 1), sim.world.count()); // spawn applied
+    try testing.expect(sim.script_runtime.handlerFieldInt("spawns") == null); // no table
+}
+
+test "sim: a spawned entity fires the Lua on_spawn handler (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+    OneShotSpawner.did = false;
+
+    var sim = Sim.init(testing.allocator, 1.0 / 60.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = { spawns = 0 }
+        \\function t.on_spawn(self) t.spawns = t.spawns + 1 end
+        \\return t
+    );
+    try sim.addSystem(OneShotSpawner.system);
+
+    try sim.tick(); // spawner queues a spawn → flush emits `spawned` → on_spawn
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("spawns").?);
+
+    try sim.tick(); // one-shot: no further spawn, so no further on_spawn
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("spawns").?);
 }

@@ -2,7 +2,7 @@
 //! build directly. It wires the enforced module import DAG:
 //!   core → (nothing above)
 //!   data, ecs, gpu, platform, physics, script → core
-//!   engine → core + data + ecs + gpu + platform + physics
+//!   engine → core + data + ecs + gpu + platform + physics + script
 //!   runtime (exe) → engine
 //! Backend/adapter selection for the `gpu` and `platform` ports happens here at
 //! comptime via build options; both default to their stub/null adapter.
@@ -149,6 +149,11 @@ pub fn build(b: *std.Build) void {
     engine.addImport("gpu", gpu);
     engine.addImport("platform", platform);
     engine.addImport("physics", physics);
+    // Scripting (ADR 0003, accepted): the engine dispatches Sim events to a
+    // Lua handler table. `script` compiles as a stub without `-Denable-lua`, so
+    // this import adds no Lua to a default build — the dispatch path is a
+    // comptime no-op there (see `src/engine/script_runtime.zig`).
+    engine.addImport("script", script);
 
     // --- Runner executable --------------------------------------------------
     const exe = b.addExecutable(.{

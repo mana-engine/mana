@@ -6,8 +6,10 @@ appear; nothing above `script` sees a Lua type. The interpreter is selected at
 comptime via `-Denable-lua`; **there is no default backend** — a build without the
 flag compiles the module as a stub (no scripting API table), so ordinary and CI
 builds are Lua-free. See `docs/adr/0003` (the Lua scripting API contract) and
-`README.md`. The API surface itself is deliberately unimplemented until its own
-task — only the dependency is wired in (GitHub #3 spike).
+`README.md`. The `mana` table (#5) and event dispatch (#6) are implemented; the
+`engine` seam that drives dispatch is `src/engine/script_runtime.zig` (comptime
+no-op without `-Denable-lua`). The rest of §2's live-`Sim` surface is still
+deferred (see the last bullet below).
 
 ## Hard-won knowledge (ziglua / zlua / Lua 5.4)
 
@@ -55,6 +57,16 @@ task — only the dependency is wired in (GitHub #3 spike).
   later engine → script wiring task begins mirroring real spawns/despawns into
   it via `setGeneration`; until then `mana.is_valid` is honestly `false` for
   every handle, which is correct (no live entities exist without that wiring).
+- **Event dispatch returns a `DispatchOutcome`, it does not log (issue #6).**
+  `State.dispatchSpawn`/`dispatchCollisionBegin` catch a throwing handler (ADR
+  0003 §9), unwind the Lua stack, and return `.errored` — the *engine*
+  (`script_runtime.zig`) logs it. This split is load-bearing: the Zig test runner
+  counts any `.err`-severity `std.log` call as a failed test (see
+  `lib/compiler/test_runner.zig`), so if `State` logged the error itself, the
+  unit test that exercises the caught-error stack-unwind path would fail on the
+  log alone. Returning the outcome lets that fragile path be asserted with no
+  `.err` emission; `lastError()` carries the message across the unwind for the
+  engine to log. Same reason `mana.zig` never invokes its `.err` branch in a test.
 - **Most of ADR 0003 §2's v1 surface needs a live `Sim`/`World` `script` cannot
   reach yet** (`position`, `set_velocity`, `get`, `set`, `spawn`, `despawn`,
   `after`, `every`, `cancel`, `now`, `random`, `random_int`) — component
