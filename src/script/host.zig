@@ -57,6 +57,16 @@ pub const Host = struct {
         /// attach at the next flush, ADR 0003 §2). An unknown prototype returns a
         /// packed invalid handle (a content bug the engine logs), never a crash.
         spawn: *const fn (ctx: *anyopaque, name: []const u8, pos: core.Vec3) u64,
+        /// Schedule Lua registry reference `ref` to fire once after `delay` seconds
+        /// (ADR 0003 §2 `mana.after`; ADR 0019). Returns a packed timer handle. The
+        /// engine owns `ref` until the timer fires or is cancelled.
+        timer_after: *const fn (ctx: *anyopaque, ref: i32, delay: f32) u64,
+        /// Schedule Lua registry reference `ref` to fire every `interval` seconds
+        /// (`mana.every`). Returns a packed timer handle.
+        timer_every: *const fn (ctx: *anyopaque, ref: i32, interval: f32) u64,
+        /// Cancel the timer named by packed `handle` and release its Lua reference
+        /// (`mana.cancel`). A stale handle is a no-op.
+        timer_cancel: *const fn (ctx: *anyopaque, handle: u64) void,
     };
 
     /// Thin forwarders so callers read `host.position(h)` rather than threading
@@ -79,6 +89,15 @@ pub const Host = struct {
     pub fn spawn(self: Host, name: []const u8, pos: core.Vec3) u64 {
         return self.vtable.spawn(self.ctx, name, pos);
     }
+    pub fn timerAfter(self: Host, ref: i32, delay: f32) u64 {
+        return self.vtable.timer_after(self.ctx, ref, delay);
+    }
+    pub fn timerEvery(self: Host, ref: i32, interval: f32) u64 {
+        return self.vtable.timer_every(self.ctx, ref, interval);
+    }
+    pub fn timerCancel(self: Host, handle: u64) void {
+        self.vtable.timer_cancel(self.ctx, handle);
+    }
 };
 
 const testing = @import("std").testing;
@@ -94,6 +113,9 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         last_vel: core.Vec3 = .{ .x = 0, .y = 0, .z = 0 },
         last_spawn_name: []const u8 = "",
         last_spawn_pos: core.Vec3 = .{ .x = 0, .y = 0, .z = 0 },
+        last_ref: i32 = 0,
+        last_delay: f32 = 0,
+        last_cancel: u64 = 0,
 
         fn isValid(ctx: *anyopaque, handle: u64) bool {
             _ = handle;
@@ -119,6 +141,21 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
             self.last_spawn_pos = pos;
             return 77;
         }
+        fn timerAfter(ctx: *anyopaque, ref: i32, delay: f32) u64 {
+            const self = fromOpaque(ctx);
+            self.last_ref = ref;
+            self.last_delay = delay;
+            return 88;
+        }
+        fn timerEvery(ctx: *anyopaque, ref: i32, interval: f32) u64 {
+            const self = fromOpaque(ctx);
+            self.last_ref = ref;
+            self.last_delay = interval;
+            return 99;
+        }
+        fn timerCancel(ctx: *anyopaque, handle: u64) void {
+            fromOpaque(ctx).last_cancel = handle;
+        }
         fn fromOpaque(ctx: *anyopaque) *@This() {
             return @ptrCast(@alignCast(ctx));
         }
@@ -129,6 +166,9 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
             .set_velocity = setVelocity,
             .despawn = despawn,
             .spawn = spawn,
+            .timer_after = timerAfter,
+            .timer_every = timerEvery,
+            .timer_cancel = timerCancel,
         };
     };
 
@@ -146,4 +186,8 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
     try testing.expectEqual(@as(u64, 77), host.spawn("segment", .{ .x = 7, .y = 8, .z = 9 }));
     try testing.expectEqualStrings("segment", fake.last_spawn_name);
     try testing.expect(fake.last_spawn_pos.approxEql(.{ .x = 7, .y = 8, .z = 9 }, 1e-6));
+    try testing.expectEqual(@as(u64, 99), host.timerEvery(5, 0.15));
+    try testing.expectEqual(@as(i32, 5), fake.last_ref);
+    host.timerCancel(99);
+    try testing.expectEqual(@as(u64, 99), fake.last_cancel);
 }

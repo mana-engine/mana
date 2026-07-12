@@ -43,6 +43,17 @@ pub const Callback = union(enum) {
 pub const Handle = struct {
     index: u32,
     generation: u32,
+
+    /// Pack into the u64 a script receives as `mana.every`/`after`'s return value
+    /// (generation high, index low — the same layout as an entity handle).
+    pub fn pack(h: Handle) u64 {
+        return (@as(u64, h.generation) << 32) | @as(u64, h.index);
+    }
+
+    /// Inverse of `pack`.
+    pub fn unpack(v: u64) Handle {
+        return .{ .index = @truncate(v), .generation = @intCast(v >> 32) };
+    }
 };
 
 const Entry = struct {

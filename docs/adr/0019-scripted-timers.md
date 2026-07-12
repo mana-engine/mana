@@ -1,6 +1,6 @@
 # 0019. Scripted timers: `mana.after`/`every`/`cancel` on the timer wheel
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-12
 
 ## Context
