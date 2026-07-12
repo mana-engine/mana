@@ -7,6 +7,11 @@
 //! stay inside this subtree — the port surface above is plain data. The loader
 //! (`vulkan-1`) is loaded dynamically at runtime, so no import library / Vulkan SDK
 //! is needed.
+//!
+//! Over the ~500-line soft limit by design: this is one irreducibly verbose Vulkan
+//! backend — device/pipeline/command/barrier boilerplate — kept as a single unit
+//! behind the `gpu` port. Splitting the handles across files would scatter tightly
+//! coupled boilerplate without reducing it.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -368,6 +373,9 @@ pub const Device = struct {
     /// Build the scene graphics pipeline (dynamic rendering, `port.Vertex` input)
     /// targeting `format`. Caller frees via `Pipeline.deinit`. Errors: shader/layout/
     /// pipeline creation.
+    // Over the ~60-line soft limit by design: the body is one flat
+    // `GraphicsPipelineCreateInfo` literal (inherent Vulkan boilerplate); splitting it
+    // would only make the single descriptor more artificial.
     pub fn createScenePipeline(self: *Device, format: port.TextureFormat) !Pipeline {
         const d = self.device();
         const module = try d.createShaderModule(&.{ .code_size = scene_spv.len, .p_code = @ptrCast(&scene_spv) }, null);
