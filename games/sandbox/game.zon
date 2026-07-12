@@ -5,4 +5,6 @@
     .scenes = .{
         "scenes/hello.zon",
     },
+    // This demo is framed isometrically (ADR 0014). Omit to get top-down orthographic.
+    .projection = .{ .isometric = .{ .half_w = 30, .half_h = 15, .z_height = 20 } },
 }

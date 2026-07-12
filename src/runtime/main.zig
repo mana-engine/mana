@@ -106,7 +106,7 @@ fn runRender(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, path: []c
         var world = try engine.scene.loadWorldFromFile(gpa, io, Io.Dir.cwd(), scene_path);
         defer world.deinit();
 
-        const view: engine.render.View = .{ .width = 512, .height = 512, .tile = .{ .half_w = 30, .half_h = 15, .z_height = 20 } };
+        const view: engine.render.View = .{ .width = 512, .height = 512, .projection = manifest.projection };
         const quads = try engine.render.project(gpa, &world, view, &engine.render.default_palette);
         defer gpa.free(quads);
 
@@ -218,7 +218,7 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
         _ = frame_arena.reset(.retain_capacity);
         const fa = frame_arena.allocator();
         const size = window.size();
-        const view: engine.render.View = .{ .width = size[0], .height = size[1], .tile = .{ .half_w = 30, .half_h = 15, .z_height = 20 } };
+        const view: engine.render.View = .{ .width = size[0], .height = size[1], .projection = manifest.projection };
         const quads = try engine.render.project(fa, &sim.world, view, &engine.render.default_palette);
         try engine.gpu.renderQuads(fa, &dev, &pipeline, frame.target, quads, clear);
         switch (try swapchain.present(&dev, frame)) {

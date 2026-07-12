@@ -6,4 +6,6 @@
         "scenes/town_square.zon",
         "scenes/archive.zon",
     },
+    // An isometric adventure — declare the iso view (ADR 0014).
+    .projection = .{ .isometric = .{ .half_w = 30, .half_h = 15, .z_height = 20 } },
 }

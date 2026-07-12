@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const data = @import("data");
+const engine = @import("engine");
 
 const Allocator = std.mem.Allocator;
 
@@ -27,6 +28,10 @@ pub const Manifest = struct {
     /// Scripting API version this package requires (ADR 0003 gate). 0 = none.
     /// The runner refuses a version higher than the build provides.
     script_api: u32 = 0,
+    /// Camera projection the package is framed through (ADR 0014). Defaults to
+    /// top-down orthographic; isometric content declares `.isometric` explicitly.
+    /// The engine has no hardcoded camera — the projection comes from package data.
+    projection: engine.render.Projection = .{ .orthographic = .{} },
 };
 
 /// Parse a manifest from NUL-terminated ZON `source`. Unknown fields are ignored
@@ -69,6 +74,34 @@ test "manifest: parse a minimal game.zon" {
     try testing.expectEqual(@as(usize, 1), m.scenes.len);
     try testing.expect(m.native_module == null);
     try testing.expectEqual(@as(u32, 0), m.script_api); // defaults to none
+}
+
+test "manifest: projection defaults to orthographic, iso is declared explicitly" {
+    const default_src =
+        \\.{
+        \\    .name = "grid",
+        \\    .version = "0.1.0",
+        \\    .entry_scene = "s.zon",
+        \\    .scenes = .{ "s.zon" },
+        \\}
+    ;
+    const d = try parse(testing.allocator, default_src);
+    defer free(testing.allocator, d);
+    try testing.expect(d.projection == .orthographic); // no field → top-down default
+
+    const iso_src =
+        \\.{
+        \\    .name = "iso",
+        \\    .version = "0.1.0",
+        \\    .entry_scene = "s.zon",
+        \\    .scenes = .{ "s.zon" },
+        \\    .projection = .{ .isometric = .{ .half_w = 30, .half_h = 15, .z_height = 20 } },
+        \\}
+    ;
+    const m = try parse(testing.allocator, iso_src);
+    defer free(testing.allocator, m);
+    try testing.expect(m.projection == .isometric);
+    try testing.expectEqual(@as(f32, 30), m.projection.isometric.half_w);
 }
 
 test "manifest: parse an optional native module" {
