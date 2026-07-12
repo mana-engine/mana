@@ -10,3 +10,6 @@ zig-pkg/
 
 # Personal, per-machine Claude Code settings (settings.json IS committed)
 .claude/settings.local.json
+
+# Transient subagent git worktrees
+.claude/worktrees/
