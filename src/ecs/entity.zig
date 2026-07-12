@@ -88,9 +88,29 @@ pub const EntityAllocator = struct {
 
 const testing = std.testing;
 
-test "entity: pack/unpack round-trips" {
-    const e: Entity = .{ .index = 12345, .generation = 678 };
-    try testing.expect(Entity.unpack(e.pack()).eql(e));
+test "entity: pack lays out generation high / index low exactly (ADR 0003 §4 ABI)" {
+    // Pin the wire layout to a literal so a silent change to either this or the
+    // identical packing in `src/script/handle.zig` (same ADR 0003 §4 layout,
+    // deliberately duplicated per the module import DAG) fails a test.
+    const e: Entity = .{ .index = 5, .generation = 10 };
+    try testing.expectEqual(@as(u64, 0x0000_000A_0000_0005), e.pack());
+    try testing.expect(Entity.unpack(0x0000_000A_0000_0005).eql(e));
+}
+
+test "entity: pack/unpack round-trips across edge and max index/generation" {
+    const cases = [_]Entity{
+        .{ .index = 0, .generation = 0 },
+        .{ .index = 1, .generation = 0 },
+        .{ .index = 0, .generation = 1 },
+        .{ .index = std.math.maxInt(u32), .generation = 0 },
+        .{ .index = 0, .generation = std.math.maxInt(u32) },
+        .{ .index = std.math.maxInt(u32), .generation = std.math.maxInt(u32) },
+        .{ .index = 12345, .generation = 678 },
+        .{ .index = 0x8000_0000, .generation = 0x8000_0001 }, // top bit set in both halves
+    };
+    for (cases) |e| {
+        try testing.expect(Entity.unpack(e.pack()).eql(e));
+    }
 }
 
 test "entity allocator: fresh handles are valid and distinct" {

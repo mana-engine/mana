@@ -82,6 +82,15 @@ pub const Registry = struct {
 
 const testing = std.testing;
 
+test "handle: pack lays out generation high / index low exactly (ADR 0003 §4 ABI)" {
+    // Pin the wire layout to a literal so a silent change to either this or the
+    // identical `ecs.Entity` packing (`src/ecs/entity.zig`, same ADR 0003 §4
+    // layout, deliberately duplicated per the module import DAG) fails a test.
+    const h: Handle = .{ .index = 5, .generation = 10 };
+    try testing.expectEqual(@as(u64, 0x0000_000A_0000_0005), h.pack());
+    try testing.expect(Handle.unpack(0x0000_000A_0000_0005).eql(h));
+}
+
 test "handle: unpack(pack(x)) round-trips across edge and max index/generation" {
     const cases = [_]Handle{
         .{ .index = 0, .generation = 0 },
