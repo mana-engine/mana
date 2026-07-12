@@ -3,25 +3,26 @@
 //! Compiled only under `-Denable-lua`.
 //!
 //! Members that need no live Sim — `version`, `log` — are implemented directly.
-//! The live-Sim members reach the world/clock/command-buffer through the ADR 0015
-//! host seam (`host.zig`): the engine installs a `Host` on the owning `State` for
-//! the duration of each event dispatch, and these accessors call through it. Wired
-//! so far (issue #5): the reads `is_valid`, `position`, `now`, and the deferred
-//! mutations `set_velocity`, `set_position`, `despawn`, `spawn` (queued on the buffer,
-//! applied at the next flush — never a mid-dispatch world mutation). `is_valid`
-//! prefers the host when present (authoritative live-world check) and falls back to
-//! this `State`'s own `handle.Registry` when no Sim is dispatching, so its pre-seam
-//! behavior and tests still hold; mutations with no host installed are dropped
-//! (`spawn` returns an invalid handle). Timers `after`/`every`/`cancel` (ADR 0019)
-//! reference the Lua callback in the registry and schedule it on the engine's wheel
-//! through the host, firing host-live in the dispatch phase.
+//! The live-Sim members reach the world/clock/command-buffer/RNG through the ADR
+//! 0015 host seam (`host.zig`): the engine installs a `Host` on the owning `State`
+//! for the duration of each event dispatch, and these accessors call through it.
+//! Wired so far: the reads `is_valid`, `position`, `now`, `random`, `random_int`
+//! (ADR 0022, issue #47), and the deferred mutations `set_velocity`, `set_position`,
+//! `despawn`, `spawn` (queued on the buffer, applied at the next flush — never a
+//! mid-dispatch world mutation). `is_valid` prefers the host when present
+//! (authoritative live-world check) and falls back to this `State`'s own
+//! `handle.Registry` when no Sim is dispatching, so its pre-seam behavior and tests
+//! still hold; mutations with no host installed are dropped (`spawn` returns an
+//! invalid handle); `random`/`random_int` return `0` with no host installed (the
+//! same graceful-degradation each other live read uses). Timers `after`/`every`/
+//! `cancel` (ADR 0019) reference the Lua callback in the registry and schedule it
+//! on the engine's wheel through the host, firing host-live in the dispatch phase.
 //!
-//! The remaining §2 members — `set` (needs a data-component store), `get`, and
-//! `random`/`random_int` (seeded `core.Rng`) — land as additive host-vtable entries
-//! in follow-up slices. Do not add stub/fake
-//! behavior for them; an absent `mana` key is the honest, checkable signal that a
-//! member is not implemented yet, matching how a missing event-handler key means
-//! "no handler" elsewhere in ADR 0003.
+//! The remaining §2 members — `set`/`get` (need a data-component store) — land as
+//! additive host-vtable entries in follow-up slices. Do not add stub/fake behavior
+//! for them; an absent `mana` key is the honest, checkable signal that a member is
+//! not implemented yet, matching how a missing event-handler key means "no
+//! handler" elsewhere in ADR 0003.
 
 const std = @import("std");
 const zlua = @import("zlua");
@@ -97,6 +98,14 @@ pub fn pushManaTable(l: *Lua, entities: *const Registry, host: *const ?Host) voi
     l.pushLightUserdata(@ptrCast(host));
     l.pushClosure(zlua.wrap(manaCancel), 1);
     l.setField(-2, "cancel");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaRandom), 1);
+    l.setField(-2, "random");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaRandomInt), 1);
+    l.setField(-2, "random_int");
 }
 
 /// Read a `*const ?Host` back from closure upvalue `idx` (a light-userdata pointer
@@ -283,6 +292,28 @@ fn manaCancel(l: *Lua) !i32 {
     return 0;
 }
 
+/// `mana.random()` (ADR 0003 §2; ADR 0022): a uniform float in `[0, 1)` drawn from
+/// the sim's seeded `core.Rng` stream, so runs are reproducible. Immediate, like
+/// `position`/`now` — never deferred. Returns `0` with no Sim dispatching (the same
+/// graceful degradation `mana.now` uses).
+fn manaRandom(l: *Lua) !i32 {
+    const v: f32 = if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.random() else 0;
+    l.pushNumber(v);
+    return 1;
+}
+
+/// `mana.random_int(lo, hi)` (ADR 0003 §2; ADR 0022): a uniform integer in the
+/// inclusive `[min(lo, hi), max(lo, hi)]` drawn from the same stream — see
+/// `core.Rng.intRange` for the exact, version-stable mapping and the `lo > hi`/
+/// `lo == hi` behavior. Returns `lo` with no Sim dispatching.
+fn manaRandomInt(l: *Lua) !i32 {
+    const lo: i64 = @intCast(l.checkInteger(1));
+    const hi: i64 = @intCast(l.checkInteger(2));
+    const v: i64 = if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.randomInt(lo, hi) else lo;
+    l.pushInteger(v);
+    return 1;
+}
+
 const testing = std.testing;
 
 test "mana: table shape exposes exactly the wired members (version..despawn); version == 1" {
@@ -295,20 +326,20 @@ test "mana: table shape exposes exactly the wired members (version..despawn); ve
     pushManaTable(l, &registry, &host);
     const t: i32 = l.getTop();
 
-    // Exact shape: no more, no less than the seven members wired so far
-    // (ADR 0003 §2 — see this file's module doc for the deferred rest).
+    // Exact shape: no more, no less than the members wired so far (ADR 0003 §2 —
+    // see this file's module doc for the deferred rest).
     var key_count: usize = 0;
     l.pushNil();
     while (l.next(t)) {
         key_count += 1;
         l.pop(1); // drop value; keep key on the stack to advance `next`
     }
-    try testing.expectEqual(@as(usize, 12), key_count);
+    try testing.expectEqual(@as(usize, 14), key_count);
 
     try testing.expectEqual(zlua.LuaType.number, l.getField(t, "version"));
     try testing.expectEqual(@as(i64, 1), try l.toInteger(-1));
     l.pop(1);
-    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "set_position", "despawn", "spawn", "every", "after", "cancel" }) |name| {
+    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "set_position", "despawn", "spawn", "every", "after", "cancel", "random", "random_int" }) |name| {
         try testing.expectEqual(zlua.LuaType.function, l.getField(t, name));
         l.pop(1);
     }
@@ -380,4 +411,20 @@ test "mana.log: tolerates a missing msg argument without raising" {
     l.setGlobal("mana");
 
     try l.doString("mana.log('info')");
+}
+
+test "mana.random/random_int: no Sim dispatching degrades to 0 / lo, never raises" {
+    var l = try Lua.init(testing.allocator);
+    defer l.deinit();
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+    var host: ?Host = null;
+
+    pushManaTable(l, &registry, &host);
+    l.setGlobal("mana");
+
+    try l.doString("return mana.random(), mana.random_int(5, 9)");
+    try testing.expectEqual(@as(f64, 0), try l.toNumber(-2));
+    try testing.expectEqual(@as(i64, 5), try l.toInteger(-1));
+    l.pop(2);
 }

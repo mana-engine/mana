@@ -33,3 +33,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0019 | Scripted timers: `mana.after`/`every`/`cancel` on the timer wheel | accepted |
 | 0020 | `mana.set_position`: write an entity's position from script | accepted |
 | 0021 | `on_key`: edge-driven keyboard input for scripts | accepted |
+| 0022 | `mana.random`/`mana.random_int`: seeded RNG on `Sim` | proposed |

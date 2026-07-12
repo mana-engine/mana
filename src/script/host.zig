@@ -8,11 +8,13 @@
 //! Compiled only under `-Denable-lua` (imported by `lua.zig`/`mana.zig`); no `zlua`
 //! dependency itself, so this file is plain, dependency-free Zig over `core`.
 //!
-//! Wired so far (issue #5): the read surface — `is_valid`, `position`, `now` — and
-//! the deferred-mutation surface — `set_velocity`, `despawn`, `spawn` (queued on the
-//! engine's command buffer, applied at the next flush). The remaining accessors
-//! (`set`, `get`, `random`) land as additive vtable entries in follow-up slices; the
-//! *mechanism* here is fixed by ADR 0015 and does not churn.
+//! Wired so far: the read surface — `is_valid`, `position`, `now`, `random`,
+//! `random_int` (ADR 0022, issue #47) — and the deferred-mutation surface —
+//! `set_velocity`, `set_position`, `despawn`, `spawn`, `timer_after`/`timer_every`/
+//! `timer_cancel` (queued on the engine's command buffer/timer wheel, applied at
+//! the next flush). The remaining accessors (`set`, `get`) land as additive vtable
+//! entries in follow-up slices; the *mechanism* here is fixed by ADR 0015 and does
+//! not churn.
 //!
 //! Mutations return nothing: they are fire-and-forget deferred commands (ADR 0003
 //! §2). A stale handle is dropped at flush; allocation failure is recorded on the
@@ -70,6 +72,14 @@ pub const Host = struct {
         /// Cancel the timer named by packed `handle` and release its Lua reference
         /// (`mana.cancel`). A stale handle is a no-op.
         timer_cancel: *const fn (ctx: *anyopaque, handle: u64) void,
+        /// Uniform float in `[0, 1)` drawn from the sim's seeded `core.Rng`
+        /// (`mana.random`, ADR 0022). Immediate, like `position`/`now` — never
+        /// deferred, since it reads no world state and mutates only the RNG stream.
+        random: *const fn (ctx: *anyopaque) f32,
+        /// Uniform integer in the inclusive `[min(lo, hi), max(lo, hi)]` drawn from
+        /// the same stream (`mana.random_int`, ADR 0022). Immediate, same as
+        /// `random`. See `core.Rng.intRange` for the exact (version-stable) mapping.
+        random_int: *const fn (ctx: *anyopaque, lo: i64, hi: i64) i64,
     };
 
     /// Thin forwarders so callers read `host.position(h)` rather than threading
@@ -104,6 +114,12 @@ pub const Host = struct {
     pub fn timerCancel(self: Host, handle: u64) void {
         self.vtable.timer_cancel(self.ctx, handle);
     }
+    pub fn random(self: Host) f32 {
+        return self.vtable.random(self.ctx);
+    }
+    pub fn randomInt(self: Host, lo: i64, hi: i64) i64 {
+        return self.vtable.random_int(self.ctx, lo, hi);
+    }
 };
 
 const testing = @import("std").testing;
@@ -123,6 +139,9 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         last_ref: i32 = 0,
         last_delay: f32 = 0,
         last_cancel: u64 = 0,
+        random_value: f32 = 0,
+        last_random_int_lo: i64 = 0,
+        last_random_int_hi: i64 = 0,
 
         fn isValid(ctx: *anyopaque, handle: u64) bool {
             _ = handle;
@@ -167,6 +186,15 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         fn timerCancel(ctx: *anyopaque, handle: u64) void {
             fromOpaque(ctx).last_cancel = handle;
         }
+        fn random(ctx: *anyopaque) f32 {
+            return fromOpaque(ctx).random_value;
+        }
+        fn randomInt(ctx: *anyopaque, lo: i64, hi: i64) i64 {
+            const self = fromOpaque(ctx);
+            self.last_random_int_lo = lo;
+            self.last_random_int_hi = hi;
+            return lo;
+        }
         fn fromOpaque(ctx: *anyopaque) *@This() {
             return @ptrCast(@alignCast(ctx));
         }
@@ -181,10 +209,12 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
             .timer_after = timerAfter,
             .timer_every = timerEvery,
             .timer_cancel = timerCancel,
+            .random = random,
+            .random_int = randomInt,
         };
     };
 
-    var fake: Fake = .{ .valid = true, .pos = .{ .x = 1, .y = 2, .z = 3 }, .t = 0.5 };
+    var fake: Fake = .{ .valid = true, .pos = .{ .x = 1, .y = 2, .z = 3 }, .t = 0.5, .random_value = 0.25 };
     const host: Host = .{ .ctx = &fake, .vtable = &Fake.vtable };
 
     try testing.expect(host.isValid(0));
@@ -204,4 +234,8 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
     try testing.expectEqual(@as(i32, 5), fake.last_ref);
     host.timerCancel(99);
     try testing.expectEqual(@as(u64, 99), fake.last_cancel);
+    try testing.expectEqual(@as(f32, 0.25), host.random());
+    try testing.expectEqual(@as(i64, 3), host.randomInt(3, 8));
+    try testing.expectEqual(@as(i64, 3), fake.last_random_int_lo);
+    try testing.expectEqual(@as(i64, 8), fake.last_random_int_hi);
 }

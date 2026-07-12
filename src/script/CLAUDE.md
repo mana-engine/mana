@@ -72,13 +72,12 @@ deferred (see the last bullet below).
   `World`/`CommandBuffer`, so it declares a `core`-typed `Host` (opaque ctx +
   fn-pointer vtable) that `engine` fills for the duration of each dispatch
   (`script_runtime.zig` builds a `HostCtx` over the live world + tick-derived
-  `now` and calls `State.setHost` around dispatch; the `mana` closures capture a
-  pointer to the `State`'s `host` slot). **Wired so far (issue #5, read slice):**
-  `position`, `now`, and the authoritative `is_valid` (host when a Sim is
-  dispatching, `handle.Registry` fallback otherwise). **Still deferred** —
-  add as additive vtable entries, do NOT stub: deferred mutations
-  (`set_velocity`, `set`, `spawn`, `despawn`) through the command buffer with
-  ADR 0003 §9 per-handler rollback and OOM-vs-content-error handling; `get`
-  (named data components — needs a data-component store); `random`/`random_int`
-  (needs a seeded `core.Rng` on `Sim`); `after`/`every`/`cancel` (timer wheel).
-  An absent `mana` key remains the honest signal that a member is not yet wired.
+  `now` + the sim's seeded `core.Rng` and calls `State.setHost` around dispatch;
+  the `mana` closures capture a pointer to the `State`'s `host` slot). **Wired so
+  far:** the reads `position`, `now`, `random`/`random_int` (ADR 0022, #47) and the
+  authoritative `is_valid` (host when a Sim is dispatching, `handle.Registry`
+  fallback otherwise); the deferred mutations `set_velocity`, `set_position`,
+  `spawn`, `despawn`; the timers `after`/`every`/`cancel` (ADR 0019). **Still
+  deferred** — add as additive vtable entries, do NOT stub: `set`/`get` (named
+  data components — needs a data-component store). An absent `mana` key remains
+  the honest signal that a member is not yet wired.
