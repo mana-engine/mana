@@ -1,8 +1,10 @@
 //! Generational entity handle and its allocator. A handle is an (index,
 //! generation) pair: the index addresses a slot, the generation detects reuse so a
 //! stale handle (entity despawned, slot recycled) is rejected instead of aliasing a
-//! new entity. The u64 packing is the ABI the scripting layer hands to Lua
-//! (ADR 0003 §4) — it lives only here and changes only with a scripting-API bump.
+//! new entity. This u64 packing matches the scripting ABI's opaque handle layout
+//! (ADR 0003 §4) bit-for-bit; `script` keeps its own copy in `src/script/handle.zig`
+//! rather than importing `ecs` (module import DAG), so the two are pinned to the
+//! same ADR and must change together if that ADR ever bumps the layout.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

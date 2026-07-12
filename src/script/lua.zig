@@ -9,9 +9,20 @@
 
 const std = @import("std");
 const zlua = @import("zlua");
+const mana = @import("mana.zig");
 
 /// The Lua binding type, re-exported so callers need not import `zlua` directly.
 pub const Lua = zlua.Lua;
+
+test {
+    // `script.zig`'s `if (build_options.enable_lua) @import("lua.zig")` does not
+    // pull a comptime-conditionally-imported file's tests into the test binary
+    // (see `src/script/CLAUDE.md`); the dedicated `lua_mod` test target in
+    // `build.zig` roots directly at this file instead. Referencing `mana`
+    // (which in turn imports `handle`) here pulls both files' tests into that
+    // same binary the same way — otherwise they would silently never run.
+    _ = mana;
+}
 
 /// Create a fresh, unsandboxed Lua 5.4 interpreter state with no standard
 /// libraries loaded. Caller owns it and must `deinit()`. `gpa` backs Lua's
@@ -67,6 +78,13 @@ const sandbox_math_excluded = [_][:0]const u8{ "random", "randomseed" };
 /// their real `_G` (see the isolation tests below).
 pub const State = struct {
     lua: *Lua,
+    /// This State's own live-entity generation table, backing the `mana`
+    /// table's `is_valid` (ADR 0003 §2, §4; see `mana.zig`). Starts empty; a
+    /// later engine → script wiring task will keep it in sync with real
+    /// spawns/despawns. Address must stay stable for as long as any script
+    /// `_ENV` built from this `State` exists — `pushManaTable` captures a
+    /// pointer to it.
+    entities: mana.Registry = .{},
 
     /// Create a fresh sandboxed state. `gpa` backs Lua's own allocations and
     /// must outlive the returned `State`; caller owns it and must `deinit()`.
@@ -99,15 +117,22 @@ pub const State = struct {
 
     /// Destroy the interpreter. Invalidates every value ever pushed from it.
     pub fn deinit(self: *State) void {
+        self.entities.deinit(self.lua.allocator());
         self.lua.deinit();
         self.* = undefined;
     }
 
     /// Push a fresh sandboxed environment table (ADR 0003 §7) onto the Lua
     /// stack: an explicit allowlist of base functions, safe libraries, `math`
-    /// minus its RNG, and `print` rerouted to the engine log (never raw
-    /// stdout). Every script module gets its own `_ENV` from this call, and its
+    /// minus its RNG, `print` rerouted to the engine log (never raw stdout),
+    /// and the `mana` API table (ADR 0003 §2; `mana.zig`). Every script module
+    /// gets its own `_ENV` from this call, and its
     /// own **per-`_ENV` shallow copy** of each library table (§8 isolation).
+    /// (`mana` is rebuilt fresh for every `_ENV`, same as the library copies,
+    /// but there is no isolation concern to guard here either way: it exposes
+    /// no mutable engine-owned table a script could reach and corrupt, only
+    /// functions and an integer, and every rebuild's closures read the same
+    /// `entities` registry on this `State`.)
     /// The copy is what stops one script from corrupting a stdlib function for
     /// its siblings sharing this one `lua_State`: because `rawset` is itself an
     /// allowlisted base function, a single shared (even read-only-proxied)
@@ -146,6 +171,9 @@ pub const State = struct {
         std.debug.assert(l.getGlobal("getmetatable") == .function);
         l.pushClosure(zlua.wrap(sandboxGetmetatable), 1); // consumes the upvalue
         l.setField(-2, "getmetatable");
+
+        mana.pushManaTable(l, &self.entities);
+        l.setField(-2, "mana");
     }
 
     /// Push a fresh shallow copy of the library table currently bound to global
@@ -266,6 +294,10 @@ test "sandbox: pushSandboxEnv builds exactly the allowlisted table shape" {
     state.lua.pop(1);
     // `getmetatable` is present as the string-denying wrapper (a function).
     try std.testing.expectEqual(zlua.LuaType.function, state.lua.getField(env, "getmetatable"));
+    state.lua.pop(1);
+    // `mana` (ADR 0003 §2) is present as a table; its own shape is asserted in
+    // `mana.zig`'s tests.
+    try std.testing.expectEqual(zlua.LuaType.table, state.lua.getField(env, "mana"));
     state.lua.pop(1);
 
     // Nothing else leaks in: no `os`/`io`/`debug`/`_G`/raw `load`/`print` aliasing.

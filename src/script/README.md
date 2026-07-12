@@ -6,10 +6,19 @@ Lua never iterates all entities per frame — the engine dispatches events
 (`on_spawn`, `on_hit`, `on_death`, `on_collision_begin`, `on_room_enter`, timers)
 and Lua sets data the engine consumes. Script dispatch is Tracy-zoned and budgeted.
 
-**Deferred stub.** No scripting API table may be added until the mandatory ADR
-defining its shape (event list, opaque handle semantics, versioning) is written —
-it is the most important interface in the project.
+**Status.** ADR 0003 (accepted) fixes the `mana` API table, event list, opaque
+handle semantics, versioning, sandbox, and error policy. Implemented so far,
+gated behind `-Denable-lua`:
+- The sandboxed per-script `_ENV` (`lua.zig`: `State`, `pushSandboxEnv`).
+- The `mana` v1 table's implementable-without-live-Sim subset — `version`,
+  `log`, `is_valid` — and the opaque entity-handle pack/unpack ABI
+  (`handle.zig`, `mana.zig`).
 
-**May import:** `core`, `std` (and ziglua, once wired).
+**Not yet implemented** (needs an engine → script wiring task first — nothing
+here reaches a live `Sim`/`World`): `position`, `set_velocity`, `get`, `set`,
+`spawn`, `despawn`, `after`, `every`, `cancel`, `now`, `random`, `random_int`,
+and event dispatch (`on_spawn`/`on_hit`/etc.).
 
-**Imported by:** `engine` (once the API ADR is approved).
+**May import:** `core`, `std` (and `zlua`, under `-Denable-lua`).
+
+**Imported by:** `engine` (once the engine → script wiring task lands).
