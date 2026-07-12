@@ -41,11 +41,17 @@ pub const Rng = struct {
     /// range, top 64 bits`) instead of modulo, which would bias low results; this
     /// exact formula is the version-stable mapping (locked by test below) — it must
     /// never change without a version bump (ADR 0003 §5).
+    ///
+    /// `range` is carried as `u128`: the full-i64-domain call
+    /// `intRange(minInt(i64), maxInt(i64))` has an inclusive width of 2^64, which
+    /// does not fit `u64` — a `u64` cast there would trap (a Zig panic bypasses the
+    /// script pcall and would crash the engine, ADR 0003 §9). In that case
+    /// `scaled >> 64 == next()`, so the draw maps uniformly across the whole domain.
     pub fn intRange(self: *Rng, lo_in: i64, hi_in: i64) i64 {
         const lo = @min(lo_in, hi_in);
         const hi = @max(lo_in, hi_in);
-        const range: u64 = @intCast(@as(i128, hi) - @as(i128, lo) + 1);
-        const scaled: u128 = @as(u128, self.next()) * @as(u128, range);
+        const range: u128 = @intCast(@as(i128, hi) - @as(i128, lo) + 1);
+        const scaled: u128 = @as(u128, self.next()) * range;
         const offset: u64 = @intCast(scaled >> 64);
         return @intCast(@as(i128, lo) + @as(i128, offset));
     }
@@ -113,10 +119,23 @@ test "rng: intRange same seed yields the same sequence (determinism contract)" {
 }
 
 test "rng: intRange known mapping for seed 0, range [0, 9] (locks the formula)" {
-    // splitmix64(0)'s first output is 0xE220A8397B1DCDAF (locked above); intRange
-    // must map it through the documented multiply-high formula, not modulo.
+    // Hardcoded literal, NOT re-derived from the formula, so a drift in the
+    // implementation (shift amount, inclusive-width) fails here. Derivation:
+    // splitmix64(0)'s first output is 0xE220A8397B1DCDAF (locked above); the
+    // multiply-high map is (0xE220A8397B1DCDAF * 10) >> 64 == 8.
     var r = Rng.init(0);
-    const first: u64 = 0xE220A8397B1DCDAF;
-    const expected: i64 = @intCast((@as(u128, first) * 10) >> 64);
-    try testing.expectEqual(expected, r.intRange(0, 9));
+    try testing.expectEqual(@as(i64, 8), r.intRange(0, 9));
+}
+
+test "rng: intRange over the full i64 domain does not trap and stays in range" {
+    // Inclusive width here is 2^64, which does not fit u64 — the u128 `range`
+    // (see intRange doc) is what keeps this from trapping (ADR 0003 §9: a script
+    // calling mana.random_int(math.mininteger, math.maxinteger) must not crash the
+    // engine). Every result trivially lies in [minInt, maxInt]; the real assertion
+    // is simply that the call returns.
+    var r = Rng.init(0);
+    for (0..1000) |_| {
+        const v = r.intRange(std.math.minInt(i64), std.math.maxInt(i64));
+        try testing.expect(v >= std.math.minInt(i64) and v <= std.math.maxInt(i64));
+    }
 }
