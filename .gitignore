@@ -13,3 +13,6 @@ zig-pkg/
 
 # Transient subagent git worktrees
 .claude/worktrees/
+
+# Orchestration runbook + live loop state (always local)
+LOOP.md
