@@ -36,6 +36,12 @@ pub const Manifest = struct {
     /// named entity templates `mana.spawn` may instantiate. Absent ⇒ the package
     /// spawns no prototypes. Watched for hot reload alongside scenes.
     prototypes: ?[]const u8 = null,
+    /// Optional Lua handler script (ADR 0003 §1; issue #51): a package-relative
+    /// `.lua` path loaded as the Sim's single event-handler table. Absent ⇒ the
+    /// package has no script. Watched for hot reload. A package that actually needs
+    /// scripting should also set `script_api`, so a build without `-Denable-lua` is
+    /// refused rather than silently running scriptless.
+    script: ?[]const u8 = null,
 };
 
 /// Parse a manifest from NUL-terminated ZON `source`. Unknown fields are ignored
@@ -51,15 +57,25 @@ pub fn free(gpa: Allocator, manifest: Manifest) void {
 }
 
 /// The package-relative files whose changes should trigger a hot reload: the
-/// manifest itself, every scene it references, and its prototype file if any (ADR
-/// 0016). Returned paths borrow from `manifest`; the slice is owned by `gpa` (free
-/// it, not the elements).
+/// manifest itself, every scene it references, and its optional prototype (ADR 0016)
+/// and script (issue #51) files. Returned paths borrow from `manifest`; the slice is
+/// owned by `gpa` (free it, not the elements).
 pub fn watchPaths(gpa: Allocator, manifest: Manifest) Allocator.Error![]const []const u8 {
-    const extra: usize = if (manifest.prototypes != null) 1 else 0;
+    const optional = [_]?[]const u8{ manifest.prototypes, manifest.script };
+    var extra: usize = 0;
+    for (optional) |o| {
+        if (o != null) extra += 1;
+    }
     const paths = try gpa.alloc([]const u8, manifest.scenes.len + 1 + extra);
     paths[0] = "game.zon";
     for (manifest.scenes, paths[1 .. 1 + manifest.scenes.len]) |scene, *dst| dst.* = scene;
-    if (manifest.prototypes) |proto| paths[paths.len - 1] = proto;
+    var i = 1 + manifest.scenes.len;
+    for (optional) |o| {
+        if (o) |p| {
+            paths[i] = p;
+            i += 1;
+        }
+    }
     return paths;
 }
 
@@ -167,6 +183,30 @@ test "manifest: prototypes field parses and watchPaths includes it when present"
     try testing.expectEqualStrings("game.zon", paths[0]);
     try testing.expectEqualStrings("scenes/a.zon", paths[1]);
     try testing.expectEqualStrings("prototypes.zon", paths[2]);
+}
+
+test "manifest: script field parses and watchPaths lists scene, then prototypes, then script" {
+    const src =
+        \\.{
+        \\    .name = "s",
+        \\    .version = "1",
+        \\    .entry_scene = "scenes/a.zon",
+        \\    .scenes = .{ "scenes/a.zon" },
+        \\    .prototypes = "protos.zon",
+        \\    .script = "rules.lua",
+        \\    .script_api = 1,
+        \\}
+    ;
+    const m = try parse(testing.allocator, src);
+    defer free(testing.allocator, m);
+    try testing.expectEqualStrings("rules.lua", m.script.?);
+    try testing.expectEqual(@as(u32, 1), m.script_api);
+
+    const paths = try watchPaths(testing.allocator, m);
+    defer testing.allocator.free(paths);
+    try testing.expectEqual(@as(usize, 4), paths.len); // game + scene + protos + script
+    try testing.expectEqualStrings("protos.zon", paths[2]);
+    try testing.expectEqualStrings("rules.lua", paths[3]);
 }
 
 test "manifest: prototypes defaults to null (no prototype file)" {

@@ -39,6 +39,12 @@ pub const collision = @import("collision.zig");
 pub const controller = @import("controller.zig");
 pub const input = @import("input.zig");
 
+/// The scripting API version this build provides (ADR 0003 §5), surfaced so the
+/// runtime can gate a package's required `script_api` without importing `script`
+/// itself (which would risk a Lua type leaking above `engine`). A plain `u32`: the
+/// `mana` version under `-Denable-lua`, else 0.
+pub const script_api_version: u32 = @import("script").api_version;
+
 pub const World = world.World;
 pub const Sim = sim.Sim;
 pub const Context = sim.Context;

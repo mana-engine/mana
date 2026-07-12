@@ -15,6 +15,11 @@ pub const ready = core.ready;
 /// True when the Lua 5.4 backend was compiled in (`-Denable-lua`).
 pub const lua_enabled = build_options.enable_lua;
 
+/// The scripting API version this build provides (ADR 0003 §5 gate): the `mana`
+/// version when Lua is compiled in, else 0 (no scripting). The runner compares a
+/// package's required `script_api` against this and refuses a package needing more.
+pub const api_version: u32 = if (build_options.enable_lua) lua.mana_version else 0;
+
 /// The Lua 5.4 backend (ziglua/zlua) — present only under `-Denable-lua`. Kept
 /// behind the comptime flag so the `zlua` import and vendored Lua sources never
 /// enter a default build, mirroring how `gpu.zig` guards the Vulkan backend.
