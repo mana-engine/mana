@@ -17,3 +17,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0003 | Lua scripting API: table shape, events, handles, versioning | accepted |
 | 0004 | Scene/entity component schema + ECS storage model | accepted |
 | 0005 | File-watch port + hot-reload model | accepted |
+| 0006 | Rendering: Vulkan gpu backend, offscreen-first | accepted |
