@@ -1,6 +1,6 @@
 # 0022. `mana.random`/`mana.random_int`: seeded RNG on `Sim`
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-13
 
 ## Context

@@ -1,6 +1,6 @@
 # 0008. Physics port + first adapter: hand-rolled 2.5D collision
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-12
 
 ## Context

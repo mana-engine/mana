@@ -1,6 +1,6 @@
 # 0018. A game is data: prototypes are prefabs, scenes instance them, scripts query and drive
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-12
 
 ## Context
