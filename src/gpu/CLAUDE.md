@@ -28,6 +28,20 @@ the **null backend is the default**, so ordinary and CI builds are GPU-free. See
   backend-specific code with `if (gpu.backend == .vulkan) {...}` so a default build
   never analyzes it — and verify GPU work with `zig build -Denable-vulkan` + an
   actual render, never `test` alone.
+- **A flagged `zig build` does NOT analyze *uncalled* fns; a flagged `zig build test`
+  DOES.** `zig build -Denable-vulkan` only compiles decls actually reached from
+  `main` — a `pub fn` in the Vulkan backend that nothing calls yet is never analyzed,
+  so a compile error inside it slips the flagged *build* gate entirely. (Live example:
+  #36's `Swapchain.deinit` shipped with a `catch |err| { _ = err; }` — an "error set is
+  discarded" error under Zig 0.16 — because no caller existed until #29's `--play` loop
+  forced its analysis.) The parity `comptime` block using `@hasDecl`/`@hasField` does
+  **not** rescue you: it checks a decl *exists*, not that its body compiles. What
+  *does* catch it: a `test` that references the fn, since `zig build test
+  -Denable-sdl3 -Denable-vulkan` compiles **and runs** gated tests. So (a) run the
+  flagged **test** build, not just the flagged build, before claiming a backend
+  compiles; and (b) any Vulkan-only fn needs a test that reaches it — but a swapchain/
+  present test must `return error.SkipZigTest` on `backend != .null_backend` (it drives
+  a NULL surface handle the Vulkan backend rejects, and real present needs a display+GPU).
 - **vulkan-zig API shape:** `vk.Bool32` is `enum(u32){ false, true, _ }` — use the
   literals `.true`/`.false` in struct fields; `vk.TRUE`/`vk.FALSE` are bare
   `comptime_int`s that do **not** coerce to it. `vk.DeviceProxy`/`InstanceProxy`

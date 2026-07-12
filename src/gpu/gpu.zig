@@ -203,8 +203,12 @@ test "renderScene: empty scene yields a fully-cleared image" {
 test "renderQuads: draws into an acquired swapchain frame, then presents it" {
     // Exercises the windowed loop's render half (acquire → renderQuads → present) on the
     // null backend — the only backend headless CI can run — so the exact draw path the
-    // `--play` loop uses is covered without a GPU. The Vulkan backend runs the identical
-    // sequence behind `-Denable-sdl3 -Denable-vulkan` (a manual display+GPU step).
+    // `--play` loop uses is covered without a GPU. Skipped on any other backend: this
+    // drives `createSwapchain` with a NULL surface handle, which the null backend accepts
+    // (headless has no OS window) but the Vulkan backend rejects (`error.NoSurfaceHandle`),
+    // and its real present path needs a display+GPU anyway (a manual acceptance step).
+    if (backend != .null_backend) return error.SkipZigTest;
+
     var dev = try Device.init(std.testing.allocator);
     defer dev.deinit();
 
