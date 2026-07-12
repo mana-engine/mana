@@ -7,7 +7,13 @@ const std = @import("std");
 const core = @import("core");
 const data = @import("data");
 const ecs = @import("ecs");
-const platform = @import("platform");
+
+/// The platform port (adapter selected at comptime: headless default, SDL3 under
+/// `-Denable-sdl3`). Re-exported so the runtime can open a window and poll input for
+/// the interactive play loop (ADR 0009 / 0012); its surface is plain-data
+/// (`InputSnapshot`, `WindowConfig`) plus an opaque native handle, never an OS type,
+/// so nothing above `platform` sees SDL.
+pub const platform = @import("platform");
 
 /// The GPU port (backend selected at comptime). Re-exported so the runtime can
 /// drive rendering; its engine-facing surface returns plain data, never Vulkan

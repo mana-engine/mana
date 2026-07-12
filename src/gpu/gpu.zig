@@ -120,6 +120,46 @@ pub fn renderScene(gpa: Allocator, width: u32, height: u32, quads: []const Quad,
     return readback.read(&dev, gpa);
 }
 
+/// Draw `quads` into an already-acquired `target` through `pipeline`, clearing to
+/// `clear` (RGBA, 0..1), and submit synchronously. This is the draw half of the
+/// windowed present loop (ADR 0012 §6): `Swapchain.acquire` → `renderQuads(frame.target)`
+/// → `Swapchain.present`. Unlike `renderScene` it renders into a caller-owned target
+/// (a swapchain `Frame.target`) and does no readback, and it leaves `target` in exactly
+/// the layout `present` expects (colour-attachment on the Vulkan backend, via the same
+/// `beginRendering` UNDEFINED→colour transition the offscreen path uses) — so it reuses
+/// the existing dynamic-rendering draw path rather than adding a new one. `gpa` backs a
+/// temporary vertex upload freed before return (a reset per-frame arena in the loop).
+/// Errors: `error.OutOfMemory` plus any backend device/allocation error.
+pub fn renderQuads(gpa: Allocator, dev: *Device, pipeline: *Pipeline, target: *Texture, quads: []const Quad, clear: [4]f32) !void {
+    // Two triangles (6 vertices) per quad; absent when there is nothing to draw (the
+    // frame is then just a clear). Mirrors `renderScene`'s upload path.
+    const vertex_count: u32 = @intCast(quads.len * 6);
+    var vbuf: ?Buffer = null;
+    defer if (vbuf) |*b| b.deinit(dev);
+    if (vertex_count > 0) {
+        const verts = try gpa.alloc(Vertex, vertex_count);
+        defer gpa.free(verts);
+        buildVertices(quads, verts);
+        var b = try dev.createBuffer(.{
+            .size = @as(u64, vertex_count) * @sizeOf(Vertex),
+            .usage = .{ .vertex = true },
+        });
+        try b.write(dev, std.mem.sliceAsBytes(verts));
+        vbuf = b;
+    }
+
+    var cmd = try dev.beginCommands();
+    defer cmd.deinit(dev);
+    cmd.beginRendering(target, clear);
+    if (vbuf) |*b| {
+        cmd.bindPipeline(pipeline);
+        cmd.bindVertexBuffer(b);
+        cmd.draw(vertex_count);
+    }
+    cmd.endRendering();
+    try dev.submit(&cmd);
+}
+
 /// Expand each quad into 6 vertices (two triangles) in the shared `Vertex` layout.
 /// `out.len` must be `quads.len * 6`. Pure; the same geometry feeds every backend.
 fn buildVertices(quads: []const Quad, out: []Vertex) void {
@@ -157,6 +197,38 @@ test "renderScene: empty scene yields a fully-cleared image" {
             try std.testing.expectEqual(@as(u8, 255), pixels[i + 0]);
             try std.testing.expectEqual(@as(u8, 0), pixels[i + 1]);
         }
+    }
+}
+
+test "renderQuads: draws into an acquired swapchain frame, then presents it" {
+    // Exercises the windowed loop's render half (acquire → renderQuads → present) on the
+    // null backend — the only backend headless CI can run — so the exact draw path the
+    // `--play` loop uses is covered without a GPU. Skipped on any other backend: this
+    // drives `createSwapchain` with a NULL surface handle, which the null backend accepts
+    // (headless has no OS window) but the Vulkan backend rejects (`error.NoSurfaceHandle`),
+    // and its real present path needs a display+GPU anyway (a manual acceptance step).
+    if (backend != .null_backend) return error.SkipZigTest;
+
+    var dev = try Device.init(std.testing.allocator);
+    defer dev.deinit();
+
+    var sc = try dev.createSwapchain(.{ .surface = .{}, .width = 8, .height = 8, .format = .rgba8_unorm, .present_mode = .fifo });
+    defer sc.deinit(&dev);
+    var pipeline = try dev.createScenePipeline(.rgba8_unorm);
+    defer pipeline.deinit(&dev);
+
+    const frame = try sc.acquire(&dev);
+    // One red quad covering the top-left NDC quadrant over a black clear.
+    const quads = [_]Quad{.{ .center = .{ -0.5, -0.5 }, .half = .{ 0.5, 0.5 }, .color = .{ 1, 0, 0 } }};
+    try renderQuads(std.testing.allocator, &dev, &pipeline, frame.target, &quads, .{ 0, 0, 0, 1 });
+    _ = try sc.present(&dev, frame);
+
+    if (backend == .null_backend) {
+        // Top-left pixel lands inside the quad → red; bottom-right outside → clear black.
+        try std.testing.expectEqual(@as(u8, 255), sc.presented[0]); // (0,0) R
+        const last = (7 * 8 + 7) * 4;
+        try std.testing.expectEqual(@as(u8, 0), sc.presented[last + 0]); // (7,7) R stayed clear
+        try std.testing.expectEqual(@as(u8, 255), sc.presented[last + 3]); // (7,7) A
     }
 }
 

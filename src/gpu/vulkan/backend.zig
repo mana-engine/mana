@@ -779,13 +779,12 @@ pub const Swapchain = struct {
     pub fn deinit(self: *Swapchain, dev: *Device) void {
         const d = dev.device();
         // Idle so nothing is in use before destroy (a caller may deinit right after
-        // `acquire`). Proof for the discard: on teardown a failed idle-wait is
-        // unrecoverable and changes nothing we release — the same objects are destroyed
-        // regardless — and `deinit` has no error channel, so the error is intentionally
-        // dropped.
-        d.deviceWaitIdle() catch |err| {
-            _ = err; // intentionally dropped: unrecoverable during teardown (see above)
-        };
+        // `acquire`). On teardown a failed idle-wait is unrecoverable and changes nothing
+        // we release — the same objects are destroyed regardless — and `deinit` has no
+        // error channel, so the error is logged (not discarded — Zig 0.16 rejects a bare
+        // `_ = err`, and CLAUDE.md bans `catch {}`) and teardown proceeds.
+        d.deviceWaitIdle() catch |err|
+            std.log.scoped(.gpu).debug("swapchain deinit: deviceWaitIdle failed ({s}); destroying anyway", .{@errorName(err)});
         d.destroyFence(self.acquire_fence, null);
         destroyChain(dev, self.images, self.handle);
         dev.instanceProxy().destroySurfaceKHR(self.surface, null);
