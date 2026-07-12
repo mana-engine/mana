@@ -7,8 +7,12 @@ const std = @import("std");
 const core = @import("core");
 const data = @import("data");
 const ecs = @import("ecs");
-const gpu = @import("gpu");
 const platform = @import("platform");
+
+/// The GPU port (backend selected at comptime). Re-exported so the runtime can
+/// drive rendering; its engine-facing surface returns plain data, never Vulkan
+/// types, so this does not leak Vulkan above `gpu`.
+pub const gpu = @import("gpu");
 
 pub const components = @import("components.zig");
 pub const world = @import("world.zig");

@@ -186,3 +186,13 @@ ADR. Building it is a separate task that adds the ziglua dependency (ask first).
   marked **`.lazy = true`** and only referenced under `-Denable-vulkan`, so the
   default/CI build never fetches or compiles them. The Vulkan backend lives under
   `src/gpu/vulkan/`, imported by `gpu.zig` only when the flag is set.
+- **`std.DynLib` has no Windows implementation in Zig 0.16** (Windows hits its
+  "unsupported platform" branch). To load a DLL on Windows, declare the kernel32
+  externs yourself — `extern "kernel32" fn LoadLibraryW(name: [*:0]const u16)
+  callconv(.winapi) ?windows.HMODULE;` + `GetProcAddress` + `FreeLibrary` — and use
+  `DynLib` only on posix. The Vulkan loader (`vulkan-1`) is loaded this way at
+  runtime, so no import library / Vulkan SDK is needed to build.
+- **`zig build test` skips `pub fn main` (again):** a bad API call reachable only
+  from `main` (e.g. `std.DynLib` on Windows) passes `test` and fails `zig build`.
+  Comptime-guard backend-specific code with `if (gpu.backend == .vulkan) {...}` so a
+  default build never analyzes the Vulkan branch.

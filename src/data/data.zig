@@ -7,6 +7,7 @@ const core = @import("core");
 
 pub const zon = @import("zon.zig");
 pub const watch = @import("watch.zig");
+pub const png = @import("png.zig");
 
 // Ergonomic re-exports.
 pub const serialize = zon.serialize;
@@ -22,4 +23,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = zon;
     _ = watch;
+    _ = png;
 }

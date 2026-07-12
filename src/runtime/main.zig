@@ -32,19 +32,37 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = Io.File.stdout().writer(io, &stdout_buf);
     const out = &stdout_writer.interface;
 
-    // First non-flag argument is the package dir; `--watch` enables hot reload.
+    // First non-flag argument is the package dir; `--watch` enables hot reload;
+    // `--render <out.png>` renders one offscreen frame to a PNG (needs -Denable-vulkan).
     const args = try init.minimal.args.toSlice(arena);
     var pkg_path: ?[]const u8 = null;
     var watch = false;
-    for (args[1..]) |a| {
-        if (std.mem.eql(u8, a, "--watch")) watch = true else if (pkg_path == null) pkg_path = a;
+    var render_out: ?[]const u8 = null;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--watch")) {
+            watch = true;
+        } else if (std.mem.eql(u8, a, "--render")) {
+            i += 1;
+            if (i >= args.len) {
+                try out.writeAll("usage: mana <pkg> --render <out.png>\n");
+                try out.flush();
+                return;
+            }
+            render_out = args[i];
+        } else if (pkg_path == null) {
+            pkg_path = a;
+        }
     }
+
+    if (render_out) |path| return runRender(out, io, gpa, path);
+
     const pkg = pkg_path orelse {
-        try out.writeAll("usage: mana <game-package-dir> [--watch]\n");
+        try out.writeAll("usage: mana <game-package-dir> [--watch] [--render <out.png>]\n");
         try out.flush();
         return;
     };
-
     if (watch) return runWatch(out, io, gpa, pkg);
     return runOnce(out, io, gpa, pkg);
 }
@@ -68,6 +86,25 @@ fn checkScriptApi(out: *Io.Writer, manifest: Manifest) !void {
         try out.flush();
         return error.UnsupportedScriptApi;
     }
+}
+
+/// Render one offscreen frame to a PNG (ADR 0006 M1: a cleared image). The Vulkan
+/// branch is comptime-selected, so a default (null-backend) build never references
+/// Vulkan and simply reports that rendering is not compiled in.
+fn runRender(out: *Io.Writer, io: Io, gpa: Allocator, path: []const u8) !void {
+    if (engine.gpu.backend == .vulkan) {
+        const w: u32 = 256;
+        const h: u32 = 256;
+        const pixels = try engine.gpu.vk.renderClear(gpa, w, h, .{ 0.10, 0.12, 0.18, 1.0 });
+        defer gpa.free(pixels);
+        const bytes = try data.png.encode(gpa, w, h, pixels);
+        defer gpa.free(bytes);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+        try out.print("mana: rendered {d}x{d} → {s} ({d} bytes)\n", .{ w, h, path, bytes.len });
+    } else {
+        try out.writeAll("mana: rendering not compiled in — rebuild with -Denable-vulkan\n");
+    }
+    try out.flush();
 }
 
 /// One-shot: load, advance `tick_steps`, print the deterministic state hash.
