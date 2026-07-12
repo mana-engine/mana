@@ -17,10 +17,15 @@ pub const gpu = @import("gpu");
 pub const components = @import("components.zig");
 pub const world = @import("world.zig");
 pub const systems = @import("systems.zig");
+pub const command = @import("command.zig");
+pub const event = @import("event.zig");
+pub const sim = @import("sim.zig");
 pub const scene = @import("scene.zig");
 pub const render = @import("render.zig");
 
 pub const World = world.World;
+pub const Sim = sim.Sim;
+pub const Context = sim.Context;
 pub const Scene = scene.Scene;
 pub const Entity = ecs.Entity;
 pub const Transform = components.Transform;
@@ -36,6 +41,9 @@ test {
     _ = components;
     _ = world;
     _ = systems;
+    _ = command;
+    _ = event;
+    _ = sim;
     _ = scene;
     _ = render;
 }

@@ -18,3 +18,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0004 | Scene/entity component schema + ECS storage model | accepted |
 | 0005 | File-watch port + hot-reload model | accepted |
 | 0006 | Rendering: Vulkan gpu backend, offscreen-first | accepted |
+| 0007 | Simulation frame pipeline: systems, command buffer, event dispatch | accepted |

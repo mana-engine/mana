@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const World = @import("world.zig").World;
+const Context = @import("sim.zig").Context;
 
 /// Integrate `Transform.pos += Velocity.v * dt` for every entity that has both.
 /// Walks the velocity set (typically the smaller) and probes transforms.
@@ -13,6 +14,11 @@ pub fn movement(world: *World, dt: f32) void {
             t.pos = t.pos.add(vel.v.scale(dt));
         }
     }
+}
+
+/// `movement` as a registerable frame system (ADR 0007). Never allocates.
+pub fn movementSystem(ctx: *Context) std.mem.Allocator.Error!void {
+    movement(ctx.world, ctx.dt);
 }
 
 const testing = std.testing;

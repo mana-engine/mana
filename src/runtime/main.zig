@@ -117,7 +117,8 @@ fn runRender(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, path: []c
     try out.flush();
 }
 
-/// One-shot: load, advance `tick_steps`, print the deterministic state hash.
+/// One-shot: load the scene into a `Sim`, register systems, advance `tick_steps`,
+/// print the deterministic state hash.
 fn runOnce(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     const manifest = try loadManifest(io, gpa, pkg);
     defer manifest_mod.free(gpa, manifest);
@@ -125,13 +126,20 @@ fn runOnce(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
 
     const scene_path = try std.fs.path.join(gpa, &.{ pkg, manifest.entry_scene });
     defer gpa.free(scene_path);
-    var world = try engine.scene.loadWorldFromFile(gpa, io, Io.Dir.cwd(), scene_path);
-    defer world.deinit();
-    for (0..tick_steps) |_| engine.systems.movement(&world, core.time.default_dt);
+    const scene_src = try Io.Dir.cwd().readFileAllocOptions(io, scene_path, gpa, .unlimited, .of(u8), 0);
+    defer gpa.free(scene_src);
+    const parsed = try engine.scene.parse(gpa, scene_src);
+    defer engine.scene.free(gpa, parsed);
+
+    var sim = engine.Sim.init(gpa, core.time.default_dt);
+    defer sim.deinit();
+    try engine.scene.load(parsed, &sim.world);
+    try sim.addSystem(engine.systems.movementSystem);
+    try sim.run(tick_steps);
 
     try out.print(
         "mana: ran '{s}' v{s} — {d} entities, {d} ticks, state hash 0x{x:0>16}\n",
-        .{ manifest.name, manifest.version, world.count(), tick_steps, world.stateHash() },
+        .{ manifest.name, manifest.version, sim.world.count(), sim.tick_count, sim.stateHash() },
     );
     try out.flush();
 }
