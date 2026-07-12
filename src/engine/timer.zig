@@ -6,18 +6,35 @@
 //! every entry whose fire-time is due, in deterministic (fire-time, insertion-order)
 //! order, then re-arms repeating entries.
 //!
-//! Callback type mirrors `sim.Handler`: engine-side and simple for v1
-//! (`*const fn (*World) void`); scripting will later wrap Lua closures behind it.
+//! The `Callback` is a tagged union: a plain engine `native` function, or a `closure`
+//! (opaque context + fn) so scripting (#55) can bind a Lua handler reference behind
+//! the same wheel. The wheel fires either uniformly and stays caller-agnostic.
 
 const std = @import("std");
 const World = @import("world.zig").World;
 
 const Allocator = std.mem.Allocator;
 
-/// An engine-side timer callback. Receives the world to mutate directly — `Sim.tick`
-/// fires due timers after event dispatch, so no system is mid-iteration and no
-/// command buffer is needed (mirrors how event `Handler`s mutate the world).
-pub const Callback = *const fn (*World) void;
+/// A scheduled timer callback. `native` is a plain engine function receiving the
+/// world to mutate directly; `closure` carries an opaque `context` so a caller can
+/// bind per-timer state behind the same wheel — e.g. scripting (#55) stores a Lua
+/// handler reference in the context. `advance` fires either variant uniformly, so the
+/// wheel is closure-capable without knowing about any specific caller.
+pub const Callback = union(enum) {
+    native: *const fn (*World) void,
+    closure: struct {
+        context: *anyopaque,
+        func: *const fn (context: *anyopaque, world: *World) void,
+    },
+
+    /// Invoke the callback against `world`.
+    pub fn fire(self: Callback, world: *World) void {
+        switch (self) {
+            .native => |f| f(world),
+            .closure => |c| c.func(c.context, world),
+        }
+    }
+};
 
 /// Opaque, generational reference to a scheduled timer, returned by `after`/`every`.
 /// `cancel` on a stale handle (already fired one-shot, already cancelled, or a
@@ -114,7 +131,7 @@ pub const Timers = struct {
 
         for (due.items) |i| {
             const e = &self.entries.items[i];
-            e.callback(world);
+            e.callback.fire(world);
             if (e.interval) |interval| {
                 e.fire_at += interval;
             } else {
@@ -149,7 +166,7 @@ test "timers: one-shot fires at the scheduled time, not before, and only once" {
     var timers: Timers = .{};
     defer timers.deinit(testing.allocator);
 
-    _ = try timers.after(testing.allocator, 0.25, Counter.cb);
+    _ = try timers.after(testing.allocator, 0.25, .{ .native = Counter.cb });
     try timers.advance(testing.allocator, &world, 0.1); // now = 0.1, not due
     try testing.expectEqual(@as(u32, 0), Counter.count);
     try timers.advance(testing.allocator, &world, 0.1); // now = 0.2, still not due
@@ -174,7 +191,7 @@ test "timers: repeating timer re-fires every interval" {
     var timers: Timers = .{};
     defer timers.deinit(testing.allocator);
 
-    _ = try timers.every(testing.allocator, 0.1, Counter.cb);
+    _ = try timers.every(testing.allocator, 0.1, .{ .native = Counter.cb });
     for (0..5) |i| {
         try timers.advance(testing.allocator, &world, 0.1);
         try testing.expectEqual(@as(u32, @intCast(i + 1)), Counter.count);
@@ -195,7 +212,7 @@ test "timers: cancel prevents a scheduled callback from firing" {
     var timers: Timers = .{};
     defer timers.deinit(testing.allocator);
 
-    const h = try timers.after(testing.allocator, 0.1, Counter.cb);
+    const h = try timers.after(testing.allocator, 0.1, .{ .native = Counter.cb });
     timers.cancel(h);
     try timers.advance(testing.allocator, &world, 1.0);
     try testing.expectEqual(@as(u32, 0), Counter.count);
@@ -215,12 +232,12 @@ test "timers: cancel on an already-fired handle is a no-op (stale generation)" {
     var timers: Timers = .{};
     defer timers.deinit(testing.allocator);
 
-    const h = try timers.after(testing.allocator, 0.1, Counter.cb);
+    const h = try timers.after(testing.allocator, 0.1, .{ .native = Counter.cb });
     try timers.advance(testing.allocator, &world, 0.1); // fires, slot freed
     try testing.expectEqual(@as(u32, 1), Counter.count);
 
     // A new timer reuses the freed slot with a bumped generation.
-    _ = try timers.after(testing.allocator, 10.0, Counter.cb);
+    _ = try timers.after(testing.allocator, 10.0, .{ .native = Counter.cb });
     timers.cancel(h); // stale generation -> must not touch the new entry
     try timers.advance(testing.allocator, &world, 100.0);
     try testing.expectEqual(@as(u32, 2), Counter.count); // the new entry still fired
@@ -247,10 +264,33 @@ test "timers: same-tick fires are ordered by fire-time then insertion order" {
     var timers: Timers = .{};
     defer timers.deinit(testing.allocator);
 
-    _ = try timers.after(testing.allocator, 0.1, Order.a); // seq 0, fires at 0.1
-    _ = try timers.after(testing.allocator, 0.1, Order.b); // seq 1, fires at 0.1 (tie with a)
-    _ = try timers.after(testing.allocator, 0.05, Order.c); // seq 2, fires at 0.05 (earliest)
+    _ = try timers.after(testing.allocator, 0.1, .{ .native = Order.a }); // seq 0, fires at 0.1
+    _ = try timers.after(testing.allocator, 0.1, .{ .native = Order.b }); // seq 1, fires at 0.1 (tie with a)
+    _ = try timers.after(testing.allocator, 0.05, .{ .native = Order.c }); // seq 2, fires at 0.05 (earliest)
 
     try timers.advance(testing.allocator, &world, 0.2); // all three are due at once
     try testing.expectEqualSlices(u8, "cab", Order.log.items);
+}
+
+test "timers: a closure callback fires through its bound context" {
+    // Proves the wheel is closure-capable (#55): the callback reaches per-timer state
+    // via its opaque context, not a bare function — the shape a Lua timer uses.
+    const Ctx = struct {
+        count: u32 = 0,
+        fn tick(context: *anyopaque, _: *World) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.count += 1;
+        }
+    };
+    var ctx: Ctx = .{};
+
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    var timers: Timers = .{};
+    defer timers.deinit(testing.allocator);
+
+    _ = try timers.every(testing.allocator, 0.1, .{ .closure = .{ .context = &ctx, .func = Ctx.tick } });
+    try timers.advance(testing.allocator, &world, 0.1);
+    try timers.advance(testing.allocator, &world, 0.1);
+    try testing.expectEqual(@as(u32, 2), ctx.count); // fired twice, through its context
 }
