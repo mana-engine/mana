@@ -598,6 +598,26 @@ test "sim: on_spawn queues mana.set_velocity; it attaches at the next flush (req
     try testing.expect(sim.world.getVelocity(e).?.v.approxEql(.{ .x = 1, .y = 2, .z = 3 }, 1e-6));
 }
 
+test "sim: on_spawn queues mana.set_position; the entity teleports at the next flush (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+    OneShotTransformSpawner.did = false;
+
+    var sim = Sim.init(testing.allocator, 1.0 / 60.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = {}
+        \\function t.on_spawn(self) mana.set_position(self, 9, 8, 7) end
+        \\return t
+    );
+    try sim.addSystem(OneShotTransformSpawner.system); // spawns an entity at the origin
+
+    try sim.tick(); // spawn flush → on_spawn queues set_position (deferred, ADR 0020)
+    const e = sim.world.entityAt(0);
+    try testing.expect(sim.world.getTransform(e).?.pos.approxEql(.{ .x = 0, .y = 0, .z = 0 }, 1e-6)); // not yet
+    try sim.tick(); // next flush applies the teleport
+    try testing.expect(sim.world.getTransform(e).?.pos.approxEql(.{ .x = 9, .y = 8, .z = 7 }, 1e-6));
+}
+
 test "sim: on_spawn queues mana.despawn(self); the entity is removed at the next flush (requires -Denable-lua)" {
     if (!script.lua_enabled) return error.SkipZigTest;
     OneShotTransformSpawner.did = false;

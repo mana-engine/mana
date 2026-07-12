@@ -7,7 +7,7 @@
 //! host seam (`host.zig`): the engine installs a `Host` on the owning `State` for
 //! the duration of each event dispatch, and these accessors call through it. Wired
 //! so far (issue #5): the reads `is_valid`, `position`, `now`, and the deferred
-//! mutations `set_velocity`, `despawn`, `spawn` (queued on the command buffer,
+//! mutations `set_velocity`, `set_position`, `despawn`, `spawn` (queued on the buffer,
 //! applied at the next flush — never a mid-dispatch world mutation). `is_valid`
 //! prefers the host when present (authoritative live-world check) and falls back to
 //! this `State`'s own `handle.Registry` when no Sim is dispatching, so its pre-seam
@@ -73,6 +73,10 @@ pub fn pushManaTable(l: *Lua, entities: *const Registry, host: *const ?Host) voi
     l.pushLightUserdata(@ptrCast(host));
     l.pushClosure(zlua.wrap(manaSetVelocity), 1);
     l.setField(-2, "set_velocity");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaSetPosition), 1);
+    l.setField(-2, "set_position");
 
     l.pushLightUserdata(@ptrCast(host));
     l.pushClosure(zlua.wrap(manaDespawn), 1);
@@ -192,6 +196,19 @@ fn manaSetVelocity(l: *Lua) !i32 {
     return 0;
 }
 
+/// `mana.set_position(h, x, y, z)` (ADR 0020): queue a discrete position change
+/// (teleport) on `h`, applied at the next flush — deferred, never a mid-dispatch
+/// mutation. A stale handle is dropped at flush; with no Sim dispatching, a no-op.
+/// `x/y/z` are world units. Returns nothing (fire-and-forget).
+fn manaSetPosition(l: *Lua) !i32 {
+    const raw: u64 = @bitCast(try l.toInteger(1));
+    const x: f32 = @floatCast(l.checkNumber(2));
+    const y: f32 = @floatCast(l.checkNumber(3));
+    const z: f32 = @floatCast(l.checkNumber(4));
+    if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.setPosition(raw, .{ .x = x, .y = y, .z = z });
+    return 0;
+}
+
 /// `mana.despawn(h)` (ADR 0003 §2): queue a despawn of `h`, applied at the next
 /// flush (deferred). A stale handle is dropped at flush; with no Sim dispatching the
 /// call is a no-op. Returns nothing.
@@ -286,12 +303,12 @@ test "mana: table shape exposes exactly the wired members (version..despawn); ve
         key_count += 1;
         l.pop(1); // drop value; keep key on the stack to advance `next`
     }
-    try testing.expectEqual(@as(usize, 11), key_count);
+    try testing.expectEqual(@as(usize, 12), key_count);
 
     try testing.expectEqual(zlua.LuaType.number, l.getField(t, "version"));
     try testing.expectEqual(@as(i64, 1), try l.toInteger(-1));
     l.pop(1);
-    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "despawn", "spawn", "every", "after", "cancel" }) |name| {
+    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "set_position", "despawn", "spawn", "every", "after", "cancel" }) |name| {
         try testing.expectEqual(zlua.LuaType.function, l.getField(t, name));
         l.pop(1);
     }
