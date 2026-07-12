@@ -1,8 +1,8 @@
 .{
     .name = "hello",
     .entities = .{
-        .{ .name = "player", .pos = .{ .x = 0, .y = 0, .z = 0 } },
-        .{ .name = "crate", .pos = .{ .x = 2, .y = 1, .z = 0 } },
-        .{ .name = "torch", .pos = .{ .x = -3, .y = 4, .z = 1 } },
+        .{ .name = "player", .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } }, .velocity = .{ .v = .{ .x = 1, .y = 0.5, .z = 0 } } },
+        .{ .name = "crate", .transform = .{ .pos = .{ .x = 2, .y = 1, .z = 0 } } },
+        .{ .name = "torch", .transform = .{ .pos = .{ .x = -3, .y = 4, .z = 1 } }, .velocity = .{ .v = .{ .x = 0, .y = -0.25, .z = 0 } } },
     },
 }

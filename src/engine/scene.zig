@@ -1,25 +1,29 @@
-//! Scene content: a genre-neutral description of entities placed in the world,
-//! loaded from ZON. The engine interprets scenes; it has no notion of any specific
-//! game. Parsing is pure (source in, data out); file I/O lives in the runtime.
+//! Scene content: a genre-neutral, ZON-declared list of entities with components
+//! (ADR 0004 §6). Each entity record has a `name` and one optional field per
+//! built-in component; an omitted field means the entity lacks that component.
+//! Parsing is pure (source in, data out); loading populates a `World`. File I/O
+//! lives in the runtime.
 
 const std = @import("std");
 const core = @import("core");
 const data = @import("data");
-const sim = @import("sim.zig");
+const components = @import("components.zig");
+const World = @import("world.zig").World;
 
-const Vec3 = core.Vec3;
 const Allocator = std.mem.Allocator;
 
-/// One placed entity. Grows more components as the engine matures.
-pub const Entity = struct {
+/// One entity as written in a scene file: a name plus whichever components are
+/// present. New built-in components appear here as new optional fields.
+pub const EntityDef = struct {
     name: []const u8,
-    pos: Vec3,
+    transform: ?components.Transform = null,
+    velocity: ?components.Velocity = null,
 };
 
-/// A named collection of entities — the unit a runtime loads and hands to a `Sim`.
+/// A named collection of entity definitions — the unit a runtime loads.
 pub const Scene = struct {
     name: []const u8,
-    entities: []const Entity,
+    entities: []const EntityDef,
 };
 
 /// Parse a scene from NUL-terminated ZON `source`. The result owns heap
@@ -33,50 +37,58 @@ pub fn free(gpa: Allocator, scene: Scene) void {
     data.free(gpa, scene);
 }
 
-/// Build a `Sim` seeded from a scene's entity positions. `seed` drives the
-/// deterministic initial velocities. Caller owns the returned `Sim`.
-pub fn toSim(gpa: Allocator, seed: u64, scene: Scene) Allocator.Error!sim.Sim {
-    const positions = try gpa.alloc(Vec3, scene.entities.len);
-    defer gpa.free(positions);
-    for (scene.entities, positions) |e, *p| p.* = e.pos;
-    return sim.Sim.init(gpa, seed, positions);
+/// Spawn every entity in `scene` into `world`, adding each present component.
+pub fn load(scene: Scene, world: *World) World.Error!void {
+    for (scene.entities) |def| {
+        const e = try world.spawn();
+        if (def.transform) |t| try world.setTransform(e, t);
+        if (def.velocity) |v| try world.setVelocity(e, v);
+    }
+}
+
+/// Build a fresh `World` from a scene. Caller owns the returned world.
+pub fn toWorld(gpa: Allocator, scene: Scene) World.Error!World {
+    var world = World.init(gpa);
+    errdefer world.deinit();
+    try load(scene, &world);
+    return world;
 }
 
 const testing = std.testing;
 
-test "scene: parse ZON into entities" {
+test "scene: parse entities with optional components" {
     const src =
         \\.{
         \\    .name = "hello",
         \\    .entities = .{
-        \\        .{ .name = "player", .pos = .{ .x = 0, .y = 0, .z = 0 } },
-        \\        .{ .name = "crate", .pos = .{ .x = 2, .y = 1, .z = 0 } },
+        \\        .{ .name = "player", .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } }, .velocity = .{ .v = .{ .x = 1, .y = 0, .z = 0 } } },
+        \\        .{ .name = "crate", .transform = .{ .pos = .{ .x = 2, .y = 1, .z = 0 } } },
         \\    },
         \\}
     ;
     const scene = try parse(testing.allocator, src);
     defer free(testing.allocator, scene);
-    try testing.expectEqualStrings("hello", scene.name);
     try testing.expectEqual(@as(usize, 2), scene.entities.len);
-    try testing.expectEqualStrings("crate", scene.entities[1].name);
-    try testing.expect(scene.entities[1].pos.approxEql(.{ .x = 2, .y = 1, .z = 0 }, 1e-6));
+    try testing.expect(scene.entities[0].velocity != null);
+    try testing.expect(scene.entities[1].velocity == null); // crate has no velocity
 }
 
-test "scene: build a deterministic sim from a scene" {
+test "scene: load into a world adds the right components" {
     const src =
         \\.{
         \\    .name = "hello",
         \\    .entities = .{
-        \\        .{ .name = "a", .pos = .{ .x = 1, .y = 2, .z = 0 } },
-        \\        .{ .name = "b", .pos = .{ .x = -1, .y = 0, .z = 3 } },
+        \\        .{ .name = "a", .transform = .{ .pos = .{ .x = 1, .y = 2, .z = 0 } }, .velocity = .{ .v = .{ .x = 3, .y = 0, .z = 0 } } },
+        \\        .{ .name = "b", .transform = .{ .pos = .{ .x = -1, .y = 0, .z = 3 } } },
         \\    },
         \\}
     ;
     const scene = try parse(testing.allocator, src);
     defer free(testing.allocator, scene);
 
-    var s = try toSim(testing.allocator, 99, scene);
-    defer s.deinit();
-    try testing.expectEqual(@as(usize, 2), s.positions.len);
-    try testing.expect(s.positions[0].approxEql(.{ .x = 1, .y = 2, .z = 0 }, 1e-6));
+    var world = try toWorld(testing.allocator, scene);
+    defer world.deinit();
+    try testing.expectEqual(@as(usize, 2), world.count());
+    try testing.expectEqual(@as(usize, 1), world.velocities.count()); // only "a" moves
+    try testing.expectEqual(@as(usize, 2), world.transforms.count());
 }

@@ -24,6 +24,9 @@ pub const Manifest = struct {
     entry_scene: []const u8,
     scenes: []const []const u8,
     native_module: ?NativeModule = null,
+    /// Scripting API version this package requires (ADR 0003 gate). 0 = none.
+    /// The runner refuses a version higher than the build provides.
+    script_api: u32 = 0,
 };
 
 /// Parse a manifest from NUL-terminated ZON `source`. Unknown fields are ignored
@@ -55,6 +58,7 @@ test "manifest: parse a minimal game.zon" {
     try testing.expectEqualStrings("scenes/hello.zon", m.entry_scene);
     try testing.expectEqual(@as(usize, 1), m.scenes.len);
     try testing.expect(m.native_module == null);
+    try testing.expectEqual(@as(u32, 0), m.script_api); // defaults to none
 }
 
 test "manifest: parse an optional native module" {

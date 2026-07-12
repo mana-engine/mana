@@ -11,9 +11,9 @@ const manifest_mod = @import("manifest.zig");
 
 const Io = std.Io;
 
-/// Fixed seed for headless runs so the printed state hash is reproducible; this is
-/// what the determinism CI test pins.
-const default_seed: u64 = 0x5EED;
+/// Highest scripting API version this build provides (ADR 0003 gate). 0 = no
+/// scripting compiled in yet; a package requesting more is refused.
+const provided_script_api: u32 = 0;
 /// Number of fixed steps a headless run advances before reporting.
 const tick_steps: u32 = 60;
 
@@ -41,6 +41,16 @@ pub fn main(init: std.process.Init) !void {
     const manifest = try manifest_mod.parse(gpa, manifest_src);
     defer manifest_mod.free(gpa, manifest);
 
+    // Gate on the scripting API the package requires (ADR 0003 §5).
+    if (manifest.script_api > provided_script_api) {
+        try out.print(
+            "mana: '{s}' requires scripting API v{d}, but this build provides v{d}\n",
+            .{ manifest.name, manifest.script_api, provided_script_api },
+        );
+        try out.flush();
+        return error.UnsupportedScriptApi;
+    }
+
     // Load and parse the entry scene it points at.
     const scene_path = try std.fs.path.join(arena, &.{ pkg_path, manifest.entry_scene });
     const scene_src = try Io.Dir.cwd().readFileAllocOptions(io, scene_path, gpa, .unlimited, .of(u8), 0);
@@ -48,14 +58,14 @@ pub fn main(init: std.process.Init) !void {
     const scene = try engine.scene.parse(gpa, scene_src);
     defer engine.scene.free(gpa, scene);
 
-    // Build the sim, advance deterministic fixed steps, and report the state hash.
-    var sim = try engine.scene.toSim(gpa, default_seed, scene);
-    defer sim.deinit();
-    sim.run(tick_steps, core.time.default_dt);
+    // Build the world, advance deterministic fixed steps, and report the state hash.
+    var world = try engine.scene.toWorld(gpa, scene);
+    defer world.deinit();
+    for (0..tick_steps) |_| engine.systems.movement(&world, core.time.default_dt);
 
     try out.print(
         "mana: ran '{s}' v{s} — {d} entities, {d} ticks, state hash 0x{x:0>16}\n",
-        .{ manifest.name, manifest.version, scene.entities.len, sim.tick_count, sim.stateHash() },
+        .{ manifest.name, manifest.version, world.count(), tick_steps, world.stateHash() },
     );
     try out.flush();
 }
