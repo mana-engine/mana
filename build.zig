@@ -25,10 +25,16 @@ pub fn build(b: *std.Build) void {
         "enable-sdl3",
         "Compile the SDL3 platform adapter (deferred — not yet implemented)",
     ) orelse false;
+    const enable_lua = b.option(
+        bool,
+        "enable-lua",
+        "Compile the Lua 5.4 scripting backend (ziglua/zlua)",
+    ) orelse false;
 
     const options = b.addOptions();
     options.addOption(bool, "enable_vulkan", enable_vulkan);
     options.addOption(bool, "enable_sdl3", enable_sdl3);
+    options.addOption(bool, "enable_lua", enable_lua);
     const build_options = options.createModule();
 
     // --- Module DAG ---------------------------------------------------------
@@ -61,7 +67,9 @@ pub fn build(b: *std.Build) void {
     gpu.addImport("build_options", build_options);
 
     // The Vulkan backend and its bindings are only wired in when enabled. The deps
-    // are lazy, so the default/CI build neither fetches nor compiles them.
+    // are lazy: `lazyDependency` is called only under the flag, so the default/CI
+    // build never *compiles* them. (`.lazy` defers compilation, not the source
+    // fetch — zig still fetches the tarball into zig-pkg/ on a plain build.)
     if (enable_vulkan) {
         if (b.lazyDependency("vulkan_headers", .{})) |vk_headers| {
             const registry = vk_headers.path("registry/vk.xml");
@@ -92,6 +100,28 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     script.addImport("core", core);
+    script.addImport("build_options", build_options);
+
+    // The Lua backend and its bindings (ziglua/zlua, module name `zlua`) are only
+    // wired in when enabled. The dep is lazy: `lazyDependency` is called only under
+    // the flag, so the default/CI build never *compiles* it. (`.lazy` defers
+    // compilation, not the source fetch — zig still fetches the tarball into
+    // zig-pkg/ on a plain build.) `.lang = .lua54` selects Lua 5.4 (zlua vendors it).
+    // We keep a handle to the `zlua` module so the tests section can add a dedicated
+    // test rooted at the Lua backend file (its tests would otherwise not be pulled
+    // into the script module's test binary — see the tests section).
+    var zlua_module: ?*std.Build.Module = null;
+    if (enable_lua) {
+        if (b.lazyDependency("zlua", .{
+            .target = target,
+            .optimize = optimize,
+            .lang = .lua54,
+        })) |zlua| {
+            const m = zlua.module("zlua");
+            script.addImport("zlua", m);
+            zlua_module = m;
+        }
+    }
 
     const engine = b.createModule(.{
         .root_source_file = b.path("src/engine/engine.zig"),
@@ -138,6 +168,21 @@ pub fn build(b: *std.Build) void {
     }
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
+
+    // Lua backend tests (gated to `-Denable-lua`). `script.zig` imports `lua.zig`
+    // only inside a comptime-false branch by default, and in test mode Zig does not
+    // analyze that unreferenced decl — so `lua.zig`'s tests never enter the `script`
+    // test binary. We compile them explicitly here as their own unit, rooted at
+    // `lua.zig` with the `zlua` import, so `zig build -Denable-lua test` runs them.
+    if (zlua_module) |zlua| {
+        const lua_mod = b.createModule(.{
+            .root_source_file = b.path("src/script/lua.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        lua_mod.addImport("zlua", zlua);
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lua_mod })).step);
+    }
 
     // Integration tests (tests/) — headless engine runs, determinism, hot reload.
     // These may reference the game corpus and fixtures; nothing in src/** may.

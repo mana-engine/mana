@@ -16,6 +16,17 @@
             .hash = "N-V-__8AAC1ZbAIG2kVq3iPpAWaOlDTQ3MOyOyQQR0o_-9ez",
             .lazy = true,
         },
+        // Lazy: only fetched/built when the Lua scripting backend is enabled
+        // (`-Denable-lua`). The default and CI builds stay script- and dependency-free.
+        // ziglua's module is named `zlua`; it vendors Lua (no system Lua needed) and
+        // compiles Lua 5.4 via the `.lang = .lua54` build option. Pinned to the commit
+        // that reverts the Zig 0.17 update ("Revert 'Update for Zig 0.17.0' (#222)"),
+        // so it builds on Zig 0.16 — main tracks Zig master, so a moving ref would break.
+        .zlua = .{
+            .url = "git+https://github.com/natecraddock/ziglua#d2cb6191ec20f888ab04ad222c9bcf9b194bfbf2",
+            .hash = "zlua-0.1.0-hGRpC1mUBQCNQf4CnmRTM4I7gxE3YpCvZ-p2EarlcyER",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",
