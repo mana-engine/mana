@@ -235,6 +235,13 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     var prev = Io.Timestamp.now(io, .awake);
     const clear = [4]f32{ 0.09, 0.10, 0.14, 1.0 };
 
+    // Live FPS/tick readout in the window title, refreshed once per wall-clock second.
+    // The sim tick count rising steadily (independent of frames) is the visible proof
+    // that gameplay is timer-driven, not frame- or input-driven.
+    var frames: u32 = 0;
+    var fps_window_s: f32 = 0;
+    var title_buf: [128]u8 = undefined;
+
     while (!window.shouldClose()) {
         sim.setInput(window.poll());
 
@@ -260,6 +267,16 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
         switch (try swapchain.present(&dev, frame)) {
             .out_of_date, .suboptimal => try resizeToWindow(&swapchain, &dev, &window),
             .optimal => {},
+        }
+
+        frames += 1;
+        fps_window_s += elapsed_s;
+        if (fps_window_s >= 1.0) {
+            const fps = @as(f32, @floatFromInt(frames)) / fps_window_s;
+            const title = std.fmt.bufPrintZ(&title_buf, "{s} — {d:.0} fps · {d} ticks", .{ manifest.name, fps, sim.tick_count }) catch "mana";
+            window.setTitle(title);
+            frames = 0;
+            fps_window_s = 0;
         }
     }
 }

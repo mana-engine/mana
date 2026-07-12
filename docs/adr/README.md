@@ -32,4 +32,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0018 | A game is data: prototypes are prefabs, scenes instance them, scripts query and drive | proposed |
 | 0019 | Scripted timers: `mana.after`/`every`/`cancel` on the timer wheel | accepted |
 | 0020 | `mana.set_position`: write an entity's position from script | accepted |
-| 0021 | `on_key`: edge-driven keyboard input for scripts | proposed |
+| 0021 | `on_key`: edge-driven keyboard input for scripts | accepted |

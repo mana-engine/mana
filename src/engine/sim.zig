@@ -78,6 +78,10 @@ pub const Sim = struct {
     /// `Sim` that never calls `setInput` — every existing caller today — ticks
     /// exactly as it did before input delivery existed.
     input: platform.InputSnapshot = .{},
+    /// Last tick's input, diffed against `input` each tick to emit `on_key` edges
+    /// (ADR 0021). Defaults empty, so a key held on the very first tick reads as a
+    /// press. Not part of the state hash (input never is, ADR 0009).
+    prev_input: platform.InputSnapshot = .{},
     dt: f32,
     tick_count: u64 = 0,
 
@@ -210,6 +214,16 @@ pub const Sim = struct {
             self.pending_scene = null;
             try self.script_runtime.dispatchSceneEnter(scene_name, dc);
         }
+        // Keyboard edges (ADR 0021): dispatch on_key for every key whose held-state
+        // changed since last tick, in Key-enum order (deterministic), host-live and
+        // before timers — so a turn pressed this tick reaches the move timer this tick.
+        inline for (comptime std.enums.values(platform.Key)) |k| {
+            const now_held = self.input.keys.contains(k);
+            if (now_held != self.prev_input.keys.contains(k)) {
+                try self.script_runtime.dispatchKey(@tagName(k), now_held, dc);
+            }
+        }
+        self.prev_input = self.input;
         // TODO(tracy): bound all script dispatch this frame in one Tracy zone with
         // the ADR 0003 §6 per-frame budget once the Tracy port lands.
         for (self.events.items()) |ev| {
@@ -505,6 +519,40 @@ test "sim: on_scene_enter is a no-op when enterScene was never called (requires 
     // No enterScene: the handler must never run.
     try sim.run(3);
     try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("fired").?);
+}
+
+test "sim: a key press then release dispatches on_key edges with name + flag (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    var sim = Sim.init(testing.allocator, 1.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = { presses = 0, releases = 0, last_up = 0 }
+        \\function t.on_key(ev)
+        \\  if ev.pressed then
+        \\    t.presses = t.presses + 1
+        \\    t.last_up = (ev.key == "up") and 1 or 0
+        \\  else
+        \\    t.releases = t.releases + 1
+        \\  end
+        \\end
+        \\return t
+    );
+
+    var held = platform.KeySet.initEmpty();
+    held.insert(.up);
+    sim.setInput(.{ .keys = held });
+    try sim.tick(); // up newly held → on_key(key="up", pressed=true)
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("presses").?);
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("last_up").?);
+
+    sim.setInput(.{}); // up released
+    try sim.tick(); // up no longer held → on_key(pressed=false)
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("releases").?);
+
+    try sim.tick(); // no change this tick → no further on_key
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("presses").?);
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("releases").?);
 }
 
 test "sim: mana.every fires a Lua timer host-live each interval (requires -Denable-lua)" {

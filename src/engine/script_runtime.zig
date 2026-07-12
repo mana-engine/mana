@@ -46,6 +46,7 @@ pub const Runtime = if (script.lua_enabled) LuaRuntime else NoopRuntime;
 /// alongside `dispatch`'s `switch` as new events gain a v1 handler key.
 const HandlerKey = enum {
     on_scene_enter,
+    on_key,
     on_spawn,
     on_collision_begin,
     /// Lua timer callbacks (ADR 0019) — one breaker slot for all of them, so an
@@ -367,6 +368,26 @@ const LuaRuntime = struct {
         self.report(.on_scene_enter, s, outcome);
     }
 
+    /// Dispatch a keyboard edge `on_key(ev = { key, pressed })` (ADR 0021) host-live:
+    /// `key_name` is the neutral `@tagName` of the pressed/released key, `pressed`
+    /// distinguishes press from release. Same transaction + OOM discipline as the
+    /// other dispatch paths. A no-op if no script is loaded, the key is absent, or the
+    /// breaker tripped.
+    pub fn dispatchKey(self: *LuaRuntime, key_name: []const u8, pressed: bool, dc: DispatchCtx) Allocator.Error!void {
+        const s = if (self.state) |*st| st else return;
+        if (self.isDisabled(.on_key)) return;
+
+        var host_ctx: HostCtx = .init(dc, self);
+        s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
+        defer s.setHost(null);
+
+        const mark = dc.commands.mark();
+        const outcome = s.dispatchKey(key_name, pressed);
+        if (outcome == .errored) try dc.commands.rollback(dc.world, mark);
+        if (host_ctx.oom) return error.OutOfMemory;
+        self.report(.on_key, s, outcome);
+    }
+
     /// Advance the timer wheel by `dt` (ADR 0019), firing due timers — Lua callbacks
     /// among them run host-live: the host is installed for the duration so a timer's
     /// `mana` calls resolve. Native timers fire regardless of the host. Only OOM from
@@ -484,6 +505,13 @@ const NoopRuntime = struct {
     pub fn dispatchSceneEnter(self: *NoopRuntime, scene_name: []const u8, dc: DispatchCtx) Allocator.Error!void {
         _ = self;
         _ = scene_name;
+        _ = dc;
+    }
+
+    pub fn dispatchKey(self: *NoopRuntime, key_name: []const u8, pressed: bool, dc: DispatchCtx) Allocator.Error!void {
+        _ = self;
+        _ = key_name;
+        _ = pressed;
         _ = dc;
     }
 

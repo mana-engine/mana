@@ -1,6 +1,6 @@
 # 0021. `on_key`: edge-driven keyboard input for scripts
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-12
 
 ## Context

@@ -7,5 +7,7 @@
         .{ .name = "segment" },
         // The pickup. Spawned once at start and re-spawned on each eat.
         .{ .name = "food" },
+        // A static boundary cell — the wall ring the snake dies hitting.
+        .{ .name = "wall" },
     },
 }
