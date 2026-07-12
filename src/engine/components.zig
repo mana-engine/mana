@@ -6,6 +6,7 @@
 const core = @import("core");
 const physics = @import("physics");
 
+const Vec2 = core.Vec2;
 const Vec3 = core.Vec3;
 
 /// World-space placement of an entity. Room to grow (rotation, scale) later.
@@ -29,4 +30,17 @@ pub const Collider = struct {
     shape: physics.Shape,
     layers: physics.Layers = .{},
     is_static: bool = false,
+};
+
+/// Kinematic character-controller intent (ADR 0008 follow-on: move-and-slide).
+/// `velocity` is the desired displacement rate this tick, world XY (2.5D — Z passes
+/// through untouched, same plane the `Collider`/`collision` system operate on);
+/// `skin` is the small clearance `controllerSystem` keeps from a surface after a
+/// slide, so floating-point error does not immediately re-report contact next tick.
+/// An entity needs `Transform` + a non-static `Collider` + `Controller` to be driven
+/// by `controllerSystem`; it moves by recording a `set_transform` command (ADR 0007
+/// §3), never by direct mutation.
+pub const Controller = struct {
+    velocity: Vec2 = .{ .x = 0, .y = 0 },
+    skin: f32 = 0.01,
 };

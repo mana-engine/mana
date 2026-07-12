@@ -15,6 +15,7 @@ pub const shape = @import("shape.zig");
 pub const overlaps = @import("overlap.zig");
 pub const broadphase = @import("broadphase.zig");
 pub const layer = @import("layer.zig");
+pub const resolve = @import("resolve.zig");
 
 // Flat re-exports — the port's public vocabulary.
 pub const Circle = shape.Circle;
@@ -27,6 +28,8 @@ pub const overlap = overlaps.overlap;
 pub const Layers = layer.Layers;
 pub const SpatialHash = broadphase.SpatialHash;
 pub const Pair = broadphase.Pair;
+pub const Contact = resolve.Contact;
+pub const contact = resolve.contact;
 
 /// Marker that the module is wired into the build graph (mirrors the other ports).
 pub const ready = core.ready;
@@ -37,6 +40,7 @@ test {
     _ = overlaps;
     _ = broadphase;
     _ = layer;
+    _ = resolve;
 }
 
 test "physics module is wired into the build graph" {

@@ -22,3 +22,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0008 | Physics port + first adapter: hand-rolled 2.5D collision | proposed |
 | 0009 | Platform port: window, input, fixed-timestep main loop | proposed |
 | 0010 | gpu port surface: Device/Texture/Buffer/Pipeline/CommandList | accepted |
+| 0011 | Character controller: move-and-slide via the command buffer | proposed |

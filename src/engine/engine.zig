@@ -29,6 +29,7 @@ pub const sim = @import("sim.zig");
 pub const scene = @import("scene.zig");
 pub const render = @import("render.zig");
 pub const collision = @import("collision.zig");
+pub const controller = @import("controller.zig");
 
 pub const World = world.World;
 pub const Sim = sim.Sim;
@@ -39,6 +40,7 @@ pub const Transform = components.Transform;
 pub const Velocity = components.Velocity;
 pub const Health = components.Health;
 pub const Collider = components.Collider;
+pub const Controller = components.Controller;
 pub const Timers = timer.Timers;
 
 /// Marker verifying the module is wired into the build graph and can see every port
@@ -58,6 +60,7 @@ test {
     _ = scene;
     _ = render;
     _ = collision;
+    _ = controller;
 }
 
 test "engine module assembles all ports" {

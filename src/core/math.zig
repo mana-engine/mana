@@ -31,6 +31,12 @@ pub const Vec2 = struct {
         return std.math.approxEqAbs(f32, a.x, b.x, eps) and
             std.math.approxEqAbs(f32, a.y, b.y, eps);
     }
+
+    /// Dot product (used by the character controller to project a displacement onto
+    /// a contact normal/tangent — ADR 0008 follow-on).
+    pub fn dot(a: Vec2, b: Vec2) f32 {
+        return a.x * b.x + a.y * b.y;
+    }
 };
 
 /// A 3D vector in world space (X east-ish, Y south-ish on the grid, Z up).
@@ -92,6 +98,16 @@ pub fn screenToWorld(screen: Vec2, tile: TileMetrics, origin: Vec2) Vec3 {
 }
 
 const testing = std.testing;
+
+test "vec2: dot product table (perpendicular, parallel, anti-parallel)" {
+    const Case = struct { a: Vec2, b: Vec2, want: f32 };
+    const cases = [_]Case{
+        .{ .a = .{ .x = 1, .y = 0 }, .b = .{ .x = 0, .y = 1 }, .want = 0 }, // perpendicular
+        .{ .a = .{ .x = 2, .y = 0 }, .b = .{ .x = 3, .y = 0 }, .want = 6 }, // parallel
+        .{ .a = .{ .x = 1, .y = 0 }, .b = .{ .x = -1, .y = 0 }, .want = -1 }, // anti-parallel
+    };
+    for (cases) |c| try testing.expectEqual(c.want, Vec2.dot(c.a, c.b));
+}
 
 test "iso projection: origin maps to screen center" {
     const tile: TileMetrics = .{ .half_w = 32, .half_h = 16, .z_height = 16 };
