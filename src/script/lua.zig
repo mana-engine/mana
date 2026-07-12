@@ -3,9 +3,14 @@
 //! behind a comptime flag so the `zlua` import (and vendored Lua sources) never
 //! enter a default build. Also implements ADR 0003 §7/§8: one sandboxed
 //! `lua_State` per Sim (`State`), with each script module loaded into its own
-//! allowlisted `_ENV` (`State.pushSandboxEnv` / `State.loadSandboxed`). The full
-//! scripting API (ADR 0003 — the `mana` table, events, opaque handles) is a
-//! separate task and is NOT implemented here.
+//! allowlisted `_ENV` (`State.pushSandboxEnv` / `State.loadSandboxed`), plus ADR
+//! 0003 §1/§3/§9 event dispatch: `State` loads one handler table and forwards Sim
+//! events (`on_spawn`, `on_collision_begin`) to it, catching handler errors.
+//!
+//! Over the ~500-line soft limit by design: the sandbox, the `mana` install, and
+//! event dispatch all bind to the one per-Sim `State` and its single `lua_State`,
+//! so they stay one cohesive compilation unit rather than fragmenting `State`'s
+//! methods across files (a method must live in its struct's body).
 
 const std = @import("std");
 const zlua = @import("zlua");
@@ -86,6 +91,18 @@ pub const State = struct {
     /// pointer to it.
     entities: mana.Registry = .{},
 
+    /// Registry reference (`luaL_ref`) to this Sim's single loaded handler table
+    /// (ADR 0003 §1), or null before `loadHandlerTable` runs. One table per
+    /// `State`; `loadHandlerTable` replaces it (hot reload, §8). Freed in `deinit`.
+    handler_ref: ?i32 = null,
+
+    /// Scratch for the most recent caught handler error message (ADR 0003 §9).
+    /// `dispatch*` copies the Lua error string here before unwinding the stack so
+    /// the engine can log it *after* dispatch returns; valid until the next
+    /// dispatch. Truncated to fit; content is diagnostic only (never hashed).
+    err_buf: [256]u8 = undefined,
+    err_len: usize = 0,
+
     /// Create a fresh sandboxed state. `gpa` backs Lua's own allocations and
     /// must outlive the returned `State`; caller owns it and must `deinit()`.
     /// Opens exactly the libraries ADR 0003 §7 allows scripts to see —
@@ -117,6 +134,7 @@ pub const State = struct {
 
     /// Destroy the interpreter. Invalidates every value ever pushed from it.
     pub fn deinit(self: *State) void {
+        if (self.handler_ref) |r| self.lua.unref(zlua.registry_index, r);
         self.entities.deinit(self.lua.allocator());
         self.lua.deinit();
         self.* = undefined;
@@ -219,6 +237,151 @@ pub const State = struct {
         // always `_ENV` (the Lua 5.4 compiler emits it unconditionally); see the
         // doc above. `setUpvalue` already errored if index 1 were out of range.
         std.debug.assert(std.mem.eql(u8, upvalue_name, "_ENV"));
+    }
+
+    // --- Event dispatch (ADR 0003 §1, §3, §9) -------------------------------
+
+    /// The result of dispatching one event to the handler table. Returned rather
+    /// than logged so the fragile stack-balancing on the error path is unit
+    /// testable without emitting an `.err` log (which the Zig test runner counts
+    /// as a failure); the engine logs `.errored` itself, reading `lastError`.
+    pub const DispatchOutcome = enum {
+        /// The handler key was absent (a plain no-op, the common cheap case).
+        no_handler,
+        /// The handler ran to completion.
+        ok,
+        /// The handler raised; its effects are unwound and `lastError` is set.
+        errored,
+    };
+
+    /// Load `source` as this Sim's single handler table (ADR 0003 §1): run the
+    /// sandboxed module and cache the table it returns in the Lua registry for
+    /// event dispatch. Replaces any previously loaded table (hot reload, §8;
+    /// timers of the old table are the follow-up task's concern). `source` is a
+    /// NUL-terminated Lua chunk, borrowed only for the call. Errors:
+    /// `error.LuaRuntime`/`error.LuaSyntax` if the module fails to load or run,
+    /// `error.NotAHandlerTable` if it does not return a table, `error.OutOfMemory`.
+    pub fn loadHandlerTable(self: *State, source: [:0]const u8) !void {
+        const l = self.lua;
+        try self.loadSandboxed(source); // leaves the sandboxed chunk on the stack
+        try l.protectedCall(.{ .results = 1 }); // run it → its return value on top
+        if (l.typeOf(-1) != .table) {
+            l.pop(1);
+            return error.NotAHandlerTable;
+        }
+        // Swap atomically: only release the previous ref once the new table is in
+        // hand, so a failed load above leaves the old handlers intact.
+        if (self.handler_ref) |r| self.lua.unref(zlua.registry_index, r);
+        self.handler_ref = l.ref(zlua.registry_index); // pops the table, stores it
+    }
+
+    /// Dispatch `on_spawn(self)` (ADR 0003 §3) — `self` is the spawned entity as
+    /// an opaque handle (§4). A missing key is a silent no-op. `index`/`generation`
+    /// are the raw entity fields the engine passes; the handle packing stays inside
+    /// `script` so no Lua/handle type leaks upward. Never raises: a handler error
+    /// is caught and reported via the return value (§9).
+    pub fn dispatchSpawn(self: *State, index: u32, generation: u32) DispatchOutcome {
+        if (!self.pushHandler("on_spawn")) return .no_handler;
+        self.pushHandle(index, generation);
+        return self.invokeHandler(1);
+    }
+
+    /// Dispatch `on_collision_begin(self, ev)` (ADR 0003 §3) where `ev = { other,
+    /// normal_x, normal_y }`. `self`/`other` are opaque handles (§4); the engine's
+    /// `collision_begin` event carries no contact normal yet, so callers pass `0`
+    /// for both components until the collision system computes one. A missing key
+    /// is a no-op; a handler error is caught and reported (§9).
+    pub fn dispatchCollisionBegin(
+        self: *State,
+        self_index: u32,
+        self_generation: u32,
+        other_index: u32,
+        other_generation: u32,
+        normal_x: f32,
+        normal_y: f32,
+    ) DispatchOutcome {
+        if (!self.pushHandler("on_collision_begin")) return .no_handler;
+        const l = self.lua;
+        self.pushHandle(self_index, self_generation); // arg 1: self
+        l.newTable(); // arg 2: ev
+        self.pushHandle(other_index, other_generation);
+        l.setField(-2, "other");
+        l.pushNumber(normal_x);
+        l.setField(-2, "normal_x");
+        l.pushNumber(normal_y);
+        l.setField(-2, "normal_y");
+        return self.invokeHandler(2);
+    }
+
+    /// Read integer field `key` off the loaded handler table, or null if no table
+    /// is loaded or the field is absent/non-integer. Lets the engine observe
+    /// handler-declared scalars (and dispatch effects, in tests) without exposing
+    /// a Lua type upward.
+    pub fn handlerFieldInt(self: *State, key: [:0]const u8) ?i64 {
+        const l = self.lua;
+        const ref = self.handler_ref orelse return null;
+        _ = l.getIndexRaw(zlua.registry_index, ref); // push the table
+        const ty = l.getField(-1, key); // push the field value
+        defer l.pop(2); // value + table
+        if (ty != .number) return null;
+        return l.toInteger(-1) catch null;
+    }
+
+    /// The most recent caught handler error message (ADR 0003 §9), valid until the
+    /// next dispatch. Empty when the last dispatch did not error.
+    pub fn lastError(self: *const State) []const u8 {
+        return self.err_buf[0..self.err_len];
+    }
+
+    /// Push the loaded handler table then its `key` field; if that field is a
+    /// function, leave `[table, fn]` on the stack and return true (caller pushes
+    /// args and calls `invokeHandler`). Otherwise restore the stack and return
+    /// false (no table loaded, or the key is absent/not callable → no-op).
+    fn pushHandler(self: *State, key: [:0]const u8) bool {
+        const l = self.lua;
+        const ref = self.handler_ref orelse return false;
+        _ = l.getIndexRaw(zlua.registry_index, ref); // push the table
+        if (l.getField(-1, key) != .function) {
+            l.pop(2); // the non-function value + the table
+            return false;
+        }
+        return true; // stack: [..., table, fn]
+    }
+
+    /// Call the handler resolved by `pushHandler`, whose `nargs` arguments are
+    /// already pushed above it, in protected mode. Always leaves the stack as it
+    /// found it before `pushHandler` (pops the table, the function, its args, and
+    /// any error object). On error, copies the message into `err_buf` (§9).
+    fn invokeHandler(self: *State, nargs: i32) DispatchOutcome {
+        const l = self.lua;
+        // stack: [..., table, fn, arg1..argN]; protectedCall pops fn + args.
+        l.protectedCall(.{ .args = nargs, .results = 0 }) catch {
+            self.captureError(); // reads the error object at the top of the stack
+            l.pop(2); // the error object + the table
+            return .errored;
+        };
+        l.pop(1); // the table (protectedCall consumed fn + args, pushed nothing)
+        return .ok;
+    }
+
+    /// Copy the error object at the top of the stack into `err_buf` (truncating to
+    /// fit) so the engine can log it after the stack unwinds. `toStringEx` pushes a
+    /// string copy which this pops, leaving the original error object on top.
+    fn captureError(self: *State) void {
+        const l = self.lua;
+        const msg = l.toStringEx(-1); // pushes a string form of the error object
+        defer l.pop(1); // drop that copy
+        const n = @min(msg.len, self.err_buf.len);
+        @memcpy(self.err_buf[0..n], msg[0..n]);
+        self.err_len = n;
+    }
+
+    /// Push an opaque entity handle (ADR 0003 §4) as the single Lua integer scripts
+    /// receive. The `mana` handle packing lives here so no handle/Lua type leaks
+    /// above `script`.
+    fn pushHandle(self: *State, index: u32, generation: u32) void {
+        const raw = mana.Handle.pack(.{ .index = index, .generation = generation });
+        self.lua.pushInteger(@bitCast(raw));
     }
 };
 
@@ -479,4 +642,116 @@ test "sandbox: the string metatable cannot be reached to corrupt a sibling" {
     try std.testing.expectEqualStrings("OK", try state.lua.toString(-1));
     try std.testing.expectEqualStrings("OK", try state.lua.toString(-2));
     state.lua.pop(2);
+}
+
+// --- Event dispatch (ADR 0003 §1, §3, §9) -----------------------------------
+
+test "dispatch: on_spawn fires for a loaded handler table" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    try state.loadHandlerTable(
+        \\local t = { spawns = 0 }
+        \\function t.on_spawn(self) t.spawns = t.spawns + 1 end
+        \\return t
+    );
+
+    try std.testing.expectEqual(@as(i64, 0), state.handlerFieldInt("spawns").?);
+    try std.testing.expectEqual(State.DispatchOutcome.ok, state.dispatchSpawn(1, 0));
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("spawns").?);
+    try std.testing.expectEqual(State.DispatchOutcome.ok, state.dispatchSpawn(2, 0));
+    try std.testing.expectEqual(@as(i64, 2), state.handlerFieldInt("spawns").?);
+}
+
+test "dispatch: a missing handler key is a silent no-op" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    // A table with no `on_spawn`/`on_collision_begin` at all.
+    try state.loadHandlerTable("return { unrelated = 1 }");
+    try std.testing.expectEqual(State.DispatchOutcome.no_handler, state.dispatchSpawn(1, 0));
+    try std.testing.expectEqual(
+        State.DispatchOutcome.no_handler,
+        state.dispatchCollisionBegin(1, 0, 2, 0, 0, 0),
+    );
+}
+
+test "dispatch: with no table loaded every event is a no-op" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+    try std.testing.expectEqual(State.DispatchOutcome.no_handler, state.dispatchSpawn(1, 0));
+    try std.testing.expect(state.handlerFieldInt("anything") == null);
+}
+
+test "dispatch: a throwing handler is caught, reported, and the state stays usable" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    // `on_spawn` raises; `on_collision_begin` is well-behaved. Proving the second
+    // still runs afterwards proves the error path unwound the stack cleanly.
+    try state.loadHandlerTable(
+        \\local t = { collisions = 0 }
+        \\function t.on_spawn(self) error("boom") end
+        \\function t.on_collision_begin(self, ev) t.collisions = t.collisions + 1 end
+        \\return t
+    );
+
+    try std.testing.expectEqual(State.DispatchOutcome.errored, state.dispatchSpawn(1, 0));
+    try std.testing.expect(std.mem.indexOf(u8, state.lastError(), "boom") != null);
+
+    // The stack is balanced, so a subsequent dispatch works normally.
+    try std.testing.expectEqual(
+        State.DispatchOutcome.ok,
+        state.dispatchCollisionBegin(1, 0, 2, 0, 0, 0),
+    );
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("collisions").?);
+}
+
+test "dispatch: on_collision_begin receives self and an ev table with other/normals" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    try state.loadHandlerTable(
+        \\local t = { hits = 0, other_present = 0, normals_present = 0 }
+        \\function t.on_collision_begin(self, ev)
+        \\  t.hits = t.hits + 1
+        \\  if ev.other ~= nil then t.other_present = 1 end
+        \\  if ev.normal_x ~= nil and ev.normal_y ~= nil then t.normals_present = 1 end
+        \\end
+        \\return t
+    );
+
+    try std.testing.expectEqual(
+        State.DispatchOutcome.ok,
+        state.dispatchCollisionBegin(1, 0, 2, 0, 0.5, -0.5),
+    );
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("hits").?);
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("other_present").?);
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("normals_present").?);
+}
+
+test "dispatch: loading a non-table module is rejected without clobbering a prior table" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    try state.loadHandlerTable(
+        \\local t = { spawns = 0 }
+        \\function t.on_spawn(self) t.spawns = t.spawns + 1 end
+        \\return t
+    );
+    try std.testing.expectError(error.NotAHandlerTable, state.loadHandlerTable("return 42"));
+
+    // The previously loaded table survives the failed reload.
+    try std.testing.expectEqual(State.DispatchOutcome.ok, state.dispatchSpawn(1, 0));
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("spawns").?);
+}
+
+test "dispatch: loadHandlerTable replaces the previous table (hot reload)" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    try state.loadHandlerTable("return { generation = 1 }");
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("generation").?);
+    try state.loadHandlerTable("return { generation = 2 }");
+    try std.testing.expectEqual(@as(i64, 2), state.handlerFieldInt("generation").?);
 }
