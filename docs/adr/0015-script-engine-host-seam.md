@@ -1,6 +1,6 @@
 # 0015. Script↔engine host seam: how `mana` reaches the live Sim
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-12
 
 ## Context

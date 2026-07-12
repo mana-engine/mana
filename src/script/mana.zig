@@ -2,28 +2,32 @@
 //! script `_ENV` receives (`lua.zig`'s `State.pushSandboxEnv` installs it).
 //! Compiled only under `-Denable-lua`.
 //!
-//! This implements exactly the subset of ADR 0003 §2 that needs no live
-//! Sim/World: `version`, `log`, and `is_valid` (backed by `handle.Registry`,
-//! this `State`'s own generation table). The rest of §2's v1 surface —
-//! `position`, `set_velocity`, `get`, `set`, `spawn`, `despawn`, `after`,
-//! `every`, `cancel`, `now`, `random`, `random_int` — reads or mutates live
-//! component data, the sim clock, the sim's seeded `core.Rng`, a spawn/despawn
-//! command buffer, or the timer wheel, none of which `script` can reach today:
-//! nothing in `engine` holds a `script.State`, and nothing here holds a `Sim`
-//! (the module import DAG has `script` depend on `core` only). Adding those
-//! needs an engine → script wiring task first — deliberately out of scope here
-//! (see the issue this module was built for). Do not add stub/fake behavior
-//! for them; an absent key is the honest, checkable signal that they are not
-//! implemented yet, matching how a missing event handler key means "no
+//! Members that need no live Sim — `version`, `log` — are implemented directly.
+//! The live-Sim members reach the world/clock through the ADR 0015 host seam
+//! (`host.zig`): the engine installs a `Host` on the owning `State` for the
+//! duration of each event dispatch, and these accessors call through it. This
+//! slice (issue #5) wires the read-only surface — `is_valid`, `position`, `now`.
+//! `is_valid` prefers the host when present (authoritative live-world check) and
+//! falls back to this `State`'s own `handle.Registry` when no Sim is dispatching
+//! (before/without wiring), so its pre-seam behavior and tests still hold.
+//!
+//! The remaining §2 members — `set_velocity`, `get`, `set`, `spawn`, `despawn`
+//! (deferred mutations via the command buffer), `random`/`random_int` (seeded
+//! `core.Rng`), and `after`/`every`/`cancel` (timer wheel) — land as additive
+//! host-vtable entries in follow-up slices. Do not add stub/fake behavior for
+//! them; an absent `mana` key is the honest, checkable signal that a member is
+//! not implemented yet, matching how a missing event-handler key means "no
 //! handler" elsewhere in ADR 0003.
 
 const std = @import("std");
 const zlua = @import("zlua");
 const Lua = zlua.Lua;
 const handle = @import("handle.zig");
+const host_mod = @import("host.zig");
 
 pub const Handle = handle.Handle;
 pub const Registry = handle.Registry;
+pub const Host = host_mod.Host;
 
 /// `mana.version` (ADR 0003 §5): the integer API version this build provides.
 /// Additive-only within a version; any surface change (new/changed function,
@@ -31,12 +35,14 @@ pub const Registry = handle.Registry;
 /// bumps this.
 pub const version: i64 = 1;
 
-/// Push a fresh `mana` table (ADR 0003 §2) onto the Lua stack. `entities` is
-/// the owning `State`'s handle registry; `is_valid` captures a light-userdata
-/// pointer to it as a closure upvalue, so it must outlive every script `_ENV`
-/// built from this table (true for a `State`'s lifetime — one per Sim, ADR
-/// 0003 §8). Called once per fresh `_ENV` by `State.pushSandboxEnv`.
-pub fn pushManaTable(l: *Lua, entities: *const Registry) void {
+/// Push a fresh `mana` table (ADR 0003 §2) onto the Lua stack. `entities` is the
+/// owning `State`'s handle registry (the `is_valid` fallback); `host` is a pointer
+/// to that `State`'s optional `Host` slot (ADR 0015), which the engine sets around
+/// each dispatch. Both pointers are captured as light-userdata closure upvalues, so
+/// both must outlive every script `_ENV` built from this table — true for a
+/// `State`'s lifetime (one per Sim, ADR 0003 §8), whose address is required to stay
+/// stable. Called once per fresh `_ENV` by `State.pushSandboxEnv`.
+pub fn pushManaTable(l: *Lua, entities: *const Registry, host: *const ?Host) void {
     l.newTable();
 
     l.pushInteger(version);
@@ -45,9 +51,29 @@ pub fn pushManaTable(l: *Lua, entities: *const Registry) void {
     l.pushFunction(zlua.wrap(manaLog));
     l.setField(-2, "log");
 
+    // is_valid: upvalue 1 = host slot (authoritative when a Sim is dispatching),
+    // upvalue 2 = the registry fallback (used before/without host wiring).
+    l.pushLightUserdata(@ptrCast(host));
     l.pushLightUserdata(@ptrCast(entities));
-    l.pushClosure(zlua.wrap(manaIsValid), 1);
+    l.pushClosure(zlua.wrap(manaIsValid), 2);
     l.setField(-2, "is_valid");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaPosition), 1);
+    l.setField(-2, "position");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaNow), 1);
+    l.setField(-2, "now");
+}
+
+/// Read a `*const ?Host` back from closure upvalue `idx` (a light-userdata pointer
+/// `pushManaTable` installed). Proof of `unreachable`: every closure here is created
+/// by `pushManaTable` with the host slot as a light-userdata upvalue at this index,
+/// so the pointer is always present and always a `*const ?Host`.
+fn hostSlot(l: *Lua, idx: i32) *const ?Host {
+    const ptr = l.toPointer(idx) orelse unreachable;
+    return @ptrCast(@alignCast(ptr));
 }
 
 /// `mana.log(level, msg)` (ADR 0003 §2): routes to the same engine-side log
@@ -76,33 +102,68 @@ fn manaLog(l: *Lua) !i32 {
     return 0;
 }
 
-/// `mana.is_valid(h)` (ADR 0003 §2, §4): `false` for a stale (despawned) or
-/// forged handle — a generation mismatch or an out-of-range index — rather
-/// than ever touching freed memory. Reads the registry captured as this
-/// closure's sole upvalue (see `pushManaTable`).
+/// `mana.is_valid(h)` (ADR 0003 §2, §4): `false` for a stale (despawned) or forged
+/// handle — a generation mismatch or an out-of-range index — rather than ever
+/// touching freed memory. When a `Host` is installed (a Sim is dispatching), it is
+/// the authority: validity is checked against the live world. Otherwise this falls
+/// back to the `State`-local `Registry` (upvalue 2), preserving pre-seam behavior.
 fn manaIsValid(l: *Lua) !i32 {
     const raw: u64 = @bitCast(try l.toInteger(1));
-    // Proof: `pushManaTable` always creates this closure with exactly one
-    // light-userdata upvalue pointing at a live `Registry`, so upvalue 1 is
-    // never anything else.
-    const ptr = l.toPointer(Lua.upvalueIndex(1)) orelse unreachable;
+    if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| {
+        l.pushBoolean(h.isValid(raw));
+        return 1;
+    }
+    // No live host: consult this State's own generation table (upvalue 2). Proof of
+    // `unreachable`: `pushManaTable` always installs the registry as this closure's
+    // second light-userdata upvalue.
+    const ptr = l.toPointer(Lua.upvalueIndex(2)) orelse unreachable;
     const entities: *const Registry = @ptrCast(@alignCast(ptr));
     l.pushBoolean(entities.isValid(Handle.unpack(raw)));
     return 1;
 }
 
+/// `mana.position(h)` (ADR 0003 §2): the entity's world position as three numbers
+/// `x, y, z`, or a single `nil` when no Sim is dispatching, the handle is stale, or
+/// the entity has no `Transform`. Reads flow through the host seam (ADR 0015) —
+/// immediate, never queued.
+fn manaPosition(l: *Lua) !i32 {
+    const raw: u64 = @bitCast(try l.toInteger(1));
+    const h = hostSlot(l, Lua.upvalueIndex(1)).* orelse {
+        l.pushNil();
+        return 1;
+    };
+    const p = h.position(raw) orelse {
+        l.pushNil();
+        return 1;
+    };
+    l.pushNumber(p.x);
+    l.pushNumber(p.y);
+    l.pushNumber(p.z);
+    return 3;
+}
+
+/// `mana.now()` (ADR 0003 §2): current sim time in seconds — tick-derived, never
+/// wall-clock, so it is deterministic. Returns `0` when no Sim is dispatching (no
+/// host installed), the same graceful degradation the other live-Sim reads use.
+fn manaNow(l: *Lua) !i32 {
+    const t: f64 = if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.now() else 0;
+    l.pushNumber(t);
+    return 1;
+}
+
 const testing = std.testing;
 
-test "mana: table shape exposes exactly version, log, is_valid; version == 1" {
+test "mana: table shape exposes exactly version, log, is_valid, position, now; version == 1" {
     var l = try Lua.init(testing.allocator);
     defer l.deinit();
     var registry: Registry = .{};
     defer registry.deinit(testing.allocator);
+    var host: ?Host = null;
 
-    pushManaTable(l, &registry);
+    pushManaTable(l, &registry, &host);
     const t: i32 = l.getTop();
 
-    // Exact shape: no more, no less than the three implementable v1 members
+    // Exact shape: no more, no less than the five members wired in this slice
     // (ADR 0003 §2 — see this file's module doc for the deferred rest).
     var key_count: usize = 0;
     l.pushNil();
@@ -110,7 +171,7 @@ test "mana: table shape exposes exactly version, log, is_valid; version == 1" {
         key_count += 1;
         l.pop(1); // drop value; keep key on the stack to advance `next`
     }
-    try testing.expectEqual(@as(usize, 3), key_count);
+    try testing.expectEqual(@as(usize, 5), key_count);
 
     try testing.expectEqual(zlua.LuaType.number, l.getField(t, "version"));
     try testing.expectEqual(@as(i64, 1), try l.toInteger(-1));
@@ -118,6 +179,10 @@ test "mana: table shape exposes exactly version, log, is_valid; version == 1" {
     try testing.expectEqual(zlua.LuaType.function, l.getField(t, "log"));
     l.pop(1);
     try testing.expectEqual(zlua.LuaType.function, l.getField(t, "is_valid"));
+    l.pop(1);
+    try testing.expectEqual(zlua.LuaType.function, l.getField(t, "position"));
+    l.pop(1);
+    try testing.expectEqual(zlua.LuaType.function, l.getField(t, "now"));
     l.pop(1);
     l.pop(1); // pop table
 }
@@ -128,8 +193,9 @@ test "mana.is_valid: true for a live handle, false after despawn, and for a forg
     var registry: Registry = .{};
     defer registry.deinit(testing.allocator);
     try registry.setGeneration(testing.allocator, 3, 1);
+    var host: ?Host = null; // no live Sim: is_valid uses the registry fallback
 
-    pushManaTable(l, &registry);
+    pushManaTable(l, &registry, &host);
     l.setGlobal("mana");
 
     const live: i64 = @bitCast(Handle.pack(.{ .index = 3, .generation = 1 }));
@@ -164,8 +230,9 @@ test "mana.log: accepts info/warn levels without raising, and rejects an unknown
     defer l.deinit();
     var registry: Registry = .{};
     defer registry.deinit(testing.allocator);
+    var host: ?Host = null;
 
-    pushManaTable(l, &registry);
+    pushManaTable(l, &registry, &host);
     l.setGlobal("mana");
 
     try l.doString("mana.log('info', 'hello')");
@@ -179,8 +246,9 @@ test "mana.log: tolerates a missing msg argument without raising" {
     defer l.deinit();
     var registry: Registry = .{};
     defer registry.deinit(testing.allocator);
+    var host: ?Host = null;
 
-    pushManaTable(l, &registry);
+    pushManaTable(l, &registry, &host);
     l.setGlobal("mana");
 
     try l.doString("mana.log('info')");

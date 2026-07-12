@@ -216,6 +216,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         lua_mod.addImport("zlua", zlua);
+        lua_mod.addImport("core", core); // host.zig (ADR 0015) uses core.Vec3
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lua_mod })).step);
     }
 
