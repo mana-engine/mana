@@ -46,6 +46,13 @@ pub const Window = struct {
         self.should_close = true;
     }
 
+    /// Set the window title — a no-op headless (there is no OS window). Present so
+    /// runtime code (the play loop's FPS readout) is adapter-agnostic.
+    pub fn setTitle(self: *Window, title: [:0]const u8) void {
+        _ = self;
+        _ = title;
+    }
+
     /// Sample this frame's input. Headless returns `scripted_input` (empty unless a
     /// harness injected a snapshot); real OS input is the SDL3 adapter's job.
     pub fn poll(self: *Window) port.InputSnapshot {

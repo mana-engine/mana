@@ -101,6 +101,12 @@ pub const Window = struct {
         return self.should_close;
     }
 
+    /// Set the OS window title (e.g. a live FPS/tick readout). `title` is borrowed for
+    /// the call — SDL copies it — and must be NUL-terminated.
+    pub fn setTitle(self: *Window, title: [:0]const u8) void {
+        _ = c.SDL_SetWindowTitle(self.handle, title.ptr);
+    }
+
     /// Sample this frame's input (ADR 0009: once per tick, immutable for the tick).
     /// Drains the SDL event queue first — latching the quit request and accumulating
     /// this frame's wheel delta — then reads the current keyboard and mouse state.
