@@ -19,18 +19,15 @@ const port = @import("port.zig");
 pub const Adapter = enum { headless, sdl3 };
 
 /// The adapter compiled into this build, chosen at comptime from `-Denable-sdl3`.
-/// Defaults to headless until the SDL3 adapter lands (dependency deferral).
-/// Selecting the deferred adapter fails the build with a clear reason.
-pub const adapter: Adapter = if (build_options.enable_sdl3)
-    @compileError("SDL3 platform adapter is not yet implemented; build without -Denable-sdl3")
-else
-    .headless;
+/// Defaults to headless; `-Denable-sdl3` selects the SDL3 adapter (pulls in the
+/// build-from-source SDL3 dependency).
+pub const adapter: Adapter = if (build_options.enable_sdl3) .sdl3 else .headless;
 
 /// The adapter module implementing the `Window` surface. Internal: callers use the
-/// vocabulary below and the re-exported `Window`. The SDL3 branch fails the build
-/// until its dependency lands (ADR 0002), so no `sdl3/` module is referenced yet.
+/// vocabulary below and the re-exported `Window`. The SDL3 branch is compiled only
+/// under `-Denable-sdl3`, which links the SDL3 library (ADR 0002/0009).
 const impl = if (build_options.enable_sdl3)
-    @compileError("SDL3 platform adapter is not yet implemented; build without -Denable-sdl3")
+    @import("sdl3/adapter.zig")
 else
     @import("headless/adapter.zig");
 
@@ -52,8 +49,9 @@ pub const Window = impl.Window;
 /// Marker verifying the module is wired into the build graph.
 pub const ready = core.ready;
 
-test "platform module compiles headless by default" {
-    try std.testing.expectEqual(Adapter.headless, adapter);
+test "platform selects the adapter matching the build flag (headless by default)" {
+    const expected: Adapter = if (build_options.enable_sdl3) .sdl3 else .headless;
+    try std.testing.expectEqual(expected, adapter);
 }
 
 test {

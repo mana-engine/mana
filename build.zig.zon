@@ -27,6 +27,17 @@
             .hash = "zlua-0.1.0-hGRpC1mUBQCNQf4CnmRTM4I7gxE3YpCvZ-p2EarlcyER",
             .lazy = true,
         },
+        // Lazy: only fetched/built when the SDL3 platform adapter is enabled
+        // (`-Denable-sdl3`). The default and CI builds stay window- and dependency-free.
+        // castholm/SDL ports SDL to the Zig build system and *builds SDL3 from source*
+        // (no system SDL) — its artifact is named `SDL3` and installs the `SDL3/*.h`
+        // headers, so `@cInclude("SDL3/SDL.h")` resolves after `linkLibrary`. Pinned to
+        // tag v0.5.2+3.4.12, whose `minimum_zig_version` is 0.16.0 (matches our pin).
+        .sdl = .{
+            .url = "git+https://github.com/castholm/SDL.git?ref=v0.5.2+3.4.12#1b67d371a531ecb0499d4b80a865631c299f472a",
+            .hash = "sdl-0.5.2+3.4.12-SDL--qPKpwHc40bqAlYs7W9pXJVyLwsGDNa4shNXbOZr",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

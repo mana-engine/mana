@@ -87,6 +87,21 @@ pub fn build(b: *std.Build) void {
     platform.addImport("core", core);
     platform.addImport("build_options", build_options);
 
+    // The SDL3 adapter and its dependency (castholm/SDL, artifact `SDL3`, built from
+    // source) are only wired in when enabled. The dep is lazy: `lazyDependency` is
+    // called only under the flag, so the default/CI build never *compiles* it. (`.lazy`
+    // defers compilation, not the source fetch — zig still fetches the tarball into
+    // zig-pkg/ on a plain build.) Linking the artifact propagates its installed
+    // `SDL3/*.h` headers, so the adapter's `@cInclude("SDL3/SDL.h")` resolves; libc is
+    // required for the C import. Nothing here imports gpu/vulkan — the port stays
+    // decoupled and Vulkan never leaks upward (CLAUDE.md #4).
+    if (enable_sdl3) {
+        if (b.lazyDependency("sdl", .{ .target = target, .optimize = optimize })) |sdl| {
+            platform.link_libc = true;
+            platform.linkLibrary(sdl.artifact("SDL3"));
+        }
+    }
+
     const physics = b.createModule(.{
         .root_source_file = b.path("src/physics/physics.zig"),
         .target = target,
