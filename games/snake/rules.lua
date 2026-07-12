@@ -3,16 +3,25 @@
 --
 -- The whole game is event- and timer-driven — never a per-frame per-entity Lua loop
 -- (ADR 0003 forbids on_update). The snake advances one cell per timer tick; input
--- only changes the heading.
+-- only changes the heading. The board is centred on the world origin so it renders
+-- centred on screen (there is no camera yet — that is a later engine feature).
 
-local W, H = 16, 16 -- board bounds in grid cells
-local STEP = 0.15   -- seconds per move (grid tick)
+local HALF = 8
+local MIN, MAX = -HALF, HALF - 1 -- play-field cells [-8, 7] in x and y, around origin
+local STEP = 0.15                -- seconds per move (grid tick)
 
--- Mutable game state, (re)seeded by `reset`.
 local dir = { x = 1, y = 0 }     -- current heading (grid delta)
 local pending = { x = 1, y = 0 } -- next heading, applied at the move boundary
 local body = {}                  -- ordered cells, head first: { {x,y,handle}, ... }
 local food = { x = 0, y = 0, handle = nil }
+local rng = 1 -- content-side deterministic PRNG for food, until #47 wires a seeded Sim RNG
+
+-- LCG → an integer in [0, n). Deterministic: math.random is removed from the sandbox
+-- (ADR 0003 §7), so content that wants variety rolls its own until mana.random lands.
+local function rand(n)
+    rng = (rng * 1103515245 + 12345) % 2147483648
+    return rng % n
+end
 
 -- Is (x, y) a body cell? `ignore_tail` skips the last segment, which vacates its cell
 -- as the snake advances (so moving into it is legal — unless the snake is growing).
@@ -25,20 +34,19 @@ local function body_hits(x, y, ignore_tail)
     return false
 end
 
+-- Drop food on a pseudo-random free cell (never on the snake).
 local function place_food()
-    -- #47 (deferred): a seeded Sim RNG would place food randomly; until then a scan
-    -- for the first free cell keeps it deterministic and off the snake.
-    for y = 0, H - 1 do
-        for x = 0, W - 1 do
-            if not body_hits(x, y, false) then
-                food.x, food.y = x, y
-                if food.handle == nil then
-                    food.handle = mana.spawn("food", x, y, 0)
-                else
-                    mana.set_position(food.handle, x, y, 0)
-                end
-                return
+    local span = MAX - MIN + 1
+    for _ = 1, span * span do
+        local x, y = MIN + rand(span), MIN + rand(span)
+        if not body_hits(x, y, false) then
+            food.x, food.y = x, y
+            if food.handle == nil then
+                food.handle = mana.spawn("food", x, y, 0)
+            else
+                mana.set_position(food.handle, x, y, 0)
             end
+            return
         end
     end
 end
@@ -48,11 +56,22 @@ local function grow_at(x, y)
     table.insert(body, { x = x, y = y, handle = mana.spawn("segment", x, y, 0) })
 end
 
+-- The static wall ring one cell outside the play field — the boundary the snake dies
+-- hitting. Spawned once (walls never move), so they persist across resets.
+local function spawn_walls()
+    for i = MIN - 1, MAX + 1 do
+        mana.spawn("wall", i, MIN - 1, 0)
+        mana.spawn("wall", i, MAX + 1, 0)
+        mana.spawn("wall", MIN - 1, i, 0)
+        mana.spawn("wall", MAX + 1, i, 0)
+    end
+end
+
 -- (Re)start the run: clear any snake, spawn a fresh head at the centre, place food.
 local function reset()
     for _, seg in ipairs(body) do mana.despawn(seg.handle) end
     body = {}
-    grow_at(W // 2, H // 2) -- head is body[1]
+    grow_at(0, 0) -- head is body[1], at the world origin (screen centre)
     dir = { x = 1, y = 0 }
     pending = { x = 1, y = 0 }
     place_food()
@@ -65,7 +84,7 @@ local function step()
     local eating = (hx == food.x and hy == food.y)
 
     -- Wall, or self (the tail cell is free this step unless we grow into it).
-    if hx < 0 or hy < 0 or hx >= W or hy >= H or body_hits(hx, hy, not eating) then
+    if hx < MIN or hy < MIN or hx > MAX or hy > MAX or body_hits(hx, hy, not eating) then
         reset()
         return
     end
@@ -95,6 +114,7 @@ end
 return {
     -- Bootstrap (ADR 0017): fires once when the board loads, host-live.
     on_scene_enter = function(ev)
+        spawn_walls()
         reset()
         mana.every(STEP, step) -- the move loop (ADR 0019)
     end,
