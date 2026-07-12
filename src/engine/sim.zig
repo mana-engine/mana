@@ -129,14 +129,14 @@ pub const Sim = struct {
 
     /// Schedule `cb` to fire once, `delay_seconds` of sim time from now (ADR 0003
     /// §2 `mana.after`). Fired at the end of `tick`, after event dispatch.
-    pub fn after(self: *Sim, delay_seconds: f32, cb: timer.Callback) Allocator.Error!timer.Handle {
-        return self.timers.after(self.gpa, delay_seconds, cb);
+    pub fn after(self: *Sim, delay_seconds: f32, cb: *const fn (*World) void) Allocator.Error!timer.Handle {
+        return self.timers.after(self.gpa, delay_seconds, .{ .native = cb });
     }
 
     /// Schedule `cb` to fire every `interval_seconds` of sim time (ADR 0003 §2
     /// `mana.every`). Fired at the end of `tick`, after event dispatch.
-    pub fn every(self: *Sim, interval_seconds: f32, cb: timer.Callback) Allocator.Error!timer.Handle {
-        return self.timers.every(self.gpa, interval_seconds, cb);
+    pub fn every(self: *Sim, interval_seconds: f32, cb: *const fn (*World) void) Allocator.Error!timer.Handle {
+        return self.timers.every(self.gpa, interval_seconds, .{ .native = cb });
     }
 
     /// Cancel a timer scheduled via `after`/`every`; a stale handle is a no-op.
