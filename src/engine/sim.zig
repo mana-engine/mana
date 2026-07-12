@@ -175,10 +175,11 @@ pub const Sim = struct {
         for (self.events.items()) |ev| {
             for (self.handlers.items) |handler| handler(&self.world, ev);
             // Script dispatch (ADR 0003 §1/§3). A comptime no-op — zero cost, sim
-            // bit-identical — unless `-Denable-lua`; catches handler errors (§9).
-            // The live world + `now` back the ADR 0015 host seam for the handler's
-            // `mana` reads.
-            self.script_runtime.dispatch(ev, &self.world, now_seconds);
+            // bit-identical — unless `-Denable-lua`; catches handler errors (§9) and
+            // rolls back their queued mutations. The live world, command buffer, and
+            // `now` back the ADR 0015 host seam for the handler's `mana` reads and
+            // deferred mutations (applied at next tick's flush). Only OOM propagates.
+            try self.script_runtime.dispatch(ev, &self.world, &self.commands, self.gpa, now_seconds);
         }
         self.events.clear();
         try self.timers.advance(self.gpa, &self.world, self.dt);
@@ -418,4 +419,55 @@ test "sim: on_spawn reads its entity's position and sim time via the mana host s
     try testing.expectEqual(@as(i64, 7), sim.script_runtime.handlerFieldInt("px").?);
     try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("valid").?);
     try testing.expectEqual(@as(i64, 3), sim.script_runtime.handlerFieldInt("seen_now").?);
+}
+
+/// A one-shot system that spawns a single transform-only entity on its first tick,
+/// so a `spawned` event drives the on_spawn mutation tests below.
+const OneShotTransformSpawner = struct {
+    var did: bool = false;
+    fn system(ctx: *Context) SystemError!void {
+        if (!did) {
+            _ = try ctx.commands.spawn(ctx.gpa, ctx.world, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } }, null);
+            did = true;
+        }
+    }
+};
+
+test "sim: on_spawn queues mana.set_velocity; it attaches at the next flush (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+    OneShotTransformSpawner.did = false;
+
+    var sim = Sim.init(testing.allocator, 1.0 / 60.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = {}
+        \\function t.on_spawn(self) mana.set_velocity(self, 1, 2, 3) end
+        \\return t
+    );
+    try sim.addSystem(OneShotTransformSpawner.system);
+
+    try sim.tick(); // spawn flush → on_spawn queues set_velocity (deferred, ADR 0003 §2)
+    const e = sim.world.entityAt(0);
+    try testing.expect(sim.world.getVelocity(e) == null); // not applied within the same tick
+    try sim.tick(); // next flush applies the queued mutation
+    try testing.expect(sim.world.getVelocity(e).?.v.approxEql(.{ .x = 1, .y = 2, .z = 3 }, 1e-6));
+}
+
+test "sim: on_spawn queues mana.despawn(self); the entity is removed at the next flush (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+    OneShotTransformSpawner.did = false;
+
+    var sim = Sim.init(testing.allocator, 1.0 / 60.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = {}
+        \\function t.on_spawn(self) mana.despawn(self) end
+        \\return t
+    );
+    try sim.addSystem(OneShotTransformSpawner.system);
+
+    try sim.tick(); // spawn flush → on_spawn queues despawn (deferred)
+    try testing.expectEqual(@as(usize, 1), sim.world.count()); // still alive this tick
+    try sim.tick(); // next flush applies the despawn
+    try testing.expectEqual(@as(usize, 0), sim.world.count());
 }

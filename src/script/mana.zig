@@ -3,21 +3,23 @@
 //! Compiled only under `-Denable-lua`.
 //!
 //! Members that need no live Sim — `version`, `log` — are implemented directly.
-//! The live-Sim members reach the world/clock through the ADR 0015 host seam
-//! (`host.zig`): the engine installs a `Host` on the owning `State` for the
-//! duration of each event dispatch, and these accessors call through it. This
-//! slice (issue #5) wires the read-only surface — `is_valid`, `position`, `now`.
-//! `is_valid` prefers the host when present (authoritative live-world check) and
-//! falls back to this `State`'s own `handle.Registry` when no Sim is dispatching
-//! (before/without wiring), so its pre-seam behavior and tests still hold.
+//! The live-Sim members reach the world/clock/command-buffer through the ADR 0015
+//! host seam (`host.zig`): the engine installs a `Host` on the owning `State` for
+//! the duration of each event dispatch, and these accessors call through it. Wired
+//! so far (issue #5): the reads `is_valid`, `position`, `now`, and the deferred
+//! mutations `set_velocity`, `despawn` (queued on the command buffer, applied at the
+//! next flush — never a mid-dispatch world mutation). `is_valid` prefers the host
+//! when present (authoritative live-world check) and falls back to this `State`'s
+//! own `handle.Registry` when no Sim is dispatching, so its pre-seam behavior and
+//! tests still hold; mutations with no host installed are simply dropped.
 //!
-//! The remaining §2 members — `set_velocity`, `get`, `set`, `spawn`, `despawn`
-//! (deferred mutations via the command buffer), `random`/`random_int` (seeded
-//! `core.Rng`), and `after`/`every`/`cancel` (timer wheel) — land as additive
-//! host-vtable entries in follow-up slices. Do not add stub/fake behavior for
-//! them; an absent `mana` key is the honest, checkable signal that a member is
-//! not implemented yet, matching how a missing event-handler key means "no
-//! handler" elsewhere in ADR 0003.
+//! The remaining §2 members — `spawn`, `set` (deferred mutations still needing an
+//! entity-prototype registry and a data-component store respectively), `get`, and
+//! `random`/`random_int` (seeded `core.Rng`), plus `after`/`every`/`cancel` — land
+//! as additive host-vtable entries in follow-up slices. Do not add stub/fake
+//! behavior for them; an absent `mana` key is the honest, checkable signal that a
+//! member is not implemented yet, matching how a missing event-handler key means
+//! "no handler" elsewhere in ADR 0003.
 
 const std = @import("std");
 const zlua = @import("zlua");
@@ -65,6 +67,14 @@ pub fn pushManaTable(l: *Lua, entities: *const Registry, host: *const ?Host) voi
     l.pushLightUserdata(@ptrCast(host));
     l.pushClosure(zlua.wrap(manaNow), 1);
     l.setField(-2, "now");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaSetVelocity), 1);
+    l.setField(-2, "set_velocity");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaDespawn), 1);
+    l.setField(-2, "despawn");
 }
 
 /// Read a `*const ?Host` back from closure upvalue `idx` (a light-userdata pointer
@@ -151,9 +161,31 @@ fn manaNow(l: *Lua) !i32 {
     return 1;
 }
 
+/// `mana.set_velocity(h, x, y, z)` (ADR 0003 §2): queue a velocity change on `h`,
+/// applied at the next flush (deferred — never a mid-dispatch mutation). A stale
+/// handle is dropped at flush; with no Sim dispatching the call is a no-op. `x/y/z`
+/// are world units per second. Returns nothing (fire-and-forget).
+fn manaSetVelocity(l: *Lua) !i32 {
+    const raw: u64 = @bitCast(try l.toInteger(1));
+    const x: f32 = @floatCast(l.checkNumber(2));
+    const y: f32 = @floatCast(l.checkNumber(3));
+    const z: f32 = @floatCast(l.checkNumber(4));
+    if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.setVelocity(raw, .{ .x = x, .y = y, .z = z });
+    return 0;
+}
+
+/// `mana.despawn(h)` (ADR 0003 §2): queue a despawn of `h`, applied at the next
+/// flush (deferred). A stale handle is dropped at flush; with no Sim dispatching the
+/// call is a no-op. Returns nothing.
+fn manaDespawn(l: *Lua) !i32 {
+    const raw: u64 = @bitCast(try l.toInteger(1));
+    if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.despawn(raw);
+    return 0;
+}
+
 const testing = std.testing;
 
-test "mana: table shape exposes exactly version, log, is_valid, position, now; version == 1" {
+test "mana: table shape exposes exactly the wired members (version..despawn); version == 1" {
     var l = try Lua.init(testing.allocator);
     defer l.deinit();
     var registry: Registry = .{};
@@ -163,7 +195,7 @@ test "mana: table shape exposes exactly version, log, is_valid, position, now; v
     pushManaTable(l, &registry, &host);
     const t: i32 = l.getTop();
 
-    // Exact shape: no more, no less than the five members wired in this slice
+    // Exact shape: no more, no less than the seven members wired so far
     // (ADR 0003 §2 — see this file's module doc for the deferred rest).
     var key_count: usize = 0;
     l.pushNil();
@@ -171,19 +203,15 @@ test "mana: table shape exposes exactly version, log, is_valid, position, now; v
         key_count += 1;
         l.pop(1); // drop value; keep key on the stack to advance `next`
     }
-    try testing.expectEqual(@as(usize, 5), key_count);
+    try testing.expectEqual(@as(usize, 7), key_count);
 
     try testing.expectEqual(zlua.LuaType.number, l.getField(t, "version"));
     try testing.expectEqual(@as(i64, 1), try l.toInteger(-1));
     l.pop(1);
-    try testing.expectEqual(zlua.LuaType.function, l.getField(t, "log"));
-    l.pop(1);
-    try testing.expectEqual(zlua.LuaType.function, l.getField(t, "is_valid"));
-    l.pop(1);
-    try testing.expectEqual(zlua.LuaType.function, l.getField(t, "position"));
-    l.pop(1);
-    try testing.expectEqual(zlua.LuaType.function, l.getField(t, "now"));
-    l.pop(1);
+    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "despawn" }) |name| {
+        try testing.expectEqual(zlua.LuaType.function, l.getField(t, name));
+        l.pop(1);
+    }
     l.pop(1); // pop table
 }
 

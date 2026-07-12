@@ -8,10 +8,16 @@
 //! Compiled only under `-Denable-lua` (imported by `lua.zig`/`mana.zig`); no `zlua`
 //! dependency itself, so this file is plain, dependency-free Zig over `core`.
 //!
-//! This first slice (issue #5) carries the read-only surface — `is_valid`,
-//! `position`, `now`. The deferred-mutation accessors (`set_velocity`, `despawn`,
-//! `spawn`, `set`) and the `get`/`random` reads land as additive vtable entries in
-//! follow-up slices; the *mechanism* here is fixed by ADR 0015 and does not churn.
+//! Wired so far (issue #5): the read surface — `is_valid`, `position`, `now` — and
+//! the deferred-mutation surface — `set_velocity`, `despawn` (queued on the engine's
+//! command buffer, applied at the next flush). The remaining accessors (`spawn`,
+//! `set`, `get`, `random`) land as additive vtable entries in follow-up slices; the
+//! *mechanism* here is fixed by ADR 0015 and does not churn.
+//!
+//! Mutations return nothing: they are fire-and-forget deferred commands (ADR 0003
+//! §2). A stale handle is dropped at flush; allocation failure is recorded on the
+//! engine-side ctx (not signalled through the seam) and aborts the tick — OOM is
+//! never a content bug.
 
 const core = @import("core");
 
@@ -39,6 +45,13 @@ pub const Host = struct {
         /// Current sim time in seconds — tick-derived, never wall-clock, so it is
         /// deterministic and safe to branch on (ADR 0003 §2 `mana.now`).
         now: *const fn (ctx: *anyopaque) f64,
+        /// Queue a velocity change on `handle` (world units/sec), applied at the
+        /// next flush (deferred mutation, ADR 0003 §2). A stale handle is dropped at
+        /// flush; allocation failure is recorded engine-side and aborts the tick.
+        set_velocity: *const fn (ctx: *anyopaque, handle: u64, v: core.Vec3) void,
+        /// Queue a despawn of `handle`, applied at the next flush (deferred). A stale
+        /// handle is dropped at flush.
+        despawn: *const fn (ctx: *anyopaque, handle: u64) void,
     };
 
     /// Thin forwarders so callers read `host.position(h)` rather than threading
@@ -52,6 +65,12 @@ pub const Host = struct {
     pub fn now(self: Host) f64 {
         return self.vtable.now(self.ctx);
     }
+    pub fn setVelocity(self: Host, handle: u64, v: core.Vec3) void {
+        self.vtable.set_velocity(self.ctx, handle, v);
+    }
+    pub fn despawn(self: Host, handle: u64) void {
+        self.vtable.despawn(self.ctx, handle);
+    }
 };
 
 const testing = @import("std").testing;
@@ -63,6 +82,8 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         valid: bool,
         pos: core.Vec3,
         t: f64,
+        last_despawned: u64 = 0,
+        last_vel: core.Vec3 = .{ .x = 0, .y = 0, .z = 0 },
 
         fn isValid(ctx: *anyopaque, handle: u64) bool {
             _ = handle;
@@ -75,10 +96,23 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         fn now(ctx: *anyopaque) f64 {
             return fromOpaque(ctx).t;
         }
+        fn setVelocity(ctx: *anyopaque, handle: u64, v: core.Vec3) void {
+            _ = handle;
+            fromOpaque(ctx).last_vel = v;
+        }
+        fn despawn(ctx: *anyopaque, handle: u64) void {
+            fromOpaque(ctx).last_despawned = handle;
+        }
         fn fromOpaque(ctx: *anyopaque) *@This() {
             return @ptrCast(@alignCast(ctx));
         }
-        const vtable: Host.VTable = .{ .is_valid = isValid, .position = position, .now = now };
+        const vtable: Host.VTable = .{
+            .is_valid = isValid,
+            .position = position,
+            .now = now,
+            .set_velocity = setVelocity,
+            .despawn = despawn,
+        };
     };
 
     var fake: Fake = .{ .valid = true, .pos = .{ .x = 1, .y = 2, .z = 3 }, .t = 0.5 };
@@ -87,4 +121,9 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
     try testing.expect(host.isValid(0));
     try testing.expect(host.position(0).?.approxEql(.{ .x = 1, .y = 2, .z = 3 }, 1e-6));
     try testing.expectEqual(@as(f64, 0.5), host.now());
+
+    host.setVelocity(0, .{ .x = 4, .y = 5, .z = 6 });
+    try testing.expect(fake.last_vel.approxEql(.{ .x = 4, .y = 5, .z = 6 }, 1e-6));
+    host.despawn(42);
+    try testing.expectEqual(@as(u64, 42), fake.last_despawned);
 }

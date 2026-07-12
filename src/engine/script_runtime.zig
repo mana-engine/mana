@@ -13,6 +13,7 @@ const core = @import("core");
 const script = @import("script");
 const ecs = @import("ecs");
 const event = @import("event.zig");
+const command = @import("command.zig");
 const World = @import("world.zig").World;
 
 const Entity = ecs.Entity;
@@ -85,15 +86,21 @@ const LuaRuntime = struct {
         self.breakers = .initFill(.{});
     }
 
-    /// Engine-side backing for the read-only host seam (ADR 0015): the concrete
-    /// vtable the `mana` accessors call through, over the live `world` and this
-    /// tick's `now_seconds`. Lives inside `LuaRuntime` (only instantiated under
-    /// `-Denable-lua`), so it names `script.lua.Host` only where that type exists.
-    /// Reads resolve immediately; a stale handle degrades to null/false, never a
-    /// deref of freed storage.
+    /// Engine-side backing for the host seam (ADR 0015): the concrete vtable the
+    /// `mana` accessors call through, over the live `world`, the sim's `commands`
+    /// buffer, and this tick's `now_seconds`. Lives inside `LuaRuntime` (only
+    /// instantiated under `-Denable-lua`), so it names `script.lua.Host` only where
+    /// that type exists. Reads resolve immediately (a stale handle degrades to
+    /// null/false, never a deref of freed storage); mutations queue on `commands`
+    /// and apply at the next flush (ADR 0003 §2). An allocation failure while
+    /// queuing sets `oom`, which `dispatch` turns into a tick-aborting error — OOM
+    /// is never a content bug, so it is not surfaced to the script.
     const HostCtx = struct {
         world: *World,
+        commands: *command.CommandBuffer,
+        gpa: Allocator,
         now_seconds: f64,
+        oom: bool = false,
 
         fn cast(ctx: *anyopaque) *HostCtx {
             return @ptrCast(@alignCast(ctx));
@@ -108,39 +115,79 @@ const LuaRuntime = struct {
         fn now(ctx: *anyopaque) f64 {
             return cast(ctx).now_seconds;
         }
-        const vtable: script.lua.Host.VTable = .{ .is_valid = isValid, .position = position, .now = now };
+        fn setVelocity(ctx: *anyopaque, handle: u64, v: core.Vec3) void {
+            const hc = cast(ctx);
+            hc.commands.setVelocity(hc.gpa, Entity.unpack(handle), .{ .v = v }) catch {
+                hc.oom = true;
+            };
+        }
+        fn despawn(ctx: *anyopaque, handle: u64) void {
+            const hc = cast(ctx);
+            hc.commands.despawn(hc.gpa, Entity.unpack(handle)) catch {
+                hc.oom = true;
+            };
+        }
+        const vtable: script.lua.Host.VTable = .{
+            .is_valid = isValid,
+            .position = position,
+            .now = now,
+            .set_velocity = setVelocity,
+            .despawn = despawn,
+        };
     };
 
     /// Forward one Sim event to the matching handler-table key (ADR 0003 §3),
     /// installing the live host seam (ADR 0015) for the duration of the call so the
-    /// handler's `mana` reads see `world` at `now_seconds`. A no-op if no script is
-    /// loaded, the key is absent, or the key's circuit breaker has disabled it (§9);
-    /// a handler error is caught and logged, never propagated.
-    pub fn dispatch(self: *LuaRuntime, ev: event.Event, world: *World, now_seconds: f64) void {
+    /// handler's `mana` reads see `world` at `now_seconds` and its `mana` mutations
+    /// queue on `commands`. A no-op if no script is loaded, the event has no v1
+    /// handler key, or the key's circuit breaker has disabled it (§9).
+    ///
+    /// The handler runs inside a command-buffer transaction (ADR 0003 §9): if it
+    /// throws, every mutation it queued this call is rolled back so a failed handler
+    /// leaves no trace — exactly the guarantee `Sim` gives an erroring system. A
+    /// handler error is otherwise caught and logged, never propagated; only an
+    /// allocation failure (a queued mutation hitting OOM, never a content bug)
+    /// propagates and aborts the tick.
+    pub fn dispatch(
+        self: *LuaRuntime,
+        ev: event.Event,
+        world: *World,
+        commands: *command.CommandBuffer,
+        gpa: Allocator,
+        now_seconds: f64,
+    ) Allocator.Error!void {
         const s = if (self.state) |*st| st else return;
-        var host_ctx: HostCtx = .{ .world = world, .now_seconds = now_seconds };
+
+        // Map the event to its v1 handler key; events without one (despawn: no
+        // on_death/on_hit engine event exists yet, ADR 0003 §3) dispatch nothing.
+        const key: HandlerKey = switch (ev) {
+            .spawned => .on_spawn,
+            .collision_begin => .on_collision_begin,
+            .despawned => return,
+        };
+        if (self.isDisabled(key)) return;
+
+        var host_ctx: HostCtx = .{ .world = world, .commands = commands, .gpa = gpa, .now_seconds = now_seconds };
         s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
         defer s.setHost(null); // the borrowed ctx must not outlive this dispatch
-        switch (ev) {
-            .spawned => |e| {
-                if (self.isDisabled(.on_spawn)) return;
-                self.report(.on_spawn, s, s.dispatchSpawn(e.index, e.generation));
-            },
-            .collision_begin => |c| {
-                if (self.isDisabled(.on_collision_begin)) return;
-                self.report(.on_collision_begin, s, s.dispatchCollisionBegin(
-                    c.a.index,
-                    c.a.generation,
-                    c.b.index,
-                    c.b.generation,
-                    0, // the collision event carries no contact normal yet (ADR 0008)
-                    0,
-                ));
-            },
-            // No v1 handler key exists for despawn (ADR 0003 §3): on_death/on_hit
-            // are gated on engine events that do not exist yet.
-            .despawned => {},
-        }
+
+        // §9 transaction: discard this handler's queued mutations if it throws.
+        const mark = commands.mark();
+        const outcome = switch (ev) {
+            .spawned => |e| s.dispatchSpawn(e.index, e.generation),
+            .collision_begin => |c| s.dispatchCollisionBegin(
+                c.a.index,
+                c.a.generation,
+                c.b.index,
+                c.b.generation,
+                0, // the collision event carries no contact normal yet (ADR 0008)
+                0,
+            ),
+            .despawned => unreachable, // returned above: no handler key
+        };
+        if (outcome == .errored) try commands.rollback(world, mark);
+        if (host_ctx.oom) return error.OutOfMemory; // a queued mutation hit OOM
+        self.report(key, s, outcome);
     }
 
     /// Read integer field `key` off the loaded handler table, or null. Lets the
@@ -234,10 +281,19 @@ const NoopRuntime = struct {
         _ = source;
     }
 
-    pub fn dispatch(self: *NoopRuntime, ev: event.Event, world: *World, now_seconds: f64) void {
+    pub fn dispatch(
+        self: *NoopRuntime,
+        ev: event.Event,
+        world: *World,
+        commands: *command.CommandBuffer,
+        gpa: Allocator,
+        now_seconds: f64,
+    ) Allocator.Error!void {
         _ = self;
         _ = ev;
         _ = world;
+        _ = commands;
+        _ = gpa;
         _ = now_seconds;
     }
 
@@ -280,7 +336,9 @@ test "circuit breaker: a handler disabled after breaker_threshold consecutive er
     // handler entirely: the spawn counter stays at 0, proving it never ran.
     var world = World.init(std.testing.allocator);
     defer world.deinit();
-    rt.dispatch(.{ .spawned = .{ .index = 1, .generation = 0 } }, &world, 0);
+    var commands: command.CommandBuffer = .{};
+    defer commands.deinit(std.testing.allocator);
+    try rt.dispatch(.{ .spawned = .{ .index = 1, .generation = 0 } }, &world, &commands, std.testing.allocator, 0);
     try std.testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("spawns").?);
 }
 
@@ -302,10 +360,12 @@ test "circuit breaker: disabling one handler key leaves a different key unaffect
     // The healthy on_collision_begin handler still dispatches normally.
     var world = World.init(std.testing.allocator);
     defer world.deinit();
-    rt.dispatch(.{ .collision_begin = .{
+    var commands: command.CommandBuffer = .{};
+    defer commands.deinit(std.testing.allocator);
+    try rt.dispatch(.{ .collision_begin = .{
         .a = .{ .index = 1, .generation = 0 },
         .b = .{ .index = 2, .generation = 0 },
-    } }, &world, 0);
+    } }, &world, &commands, std.testing.allocator, 0);
     try std.testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("collisions").?);
 }
 
