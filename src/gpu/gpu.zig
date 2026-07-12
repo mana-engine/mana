@@ -26,6 +26,7 @@ pub const vk = if (build_options.enable_vulkan) @import("vulkan/backend.zig") el
 /// Marker that the module is wired into the build graph.
 pub const ready = core.ready;
 
-test "gpu selects the null backend by default" {
-    try std.testing.expectEqual(Backend.null_backend, backend);
+test "gpu backend matches the build flag" {
+    const expected: Backend = if (build_options.enable_vulkan) .vulkan else .null_backend;
+    try std.testing.expectEqual(expected, backend);
 }
