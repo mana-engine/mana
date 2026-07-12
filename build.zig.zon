@@ -38,6 +38,19 @@
             .hash = "sdl-0.5.2+3.4.12-SDL--qPKpwHc40bqAlYs7W9pXJVyLwsGDNa4shNXbOZr",
             .lazy = true,
         },
+        // Lazy: only fetched/built when the Tracy profiler is enabled
+        // (`-Denable-tracy`). The default and CI builds stay profiler- and
+        // dependency-free (ADR 0023). zig-gamedev's ztracy vendors the Tracy C++
+        // client (module `root`, artifact `tracy`) and gates the markers on its own
+        // `enable_ztracy` build option, which we set only under our flag. Pinned to a
+        // commit verified to build on Zig 0.16 (its `minimum_zig_version` is 0.15.1,
+        // but the build graph + client compile clean on 0.16.0); a moving ref would
+        // break as zig-gamedev tracks Zig releases, exactly like vulkan-zig/zlua.
+        .ztracy = .{
+            .url = "git+https://github.com/zig-gamedev/ztracy.git#d95d2a193b9f97944a17026c9a42b5d0f9a88c94",
+            .hash = "ztracy-0.14.0-dev-zHJSqzUHGQAmhJybhlwtl1QKevUBw4M5YKZqPfWx2y99",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

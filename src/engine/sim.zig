@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const tracy = core.tracy;
 const World = @import("world.zig").World;
 const command = @import("command.zig");
 const event = @import("event.zig");
@@ -200,18 +201,26 @@ pub const Sim = struct {
             .tick = self.tick_count,
             .input = self.input,
         };
-        for (self.systems.items) |system| {
-            // ADR 0003 §9 / issue #2: each system invocation is a transaction. Mark
-            // the buffer first; on `error.SystemFailed`, roll back to the mark so
-            // none of this call's commands ever reach flush, and keep ticking.
-            // `error.OutOfMemory` is not a content bug — it propagates and aborts.
-            const mark = self.commands.mark();
-            system(&ctx) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                error.SystemFailed => try self.commands.rollback(&self.world, mark),
-            };
+        {
+            const z = tracy.zone(@src(), "sim.systems");
+            defer z.end();
+            for (self.systems.items) |system| {
+                // ADR 0003 §9 / issue #2: each system invocation is a transaction. Mark
+                // the buffer first; on `error.SystemFailed`, roll back to the mark so
+                // none of this call's commands ever reach flush, and keep ticking.
+                // `error.OutOfMemory` is not a content bug — it propagates and aborts.
+                const mark = self.commands.mark();
+                system(&ctx) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    error.SystemFailed => try self.commands.rollback(&self.world, mark),
+                };
+            }
         }
-        try self.commands.flush(self.gpa, &self.world, &self.events);
+        {
+            const z = tracy.zone(@src(), "sim.flush");
+            defer z.end();
+            try self.commands.flush(self.gpa, &self.world, &self.events);
+        }
         // Sim time exposed to script `mana.now` this dispatch (ADR 0003 §2 / ADR
         // 0015): tick-derived seconds elapsed at the start of this tick, so it is
         // deterministic and never reads a wall clock.
@@ -230,33 +239,43 @@ pub const Sim = struct {
             .timers = &self.timers,
             .rng = &self.rng,
         };
-        // A newly-active scene bootstraps first (ADR 0017/0018): its `on_scene_enter`
-        // runs host-live before this tick's other events, so a script can query the
-        // freshly-loaded scene and wire its timers/rules.
-        if (self.pending_scene) |scene_name| {
-            self.pending_scene = null;
-            try self.script_runtime.dispatchSceneEnter(scene_name, dc);
-        }
-        // Keyboard edges (ADR 0021): dispatch on_key for every key whose held-state
-        // changed since last tick, in Key-enum order (deterministic), host-live and
-        // before timers — so a turn pressed this tick reaches the move timer this tick.
-        inline for (comptime std.enums.values(platform.Key)) |k| {
-            const now_held = self.input.keys.contains(k);
-            if (now_held != self.prev_input.keys.contains(k)) {
-                try self.script_runtime.dispatchKey(@tagName(k), now_held, dc);
+        // The dispatch phase is bounded by one Tracy zone: this is the ADR 0003 §6
+        // per-frame script-dispatch budget site (the fine per-handler `script.*`
+        // zones in `script_runtime` nest inside it). Native handlers run here too but
+        // are cheap; script cost dominates once `-Denable-lua` is on.
+        {
+            const z = tracy.zone(@src(), "sim.dispatch");
+            defer z.end();
+            // A newly-active scene bootstraps first (ADR 0017/0018): its `on_scene_enter`
+            // runs host-live before this tick's other events, so a script can query the
+            // freshly-loaded scene and wire its timers/rules.
+            if (self.pending_scene) |scene_name| {
+                self.pending_scene = null;
+                try self.script_runtime.dispatchSceneEnter(scene_name, dc);
             }
+            // Keyboard edges (ADR 0021): dispatch on_key for every key whose held-state
+            // changed since last tick, in Key-enum order (deterministic), host-live and
+            // before timers — so a turn pressed this tick reaches the move timer this tick.
+            inline for (comptime std.enums.values(platform.Key)) |k| {
+                const now_held = self.input.keys.contains(k);
+                if (now_held != self.prev_input.keys.contains(k)) {
+                    try self.script_runtime.dispatchKey(@tagName(k), now_held, dc);
+                }
+            }
+            self.prev_input = self.input;
+            for (self.events.items()) |ev| {
+                for (self.handlers.items) |handler| handler(&self.world, ev);
+                try self.script_runtime.dispatch(ev, dc);
+            }
+            self.events.clear();
         }
-        self.prev_input = self.input;
-        // TODO(tracy): bound all script dispatch this frame in one Tracy zone with
-        // the ADR 0003 §6 per-frame budget once the Tracy port lands.
-        for (self.events.items()) |ev| {
-            for (self.handlers.items) |handler| handler(&self.world, ev);
-            try self.script_runtime.dispatch(ev, dc);
+        {
+            // Advance timers with the host installed (ADR 0019), so Lua timer callbacks
+            // fire host-live; native timers are unaffected. Only OOM propagates.
+            const z = tracy.zone(@src(), "sim.timers");
+            defer z.end();
+            try self.script_runtime.advanceTimers(dc, self.dt);
         }
-        self.events.clear();
-        // Advance timers with the host installed (ADR 0019), so Lua timer callbacks
-        // fire host-live; native timers are unaffected. Only OOM propagates.
-        try self.script_runtime.advanceTimers(dc, self.dt);
         self.tick_count += 1;
     }
 

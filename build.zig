@@ -30,11 +30,17 @@ pub fn build(b: *std.Build) void {
         "enable-lua",
         "Compile the Lua 5.4 scripting backend (ziglua/zlua)",
     ) orelse false;
+    const enable_tracy = b.option(
+        bool,
+        "enable-tracy",
+        "Compile the Tracy profiler client (ztracy) — zones/plots/alloc tracking",
+    ) orelse false;
 
     const options = b.addOptions();
     options.addOption(bool, "enable_vulkan", enable_vulkan);
     options.addOption(bool, "enable_sdl3", enable_sdl3);
     options.addOption(bool, "enable_lua", enable_lua);
+    options.addOption(bool, "enable_tracy", enable_tracy);
     const build_options = options.createModule();
 
     // --- Module DAG ---------------------------------------------------------
@@ -43,6 +49,29 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // `core` reads `build_options` for the comptime Tracy flag (ADR 0023). This is a
+    // build-time constant module, not a DAG dependency, so "core imports only std"
+    // holds in spirit — the same exception gpu/platform/script already rely on.
+    core.addImport("build_options", build_options);
+
+    // The Tracy profiler client (zig-gamedev/ztracy, module `root`, artifact
+    // `tracy`) is wired into `core` only under `-Denable-tracy`. The dep is lazy:
+    // `lazyDependency` is called only under the flag, so the default/CI build never
+    // *compiles* the Tracy C++ client. `core.tracy` (`src/core/tracy.zig`) imports
+    // `ztracy` inside a comptime-true branch, so a default build never resolves it,
+    // and links the static `tracy` artifact — which propagates transitively to every
+    // artifact that imports `core` (exe + all test binaries). `.enable_ztracy = true`
+    // turns on the markers inside the vendored client.
+    if (enable_tracy) {
+        if (b.lazyDependency("ztracy", .{
+            .target = target,
+            .optimize = optimize,
+            .enable_ztracy = true,
+        })) |ztracy| {
+            core.addImport("ztracy", ztracy.module("root"));
+            core.linkLibrary(ztracy.artifact("tracy"));
+        }
+    }
 
     const data = b.createModule(.{
         .root_source_file = b.path("src/data/data.zig"),

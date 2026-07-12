@@ -8,6 +8,10 @@ const std = @import("std");
 pub const math = @import("math.zig");
 pub const rng = @import("rng.zig");
 pub const time = @import("time.zig");
+/// The Tracy profiler shim (ADR 0023): comptime-gated zone/frame/plot/alloc
+/// wrappers that no-op unless `-Denable-tracy`. Contained here so nothing above
+/// imports a Tracy type (Tracy is to `core` what Vulkan is to `gpu`).
+pub const tracy = @import("tracy.zig");
 
 // Common re-exports for ergonomic access from dependents.
 pub const Vec2 = math.Vec2;
@@ -24,4 +28,5 @@ test {
     _ = math;
     _ = rng;
     _ = time;
+    _ = tracy;
 }
