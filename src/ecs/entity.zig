@@ -74,6 +74,14 @@ pub const EntityAllocator = struct {
     pub fn liveCount(self: *const EntityAllocator) usize {
         return self.generations.items.len - self.free.items.len;
     }
+
+    /// The handle for slot `index` at its current generation. The caller must know
+    /// the slot is live (e.g. `index` came from a live component iteration); passing
+    /// a never-allocated index is illegal (asserts in safe builds).
+    pub fn at(self: *const EntityAllocator, index: u32) Entity {
+        std.debug.assert(index < self.generations.items.len);
+        return .{ .index = index, .generation = self.generations.items[index] };
+    }
 };
 
 const testing = std.testing;
@@ -103,6 +111,17 @@ test "entity allocator: freeing invalidates the old handle; slot reuse bumps gen
     try testing.expectEqual(a.index, b.index);
     try testing.expect(a.generation != b.generation);
     try testing.expect(ea.isValid(b) and !ea.isValid(a));
+}
+
+test "entity allocator: at recovers the live handle for a slot" {
+    var ea: EntityAllocator = .{};
+    defer ea.deinit(testing.allocator);
+    const a = try ea.alloc(testing.allocator);
+    try testing.expect(ea.at(a.index).eql(a));
+    try ea.free_entity(testing.allocator, a);
+    const b = try ea.alloc(testing.allocator); // reuses the slot, bumped generation
+    try testing.expect(ea.at(b.index).eql(b));
+    try testing.expect(!ea.at(b.index).eql(a));
 }
 
 test "entity allocator: double free is a no-op" {

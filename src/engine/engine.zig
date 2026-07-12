@@ -14,6 +14,11 @@ const platform = @import("platform");
 /// types, so this does not leak Vulkan above `gpu`.
 pub const gpu = @import("gpu");
 
+/// The physics port (first adapter: hand-rolled 2.5D, ADR 0008). Re-exported so the
+/// runtime and content can reference collider shapes and layers; it is pure,
+/// sim-side, and deterministic.
+pub const physics = @import("physics");
+
 pub const components = @import("components.zig");
 pub const world = @import("world.zig");
 pub const systems = @import("systems.zig");
@@ -22,6 +27,7 @@ pub const event = @import("event.zig");
 pub const sim = @import("sim.zig");
 pub const scene = @import("scene.zig");
 pub const render = @import("render.zig");
+pub const collision = @import("collision.zig");
 
 pub const World = world.World;
 pub const Sim = sim.Sim;
@@ -31,11 +37,12 @@ pub const Entity = ecs.Entity;
 pub const Transform = components.Transform;
 pub const Velocity = components.Velocity;
 pub const Health = components.Health;
+pub const Collider = components.Collider;
 
 /// Marker verifying the module is wired into the build graph and can see every port
 /// it assembles.
 pub const ready =
-    core.ready and data.ready and ecs.ready and gpu.ready and platform.ready;
+    core.ready and data.ready and ecs.ready and gpu.ready and platform.ready and physics.ready;
 
 test {
     std.testing.refAllDecls(@This());
@@ -47,6 +54,7 @@ test {
     _ = sim;
     _ = scene;
     _ = render;
+    _ = collision;
 }
 
 test "engine module assembles all ports" {
