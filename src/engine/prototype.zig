@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const data = @import("data");
 const components = @import("components.zig");
 const scene = @import("scene.zig");
 
@@ -16,6 +17,24 @@ const Allocator = std.mem.Allocator;
 /// optional field per built-in component. Reused wholesale so there is one
 /// entity-template shape across scenes and prototypes (ADR 0016).
 pub const Prototype = scene.EntityDef;
+
+/// A parsed prototype file (ADR 0016): a package ZON resource declaring the named
+/// templates `mana.spawn` may instantiate — `.{ .prototypes = .{ <Prototype>… } }`.
+/// Owns its heap allocations (names, the slice); free with `free`. A `Registry`
+/// borrows `prototypes`, so the `File` must outlive any `Registry` built from it.
+pub const File = struct {
+    prototypes: []const Prototype,
+};
+
+/// Parse a prototype file from NUL-terminated ZON `source` (same parser as scenes).
+pub fn parse(gpa: Allocator, source: [:0]const u8) error{ OutOfMemory, ParseZon }!File {
+    return data.parse(File, gpa, source);
+}
+
+/// Free a `File` returned by `parse`.
+pub fn free(gpa: Allocator, file: File) void {
+    data.free(gpa, file);
+}
 
 /// The component set to attach when `proto` is spawned at `pos`: the template's
 /// components with `Transform.pos` set to the spawn point — `mana.spawn`'s position
@@ -75,4 +94,22 @@ test "prototype registry: lookup finds a named prototype and misses cleanly" {
     try testing.expectEqualStrings("food", reg.lookup("food").?.name);
     try testing.expect(reg.lookup("missing") == null);
     try testing.expect((Registry{}).lookup("head") == null); // empty registry: always a miss
+}
+
+test "prototype file: parse round-trips a package prototype list into a registry" {
+    const src =
+        \\.{
+        \\    .prototypes = .{
+        \\        .{ .name = "segment", .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } } },
+        \\        .{ .name = "food", .health = .{ .current = 1, .max = 1 } },
+        \\    },
+        \\}
+    ;
+    const file = try parse(testing.allocator, src);
+    defer free(testing.allocator, file);
+
+    try testing.expectEqual(@as(usize, 2), file.prototypes.len);
+    const reg: Registry = .{ .prototypes = file.prototypes };
+    try testing.expectEqualStrings("segment", reg.lookup("segment").?.name);
+    try testing.expectEqual(@as(f32, 1), reg.lookup("food").?.health.?.current);
 }

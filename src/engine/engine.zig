@@ -33,6 +33,7 @@ pub const event = @import("event.zig");
 pub const timer = @import("timer.zig");
 pub const sim = @import("sim.zig");
 pub const scene = @import("scene.zig");
+pub const prototype = @import("prototype.zig");
 pub const render = @import("render.zig");
 pub const collision = @import("collision.zig");
 pub const controller = @import("controller.zig");

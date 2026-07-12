@@ -32,6 +32,10 @@ pub const Manifest = struct {
     /// top-down orthographic; isometric content declares `.isometric` explicitly.
     /// The engine has no hardcoded camera — the projection comes from package data.
     projection: engine.render.Projection = .{ .orthographic = .{} },
+    /// Optional prototype file (ADR 0016): a package-relative ZON path declaring the
+    /// named entity templates `mana.spawn` may instantiate. Absent ⇒ the package
+    /// spawns no prototypes. Watched for hot reload alongside scenes.
+    prototypes: ?[]const u8 = null,
 };
 
 /// Parse a manifest from NUL-terminated ZON `source`. Unknown fields are ignored
@@ -47,12 +51,15 @@ pub fn free(gpa: Allocator, manifest: Manifest) void {
 }
 
 /// The package-relative files whose changes should trigger a hot reload: the
-/// manifest itself plus every scene it references. Returned paths borrow from
-/// `manifest`; the slice is owned by `gpa` (free it, not the elements).
+/// manifest itself, every scene it references, and its prototype file if any (ADR
+/// 0016). Returned paths borrow from `manifest`; the slice is owned by `gpa` (free
+/// it, not the elements).
 pub fn watchPaths(gpa: Allocator, manifest: Manifest) Allocator.Error![]const []const u8 {
-    const paths = try gpa.alloc([]const u8, manifest.scenes.len + 1);
+    const extra: usize = if (manifest.prototypes != null) 1 else 0;
+    const paths = try gpa.alloc([]const u8, manifest.scenes.len + 1 + extra);
     paths[0] = "game.zon";
-    for (manifest.scenes, paths[1..]) |scene, *dst| dst.* = scene;
+    for (manifest.scenes, paths[1 .. 1 + manifest.scenes.len]) |scene, *dst| dst.* = scene;
+    if (manifest.prototypes) |proto| paths[paths.len - 1] = proto;
     return paths;
 }
 
@@ -138,6 +145,42 @@ test "manifest: watchPaths lists the manifest plus every referenced scene" {
     try testing.expectEqualStrings("game.zon", paths[0]);
     try testing.expectEqualStrings("scenes/a.zon", paths[1]);
     try testing.expectEqualStrings("scenes/b.zon", paths[2]);
+}
+
+test "manifest: prototypes field parses and watchPaths includes it when present" {
+    const src =
+        \\.{
+        \\    .name = "p",
+        \\    .version = "1",
+        \\    .entry_scene = "scenes/a.zon",
+        \\    .scenes = .{ "scenes/a.zon" },
+        \\    .prototypes = "prototypes.zon",
+        \\}
+    ;
+    const m = try parse(testing.allocator, src);
+    defer free(testing.allocator, m);
+    try testing.expectEqualStrings("prototypes.zon", m.prototypes.?);
+
+    const paths = try watchPaths(testing.allocator, m);
+    defer testing.allocator.free(paths);
+    try testing.expectEqual(@as(usize, 3), paths.len); // game.zon + one scene + prototypes
+    try testing.expectEqualStrings("game.zon", paths[0]);
+    try testing.expectEqualStrings("scenes/a.zon", paths[1]);
+    try testing.expectEqualStrings("prototypes.zon", paths[2]);
+}
+
+test "manifest: prototypes defaults to null (no prototype file)" {
+    const src =
+        \\.{
+        \\    .name = "p",
+        \\    .version = "1",
+        \\    .entry_scene = "s.zon",
+        \\    .scenes = .{ "s.zon" },
+        \\}
+    ;
+    const m = try parse(testing.allocator, src);
+    defer free(testing.allocator, m);
+    try testing.expect(m.prototypes == null);
 }
 
 test "manifest: unknown fields are tolerated" {
