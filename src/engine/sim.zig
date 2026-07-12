@@ -25,8 +25,18 @@ pub const Context = struct {
     tick: u64,
 };
 
-/// A system: a free function over a `Context`. May fail only on allocation.
-pub const System = *const fn (*Context) Allocator.Error!void;
+/// A system's own reported failure — the native-system analogue of a Lua handler
+/// throwing inside `pcall` (ADR 0003 §9). Caught at the per-invocation transaction
+/// boundary in `tick`: the commands that invocation queued are rolled back and the
+/// sim continues to the next system. Distinct from `error.OutOfMemory`, which is
+/// never a "content bug" — it always propagates and aborts the tick.
+pub const SystemError = Allocator.Error || error{SystemFailed};
+
+/// A system: a free function over a `Context`. Each invocation is a transaction
+/// (ADR 0003 §9 / issue #2): if it returns `error.SystemFailed`, the commands it
+/// queued this call are discarded (never applied) and the sim keeps running;
+/// `error.OutOfMemory` propagates unconditionally.
+pub const System = *const fn (*Context) SystemError!void;
 
 /// An event handler: reacts to one dispatched event; may read/mutate the world
 /// (dispatch runs after the command flush). Recording deferred changes is a
@@ -87,9 +97,9 @@ pub const Sim = struct {
         self.timers.cancel(handle);
     }
 
-    /// Advance one fixed step: run systems, flush deferred commands (emitting
-    /// lifecycle events), dispatch all events, advance timers (firing any now due),
-    /// then increment the tick counter.
+    /// Advance one fixed step: run systems (each its own rollback transaction),
+    /// flush deferred commands (emitting lifecycle events), dispatch all events,
+    /// advance timers (firing any now due), then increment the tick counter.
     ///
     /// Timers fire *after* event dispatch: by then no system is mid-iteration and
     /// the world reflects every structural change queued this tick, so a timer
@@ -106,7 +116,17 @@ pub const Sim = struct {
             .dt = self.dt,
             .tick = self.tick_count,
         };
-        for (self.systems.items) |system| try system(&ctx);
+        for (self.systems.items) |system| {
+            // ADR 0003 §9 / issue #2: each system invocation is a transaction. Mark
+            // the buffer first; on `error.SystemFailed`, roll back to the mark so
+            // none of this call's commands ever reach flush, and keep ticking.
+            // `error.OutOfMemory` is not a content bug — it propagates and aborts.
+            const mark = self.commands.mark();
+            system(&ctx) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                error.SystemFailed => try self.commands.rollback(&self.world, mark),
+            };
+        }
         try self.commands.flush(self.gpa, &self.world, &self.events);
         for (self.events.items()) |ev| {
             for (self.handlers.items) |handler| handler(&self.world, ev);
@@ -133,7 +153,7 @@ test "sim: a system recording a despawn takes effect next flush and dispatches a
     const Counter = struct {
         var despawns: u32 = 0;
         var did_despawn: bool = false;
-        fn system(ctx: *Context) Allocator.Error!void {
+        fn system(ctx: *Context) SystemError!void {
             // Despawn the first entity exactly once.
             if (!did_despawn) {
                 if (ctx.world.transforms.entities().len > 0) {
@@ -161,6 +181,37 @@ test "sim: a system recording a despawn takes effect next flush and dispatches a
     try sim.tick();
     try testing.expectEqual(@as(usize, 0), sim.world.count()); // despawn applied at flush
     try testing.expectEqual(@as(u32, 1), Counter.despawns); // dispatched
+}
+
+test "sim: an erroring system's queued commands are discarded and the sim keeps running" {
+    const Flaky = struct {
+        var later_system_ran: bool = false;
+
+        // Queues a despawn, then fails: the despawn must never reach the world.
+        fn failing(ctx: *Context) SystemError!void {
+            if (ctx.world.transforms.entities().len > 0) {
+                const idx = ctx.world.transforms.entities()[0];
+                try ctx.commands.despawn(ctx.gpa, ctx.world.entityAt(idx));
+            }
+            return error.SystemFailed;
+        }
+        fn after(_: *Context) SystemError!void {
+            later_system_ran = true;
+        }
+    };
+    Flaky.later_system_ran = false;
+
+    var sim = Sim.init(testing.allocator, 1.0 / 60.0);
+    defer sim.deinit();
+    const e = try sim.world.spawn();
+    try sim.world.setTransform(e, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try sim.addSystem(Flaky.failing);
+    try sim.addSystem(Flaky.after);
+
+    try sim.tick(); // must not propagate error.SystemFailed
+    try testing.expect(sim.world.isValid(e)); // rolled back: despawn never applied
+    try testing.expect(Flaky.later_system_ran); // sim kept running to the next system
+    try testing.expectEqual(@as(u64, 1), sim.tick_count); // tick completed normally
 }
 
 test "sim: a timer scheduled via after fires on the tick it becomes due, not before" {

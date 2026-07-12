@@ -4,7 +4,9 @@
 
 const std = @import("std");
 const World = @import("world.zig").World;
-const Context = @import("sim.zig").Context;
+const sim = @import("sim.zig");
+const Context = sim.Context;
+const SystemError = sim.SystemError;
 
 /// Integrate `Transform.pos += Velocity.v * dt` for every entity that has both.
 /// Walks the velocity set (typically the smaller) and probes transforms.
@@ -16,8 +18,8 @@ pub fn movement(world: *World, dt: f32) void {
     }
 }
 
-/// `movement` as a registerable frame system (ADR 0007). Never allocates.
-pub fn movementSystem(ctx: *Context) std.mem.Allocator.Error!void {
+/// `movement` as a registerable frame system (ADR 0007). Never allocates, never fails.
+pub fn movementSystem(ctx: *Context) SystemError!void {
     movement(ctx.world, ctx.dt);
 }
 
@@ -34,8 +36,8 @@ pub fn regen(world: *World, rate: f32, dt: f32) void {
     }
 }
 
-/// `regen` as a registerable frame system (ADR 0007). Never allocates.
-pub fn regenSystem(ctx: *Context) std.mem.Allocator.Error!void {
+/// `regen` as a registerable frame system (ADR 0007). Never allocates, never fails.
+pub fn regenSystem(ctx: *Context) SystemError!void {
     regen(ctx.world, regen_rate, ctx.dt);
 }
 
