@@ -17,6 +17,7 @@ const physics = @import("physics");
 const ecs = @import("ecs");
 const World = @import("world.zig").World;
 const Context = @import("sim.zig").Context;
+const SystemError = @import("sim.zig").SystemError;
 
 const Allocator = std.mem.Allocator;
 const Entity = ecs.Entity;
@@ -27,7 +28,7 @@ const Vec2 = core.Vec2;
 /// the candidate-pair list) is allocated in a per-tick arena over `ctx.gpa` and
 /// freed before returning — a per-frame arena, nothing retained. Static–static pairs
 /// are skipped; layer masks filter the remainder before the narrow-phase test.
-pub fn collisionSystem(ctx: *Context) Allocator.Error!void {
+pub fn collisionSystem(ctx: *Context) SystemError!void {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

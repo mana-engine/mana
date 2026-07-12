@@ -53,6 +53,36 @@ pub const CommandBuffer = struct {
         try self.commands.append(gpa, .{ .set_velocity = .{ .entity = e, .value = value } });
     }
 
+    /// Snapshot of the buffer's length, taken before a transactional invocation (a
+    /// system call, ADR 0003 §9 / issue #2). Pass the result to `rollback` if the
+    /// invocation errors, to discard exactly what it queued and nothing queued
+    /// before it.
+    pub const Mark = struct {
+        commands_len: usize,
+        reserved_len: usize,
+    };
+
+    /// Mark the current end of the buffer. Cheap: just the two lengths, no copy.
+    pub fn mark(self: *const CommandBuffer) Mark {
+        return .{ .commands_len = self.commands.items.len, .reserved_len = self.reserved.items.len };
+    }
+
+    /// Discard everything queued since `m` was taken: truncates the command list
+    /// back to the mark (no allocation — a length shrink, not a resize) and voids
+    /// any entity `spawn` reserved since the mark by despawning it in `world`, so a
+    /// handle the failed invocation already captured reads as stale rather than
+    /// leaking a permanently empty entity. This is the per-invocation transaction
+    /// rollback ADR 0003 §9 requires: a failed system/handler call must leave no
+    /// trace, and the sim continues with the buffer exactly as it was before the
+    /// invocation started. `world` must be the same world the marked commands were
+    /// recorded against. Errors: only `error.OutOfMemory`, propagated from freeing
+    /// a reserved entity's slot in `world`.
+    pub fn rollback(self: *CommandBuffer, world: *World, m: Mark) Allocator.Error!void {
+        for (self.reserved.items[m.reserved_len..]) |e| try world.despawn(e);
+        self.reserved.shrinkRetainingCapacity(m.reserved_len);
+        self.commands.shrinkRetainingCapacity(m.commands_len);
+    }
+
     /// Apply every queued command to `world`, pushing `spawned`/`despawned` events.
     /// Clears the buffer. A set targeting an entity that was despawned this tick is
     /// dropped (InvalidEntity); only allocation failure propagates.
@@ -138,4 +168,39 @@ test "command buffer: a set on an entity despawned the same tick is dropped" {
     try cb.setTransform(testing.allocator, e, .{ .pos = .{ .x = 9, .y = 9, .z = 9 } });
     try cb.flush(testing.allocator, &world, &events); // despawn first, then set is dropped
     try testing.expect(!world.isValid(e));
+}
+
+test "command buffer: rollback discards only commands queued since the mark" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    const e = try world.spawn();
+
+    var cb: CommandBuffer = .{};
+    defer cb.deinit(testing.allocator);
+    var events: event.Queue = .{};
+    defer events.deinit(testing.allocator);
+
+    try cb.setTransform(testing.allocator, e, .{ .pos = .{ .x = 1, .y = 1, .z = 1 } }); // before the mark, kept
+    const m = cb.mark();
+    try cb.setVelocity(testing.allocator, e, .{ .v = .{ .x = 9, .y = 9, .z = 9 } }); // after the mark, discarded
+    try cb.rollback(&world, m);
+
+    try cb.flush(testing.allocator, &world, &events);
+    try testing.expect(world.getTransform(e).?.pos.approxEql(.{ .x = 1, .y = 1, .z = 1 }, 1e-6));
+    try testing.expect(world.getVelocity(e) == null); // rolled back before it ever reached flush
+}
+
+test "command buffer: rollback voids an entity reserved via spawn since the mark" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+
+    var cb: CommandBuffer = .{};
+    defer cb.deinit(testing.allocator);
+
+    const m = cb.mark();
+    const e = try cb.spawn(testing.allocator, &world, .{ .pos = .{ .x = 5, .y = 0, .z = 0 } }, null);
+    try testing.expect(world.isValid(e)); // reserved immediately, per ADR 0003 "resolves next tick"
+
+    try cb.rollback(&world, m);
+    try testing.expect(!world.isValid(e)); // reservation undone: the handle is now stale
 }
