@@ -1,9 +1,11 @@
 //! Lua 5.4 backend — compiled only under `-Denable-lua`. This is the ONLY module
 //! permitted to import the `zlua` (ziglua) bindings; `script.zig` re-exports it
 //! behind a comptime flag so the `zlua` import (and vendored Lua sources) never
-//! enter a default build. This is the dependency-spike surface only: it proves a
-//! Lua 5.4 state can be created and a chunk evaluated. The real scripting API
-//! (ADR 0003 — the `mana` table, events, opaque handles) is NOT implemented here.
+//! enter a default build. Also implements ADR 0003 §7/§8: one sandboxed
+//! `lua_State` per Sim (`State`), with each script module loaded into its own
+//! allowlisted `_ENV` (`State.pushSandboxEnv` / `State.loadSandboxed`). The full
+//! scripting API (ADR 0003 — the `mana` table, events, opaque handles) is a
+//! separate task and is NOT implemented here.
 
 const std = @import("std");
 const zlua = @import("zlua");
@@ -11,8 +13,11 @@ const zlua = @import("zlua");
 /// The Lua binding type, re-exported so callers need not import `zlua` directly.
 pub const Lua = zlua.Lua;
 
-/// Create a fresh Lua 5.4 interpreter state. Caller owns it and must `deinit()`.
-/// `gpa` backs Lua's allocations; it must outlive the returned state.
+/// Create a fresh, unsandboxed Lua 5.4 interpreter state with no standard
+/// libraries loaded. Caller owns it and must `deinit()`. `gpa` backs Lua's
+/// allocations; it must outlive the returned state. Kept for the dependency-spike
+/// test below; script content should go through `State.init` instead, which
+/// additionally sandboxes the environment (ADR 0003 §7).
 pub fn init(gpa: std.mem.Allocator) !*Lua {
     return Lua.init(gpa);
 }
@@ -24,4 +29,264 @@ test "lua 5.4: evaluating `return 1 + 1` yields 2" {
     try lua.doString("return 1 + 1");
     const result = try lua.toInteger(-1);
     try std.testing.expectEqual(@as(i64, 2), result);
+}
+
+// --- Sandboxing (ADR 0003 §7, §8) -------------------------------------------
+
+/// Base-library function names exposed inside a sandboxed script `_ENV` (ADR
+/// 0003 §7). Deliberately excludes `load`/`loadfile`/`dofile` (arbitrary code
+/// loading), `collectgarbage`, raw `print` (see `sandboxPrint` below), and
+/// `_G`/`_VERSION` (either would hand back the real, unsandboxed global table).
+const sandbox_base_fns = [_][:0]const u8{
+    "pairs",        "ipairs",   "next",     "select",
+    "type",         "tostring", "tonumber", "assert",
+    "error",        "pcall",    "xpcall",   "setmetatable",
+    "getmetatable", "rawget",   "rawset",   "rawequal",
+    "rawlen",
+};
+
+/// Whole library tables copied by reference into a sandboxed `_ENV` as-is:
+/// deterministic, no OS/IO surface (ADR 0003 §7). `math` is handled separately
+/// below since its RNG entry points must be stripped first.
+const sandbox_whole_libs = [_][:0]const u8{ "string", "table", "coroutine", "utf8" };
+
+/// `math` fields removed for determinism (ADR 0003 §7): nondeterministic global
+/// RNG state. `mana.random`/`mana.random_int` (issue #5) draw from the sim's
+/// seeded `core.Rng` instead.
+const sandbox_math_excluded = [_][:0]const u8{ "random", "randomseed" };
+
+/// One sandboxed Lua 5.4 interpreter — exactly one per `Sim`/world (ADR 0003
+/// §8; wiring a `State` into `Sim` itself is a follow-up once `engine` depends
+/// on `script`). The underlying `lua_State` never has `os`/`io`/`debug`/
+/// `package` loaded at all — not merely hidden from scripts — so nothing run
+/// in it can reach the filesystem, network, wall clock, or process, regardless
+/// of which allowlisted functions a script has access to. Two `State`s (i.e.
+/// two Sims) are two independent `lua_State`s and share no table, including
+/// their real `_G` (see the isolation tests below).
+pub const State = struct {
+    lua: *Lua,
+
+    /// Create a fresh sandboxed state. `gpa` backs Lua's own allocations and
+    /// must outlive the returned `State`; caller owns it and must `deinit()`.
+    /// Opens exactly the libraries ADR 0003 §7 allows scripts to see —
+    /// `os`/`io`/`debug`/`package` are never opened, so `require` does not
+    /// exist either.
+    pub fn init(gpa: std.mem.Allocator) !State {
+        const l = try Lua.init(gpa);
+        l.openBase();
+        l.openString();
+        l.openTable();
+        l.openCoroutine();
+        l.openUtf8();
+        l.openMath();
+
+        // Strip math's nondeterministic entry points once, on the one real
+        // `math` table this state has. Never exposed to scripts directly
+        // either way (only via the per-script `_ENV` built below).
+        std.debug.assert(l.getGlobal("math") == .table);
+        for (sandbox_math_excluded) |name| {
+            l.pushNil();
+            l.setField(-2, name);
+        }
+        l.pop(1);
+
+        return .{ .lua = l };
+    }
+
+    /// Destroy the interpreter. Invalidates every value ever pushed from it.
+    pub fn deinit(self: *State) void {
+        self.lua.deinit();
+        self.* = undefined;
+    }
+
+    /// Push a fresh sandboxed environment table (ADR 0003 §7) onto the Lua
+    /// stack: an explicit allowlist of base functions, whole safe libraries,
+    /// `math` minus its RNG, and `print` rerouted to the engine log (never raw
+    /// stdout). Every script module gets its own table from this call, even
+    /// though all share the one `lua_State` above (§8) — the libraries are
+    /// shared references (safe: they carry no identity-sensitive state), the
+    /// table itself is not.
+    pub fn pushSandboxEnv(self: *State) void {
+        const l = self.lua;
+        l.newTable();
+
+        for (sandbox_base_fns) |name| {
+            std.debug.assert(l.getGlobal(name) == .function);
+            l.setField(-2, name);
+        }
+        for (sandbox_whole_libs) |name| {
+            std.debug.assert(l.getGlobal(name) == .table);
+            l.setField(-2, name);
+        }
+        std.debug.assert(l.getGlobal("math") == .table);
+        l.setField(-2, "math");
+
+        l.pushFunction(zlua.wrap(sandboxPrint));
+        l.setField(-2, "print");
+    }
+
+    /// Load `source` as a script module and rebind its `_ENV` upvalue to a
+    /// fresh sandbox (`pushSandboxEnv`) before it ever runs, so it can see only
+    /// the allowlisted surface — never the interpreter's real globals. Every
+    /// Lua 5.4 top-level chunk has `_ENV` as upvalue 1 unconditionally (the
+    /// compiler always emits it), so the assert below never fires on a
+    /// well-formed chunk. Leaves the sandboxed chunk (a callable function) on
+    /// top of the stack; run it with `Lua.protectedCall`.
+    pub fn loadSandboxed(self: *State, source: [:0]const u8) !void {
+        const l = self.lua;
+        try l.loadString(source);
+        const chunk_index = l.getTop();
+        self.pushSandboxEnv();
+        const upvalue_name = try l.setUpvalue(chunk_index, 1);
+        std.debug.assert(std.mem.eql(u8, upvalue_name, "_ENV"));
+    }
+};
+
+/// `print` inside the sandbox: never the stdlib's raw stdout write (that would
+/// be a side channel around both the sandbox and the sim's determinism). It
+/// stringifies its arguments the way the real `print` does (`__tostring`
+/// included) and routes the joined line to the engine log. `mana.log(level,
+/// msg)` (issue #5) will front the same sink with an explicit level.
+fn sandboxPrint(l: *Lua) !i32 {
+    const gpa = l.allocator();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(gpa);
+
+    const n = l.getTop();
+    var i: i32 = 1;
+    while (i <= n) : (i += 1) {
+        if (i > 1) try buf.appendSlice(gpa, "\t");
+        try buf.appendSlice(gpa, l.toStringEx(i));
+        l.pop(1); // toStringEx pushes a new string; drop it once copied.
+    }
+    std.log.scoped(.script).info("{s}", .{buf.items});
+    return 0;
+}
+
+test "sandbox: pushSandboxEnv builds exactly the allowlisted table shape" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    state.pushSandboxEnv();
+    const env: i32 = state.lua.getTop();
+
+    inline for (sandbox_base_fns) |name| {
+        try std.testing.expectEqual(zlua.LuaType.function, state.lua.getField(env, name));
+        state.lua.pop(1);
+    }
+    inline for (sandbox_whole_libs) |name| {
+        try std.testing.expectEqual(zlua.LuaType.table, state.lua.getField(env, name));
+        state.lua.pop(1);
+    }
+    try std.testing.expectEqual(zlua.LuaType.table, state.lua.getField(env, "math"));
+    state.lua.pop(1);
+    try std.testing.expectEqual(zlua.LuaType.function, state.lua.getField(env, "print"));
+    state.lua.pop(1);
+
+    // Nothing else leaks in: no `os`/`io`/`debug`/`_G`/raw `load`/`print` aliasing.
+    inline for ([_][:0]const u8{ "os", "io", "debug", "require", "load", "_G", "collectgarbage" }) |name| {
+        try std.testing.expectEqual(zlua.LuaType.nil, state.lua.getField(env, name));
+        state.lua.pop(1);
+    }
+    state.lua.pop(1); // pop env
+}
+
+test "sandbox: print stringifies its arguments and never raises" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    try state.loadSandboxed("print('hello', 42, true)");
+    try state.lua.protectedCall(.{ .results = 0 });
+}
+
+test "sandbox: os, io, debug, require, and _G are absent from a script's _ENV" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    inline for ([_][:0]const u8{
+        "os",             "io", "debug",    "require", "load", "loadfile", "dofile",
+        "collectgarbage", "_G", "_VERSION",
+    }) |global| {
+        try state.loadSandboxed("return " ++ global);
+        try state.lua.protectedCall(.{ .results = 1 });
+        try std.testing.expectEqual(zlua.LuaType.nil, state.lua.typeOf(-1));
+        state.lua.pop(1);
+    }
+}
+
+test "sandbox: os/io are never loaded, not merely hidden — indexing them errors" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    try state.loadSandboxed("return os.time()");
+    try std.testing.expectError(error.LuaRuntime, state.lua.protectedCall(.{ .results = 1 }));
+    state.lua.pop(1); // protectedCall leaves the error object on the stack
+
+    try state.loadSandboxed("return io.write('x')");
+    try std.testing.expectError(error.LuaRuntime, state.lua.protectedCall(.{ .results = 1 }));
+    state.lua.pop(1);
+}
+
+test "sandbox: math.random and math.randomseed are removed for determinism" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    try state.loadSandboxed("return math.random, math.randomseed, math.floor(3.7)");
+    try state.lua.protectedCall(.{ .results = 3 });
+    try std.testing.expectEqual(zlua.LuaType.number, state.lua.typeOf(-1));
+    try std.testing.expectEqual(@as(i64, 3), try state.lua.toInteger(-1));
+    try std.testing.expectEqual(zlua.LuaType.nil, state.lua.typeOf(-2));
+    try std.testing.expectEqual(zlua.LuaType.nil, state.lua.typeOf(-3));
+    state.lua.pop(3);
+}
+
+test "sandbox: allowlisted base functions and libraries work end-to-end" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    try state.loadSandboxed(
+        \\local t = {}
+        \\for i, v in ipairs({10, 20, 30}) do t[i] = v end
+        \\return table.concat(t, ","), string.upper("ok"), type(pcall)
+    );
+    try state.lua.protectedCall(.{ .results = 3 });
+    try std.testing.expectEqualStrings("function", try state.lua.toString(-1));
+    try std.testing.expectEqualStrings("OK", try state.lua.toString(-2));
+    try std.testing.expectEqualStrings("10,20,30", try state.lua.toString(-3));
+    state.lua.pop(3);
+}
+
+test "sandbox: two Sims (two States) do not share Lua global state" {
+    var a = try State.init(std.testing.allocator);
+    defer a.deinit();
+    var b = try State.init(std.testing.allocator);
+    defer b.deinit();
+
+    a.lua.pushInteger(42);
+    a.lua.setGlobal("mutated_by_a");
+    try std.testing.expectEqual(zlua.LuaType.nil, b.lua.getGlobal("mutated_by_a"));
+    b.lua.pop(1);
+    try std.testing.expectEqual(zlua.LuaType.number, a.lua.getGlobal("mutated_by_a"));
+    a.lua.pop(1);
+
+    // Reverse direction too, ruling out a coincidental one-way share.
+    b.lua.pushInteger(7);
+    b.lua.setGlobal("mutated_by_b");
+    try std.testing.expectEqual(zlua.LuaType.nil, a.lua.getGlobal("mutated_by_b"));
+    a.lua.pop(1);
+}
+
+test "sandbox: an implicit global set by a script in one Sim is invisible to another Sim's script" {
+    var a = try State.init(std.testing.allocator);
+    defer a.deinit();
+    var b = try State.init(std.testing.allocator);
+    defer b.deinit();
+
+    try a.loadSandboxed("leaked = 99");
+    try a.lua.protectedCall(.{ .results = 0 });
+
+    try b.loadSandboxed("return leaked");
+    try b.lua.protectedCall(.{ .results = 1 });
+    try std.testing.expectEqual(zlua.LuaType.nil, b.lua.typeOf(-1));
+    b.lua.pop(1);
 }
