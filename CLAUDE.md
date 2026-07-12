@@ -178,32 +178,7 @@ ADR. Building it is a separate task that adds the ziglua dependency (ask first).
   `readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0)` for a `[:0]u8`,
   `writeFile(io, .{ .sub_path, .data })`, `deleteFile`). `std.testing.io` +
   `std.testing.tmpDir(.{})` give a real Io and temp dir for file tests.
-- **vulkan-zig on Zig 0.16:** its `master` targets Zig 0.17-dev; use the
-  maintainer's **`zig-0.16-compat`** branch (supported path, not a workaround). It
-  needs a `vk.xml` registry — depend on **Vulkan-Headers** and pass
-  `b.dependency("vulkan_headers",.{}).path("registry/vk.xml")` as the `.registry`
-  option to `b.dependency("vulkan_zig", .{...}).module("vulkan-zig")`. Both deps are
-  marked **`.lazy = true`** and only referenced under `-Denable-vulkan`, so the
-  default/CI build never fetches or compiles them. The Vulkan backend lives under
-  `src/gpu/vulkan/`, imported by `gpu.zig` only when the flag is set.
-- **`std.DynLib` has no Windows implementation in Zig 0.16** (Windows hits its
-  "unsupported platform" branch). To load a DLL on Windows, declare the kernel32
-  externs yourself — `extern "kernel32" fn LoadLibraryW(name: [*:0]const u16)
-  callconv(.winapi) ?windows.HMODULE;` + `GetProcAddress` + `FreeLibrary` — and use
-  `DynLib` only on posix. The Vulkan loader (`vulkan-1`) is loaded this way at
-  runtime, so no import library / Vulkan SDK is needed to build.
-- **`zig build test` skips `pub fn main` (again):** a bad API call reachable only
-  from `main` (e.g. `std.DynLib` on Windows) passes `test` and fails `zig build`.
-  Comptime-guard backend-specific code with `if (gpu.backend == .vulkan) {...}` so a
-  default build never analyzes the Vulkan branch.
-- **vulkan-zig API shape:** `vk.Bool32` is `enum(u32){ false, true, _ }` — use the
-  literals `.true`/`.false` in struct fields; `vk.TRUE`/`vk.FALSE` are bare
-  `comptime_int`s that do **not** coerce to it. `vk.DeviceProxy`/`InstanceProxy`
-  methods omit the device/instance handle (the proxy holds it) but `cmd*` still take
-  `command_buffer` first; array params are Zig slices (`&.{x}`), and empty barrier
-  arrays are `null`.
-- **Shaders:** authored in WGSL under `src/gpu/vulkan/shaders/`, compiled to
-  committed `*.spv` by naga (`mise run shaders`, pinned via `cargo:naga-cli`). The
-  backend `@embedFile`s the `.spv` (declare it `align(@alignOf(u32))` so it can be
-  cast to `[*]const u32` for `p_code`). glslc/GLSL isn't cleanly installable here
-  (see ADR 0006 §5); swap is trivial since the backend consumes SPIR-V.
+- **Subsystem-scoped knowledge lives in per-directory `CLAUDE.md` files** (loaded
+  only when working there), so this root stays lean. Vulkan / vulkan-zig / shader
+  gotchas → `src/gpu/CLAUDE.md`. Add new package-specific lessons to that package's
+  `CLAUDE.md`, not here; keep this section to project-wide Zig/tooling facts.
