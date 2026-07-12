@@ -13,3 +13,7 @@ pub const Transform = struct { pos: Vec3 };
 /// Per-tick world-space movement, integrated into `Transform.pos` by the movement
 /// system.
 pub const Velocity = struct { v: Vec3 };
+
+/// Hit points. `current` is the live value in `[0, max]`; the regen system moves
+/// `current` toward `max`. Genre-neutral: what damage/death mean is content's job.
+pub const Health = struct { current: f32, max: f32 };

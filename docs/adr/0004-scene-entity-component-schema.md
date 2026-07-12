@@ -128,3 +128,23 @@ seed + inputs ⇒ identical hash) is unchanged.
 - **Follow-on ADRs (unblocked, not in this one):** content-defined data components;
   mid-tick add/remove via the command buffer (ties to ADR 0003 deferred mutations);
   Transform rotation/scale; a spatial index for physics broad-phase.
+
+## Amendments
+
+- **2026-07-12 — third built-in component `Health` (#14).** Adds a third built-in
+  component beside `Transform`/`Velocity` (§3) and a matching optional `.health`
+  field on the scene `EntityDef` (§6):
+
+  ```zig
+  pub const Health = struct { current: f32, max: f32 };
+  ```
+
+  It follows the established extension story verbatim — a `World` column
+  (`setHealth`/`getHealth`, despawn cleanup, folded into `stateHash` per §8) and a
+  native `regen` system moving `current` toward `max` by `rate·dt` (clamped). The
+  determinism golden moves as a reviewed update (§8). **Stays genre-neutral
+  (invariant 6):** the component holds only two floats (current/max) with no
+  semantics attached — *what* damage, death, or regeneration policy mean is content/
+  script territory, not `src/`. The engine merely stores the value and integrates one
+  neutral regen rate; a per-entity rate and damage/death rules are content-defined-
+  component / scripting follow-ons, not part of this amendment.

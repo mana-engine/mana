@@ -30,6 +30,7 @@ pub const Scene = scene.Scene;
 pub const Entity = ecs.Entity;
 pub const Transform = components.Transform;
 pub const Velocity = components.Velocity;
+pub const Health = components.Health;
 
 /// Marker verifying the module is wired into the build graph and can see every port
 /// it assembles.

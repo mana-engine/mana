@@ -21,6 +21,24 @@ pub fn movementSystem(ctx: *Context) std.mem.Allocator.Error!void {
     movement(ctx.world, ctx.dt);
 }
 
+/// Health regenerated per second by `regenSystem`. A single engine-wide rate suffices
+/// for the sandbox; a per-entity regen rate is a content-defined-component follow-on
+/// (ADR 0004 §3).
+pub const regen_rate: f32 = 1.0;
+
+/// Move each entity's `Health.current` toward `max` by `rate·dt`, clamped at `max`.
+/// Iterates the health set directly; no other component is required.
+pub fn regen(world: *World, rate: f32, dt: f32) void {
+    for (world.healths.slice()) |*h| {
+        if (h.current < h.max) h.current = @min(h.max, h.current + rate * dt);
+    }
+}
+
+/// `regen` as a registerable frame system (ADR 0007). Never allocates.
+pub fn regenSystem(ctx: *Context) std.mem.Allocator.Error!void {
+    regen(ctx.world, regen_rate, ctx.dt);
+}
+
 const testing = std.testing;
 
 test "movement: integrates position for entities with velocity" {
@@ -39,4 +57,24 @@ test "movement: integrates position for entities with velocity" {
 
     try testing.expect(w.getTransform(mover).?.pos.approxEql(.{ .x = 2, .y = 0, .z = 0 }, 1e-6));
     try testing.expect(w.getTransform(still).?.pos.approxEql(.{ .x = 5, .y = 5, .z = 5 }, 1e-6));
+}
+
+test "regen: moves current toward max and clamps, never overshooting" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+
+    const hurt = try w.spawn();
+    try w.setHealth(hurt, .{ .current = 8, .max = 10 });
+
+    const full = try w.spawn(); // already at max — must stay put
+    try w.setHealth(full, .{ .current = 10, .max = 10 });
+
+    regen(&w, 1.0, 1.0); // +1 → 9
+    try testing.expectEqual(@as(f32, 9), w.getHealth(hurt).?.current);
+    try testing.expectEqual(@as(f32, 10), w.getHealth(full).?.current);
+
+    regen(&w, 1.0, 1.0); // +1 → 10 (reaches max)
+    regen(&w, 1.0, 1.0); // clamps at max, no overshoot
+    try testing.expectEqual(@as(f32, 10), w.getHealth(hurt).?.current);
+    try testing.expectEqual(@as(f32, 10), w.getHealth(full).?.current);
 }

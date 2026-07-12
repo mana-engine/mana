@@ -17,7 +17,7 @@ const scene_src: [:0]const u8 = @embedFile("fixtures/scene_hello.zon");
 
 /// The bit-identical state hash after `tick_steps` movement steps. Update only as a
 /// deliberate, reviewed step alongside an intended scene or math change.
-const golden_state_hash: u64 = 0x1d5ab580f4a8993a;
+const golden_state_hash: u64 = 0x65f2a1949cd9fc40;
 
 fn buildWorld(gpa: std.mem.Allocator) !engine.World {
     const scene = try engine.scene.parse(gpa, scene_src);
@@ -26,7 +26,12 @@ fn buildWorld(gpa: std.mem.Allocator) !engine.World {
 }
 
 fn run(world: *engine.World) void {
-    for (0..tick_steps) |_| engine.systems.movement(world, core.time.default_dt);
+    // Mirror the runner's Sim: movement then regen each tick. They touch disjoint
+    // columns (transforms vs healths), so this equals the registered-system order.
+    for (0..tick_steps) |_| {
+        engine.systems.movement(world, core.time.default_dt);
+        engine.systems.regen(world, engine.systems.regen_rate, core.time.default_dt);
+    }
 }
 
 test "golden scene parses into the expected entities" {
@@ -38,6 +43,8 @@ test "golden scene parses into the expected entities" {
     try std.testing.expectEqual(@as(usize, 3), scene.entities.len);
     try std.testing.expectEqualStrings("player", scene.entities[0].name);
     try std.testing.expect(scene.entities[1].velocity == null); // crate is static
+    try std.testing.expect(scene.entities[0].health != null); // player has hp
+    try std.testing.expect(scene.entities[1].health == null); // crate has none
 }
 
 test "determinism: fixed inputs ⇒ pinned state hash after N ticks" {
