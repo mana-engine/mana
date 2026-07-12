@@ -1,0 +1,269 @@
+//! Null gpu backend — the default, GPU-free adapter and the renderer's real test
+//! double (CLAUDE.md: "the null GPU backend is the only test double — a real
+//! adapter"). It implements the exact same `Device` surface as the Vulkan backend
+//! (ADR 0010) entirely on the CPU: a `Texture` is a host pixel buffer, a `Buffer`
+//! is host bytes, and a `CommandList` records immediately — `beginRendering` clears
+//! the target, `draw` software-rasterizes the bound vertices, and
+//! `copyTextureToBuffer` memcpys pixels back. No Vulkan, no OS GPU calls, so it runs
+//! in every headless build and in CI.
+//!
+//! The rasterizer fills axis-aligned quads (the only geometry the scene pipeline
+//! ever emits — two triangles per quad from `renderScene`'s vertex builder). It is
+//! deliberately not a general triangle rasterizer: the port draws quads, so the test
+//! double draws quads. A richer renderer that needs more would grow both backends
+//! together, under a new ADR.
+
+const std = @import("std");
+const port = @import("../port.zig");
+const Allocator = std.mem.Allocator;
+
+/// An offscreen colour target backed by a host RGBA8 pixel buffer owned by `gpa`.
+pub const Texture = struct {
+    width: u32,
+    height: u32,
+    /// Tightly-packed RGBA8, `width*height*4` bytes, owned by the creating device.
+    pixels: []u8,
+
+    /// Release the pixel buffer. `dev` supplies the owning allocator.
+    pub fn deinit(self: *Texture, dev: *Device) void {
+        dev.gpa.free(self.pixels);
+    }
+};
+
+/// A host-visible byte buffer; the CPU analogue of a mapped GPU buffer.
+pub const Buffer = struct {
+    /// Backing storage, `BufferDesc.size` bytes, owned by the creating device.
+    bytes: []u8,
+
+    /// Release the backing storage. `dev` supplies the owning allocator.
+    pub fn deinit(self: *Buffer, dev: *Device) void {
+        dev.gpa.free(self.bytes);
+    }
+
+    /// Copy `data` into the buffer from offset 0. `data.len` must fit; caller owns
+    /// `data`. `dev` is unused (host memory) but kept for surface parity. Never fails
+    /// on the null backend; `!void` matches the Vulkan backend's fallible map.
+    pub fn write(self: *Buffer, dev: *Device, data: []const u8) !void {
+        _ = dev;
+        @memcpy(self.bytes[0..data.len], data);
+    }
+
+    /// Return a `gpa`-owned copy of the buffer's contents (the read-back image).
+    /// `dev` is unused here but kept for surface parity with the Vulkan backend,
+    /// which needs the device to map memory. Errors: `error.OutOfMemory`.
+    pub fn read(self: *const Buffer, dev: *Device, gpa: Allocator) ![]u8 {
+        _ = dev;
+        return gpa.dupe(u8, self.bytes);
+    }
+};
+
+/// The scene pipeline. The null backend needs no pipeline state — the rasterizer is
+/// fixed-function — so this is an empty handle present only for surface parity.
+pub const Pipeline = struct {
+    /// No-op release; present for surface parity with the Vulkan backend.
+    pub fn deinit(self: *Pipeline, dev: *Device) void {
+        _ = self;
+        _ = dev;
+    }
+};
+
+/// Records rendering work. The null backend is immediate-mode: each call mutates the
+/// bound target's pixels right away, so `submit` has nothing left to flush.
+pub const CommandList = struct {
+    target: ?*Texture = null,
+    vertices: []const u8 = &.{},
+
+    /// Begin rendering into `target`, clearing it to `clear` (RGBA, 0..1).
+    pub fn beginRendering(self: *CommandList, target: *Texture, clear: [4]f32) void {
+        self.target = target;
+        const px = [4]u8{ toU8(clear[0]), toU8(clear[1]), toU8(clear[2]), toU8(clear[3]) };
+        var i: usize = 0;
+        while (i < target.pixels.len) : (i += 4) {
+            target.pixels[i + 0] = px[0];
+            target.pixels[i + 1] = px[1];
+            target.pixels[i + 2] = px[2];
+            target.pixels[i + 3] = px[3];
+        }
+    }
+
+    /// Bind the scene pipeline. No-op: the rasterizer is fixed-function.
+    pub fn bindPipeline(self: *CommandList, pipeline: *Pipeline) void {
+        _ = self;
+        _ = pipeline;
+    }
+
+    /// Bind the vertex buffer the next `draw` rasterizes.
+    pub fn bindVertexBuffer(self: *CommandList, buffer: *Buffer) void {
+        self.vertices = buffer.bytes;
+    }
+
+    /// Rasterize `vertex_count` vertices (6 per axis-aligned quad) into the bound
+    /// target. Each quad's screen rect is filled with its flat colour; NDC maps to
+    /// pixels with y increasing downward, matching the Vulkan backend's framebuffer.
+    pub fn draw(self: *CommandList, vertex_count: u32) void {
+        const target = self.target orelse return;
+        const verts = std.mem.bytesAsSlice(port.Vertex, self.vertices);
+        const w: f32 = @floatFromInt(target.width);
+        const h: f32 = @floatFromInt(target.height);
+        var base: usize = 0;
+        while (base + 6 <= vertex_count) : (base += 6) {
+            var min_x: f32 = verts[base].x;
+            var max_x: f32 = verts[base].x;
+            var min_y: f32 = verts[base].y;
+            var max_y: f32 = verts[base].y;
+            for (verts[base .. base + 6]) |v| {
+                min_x = @min(min_x, v.x);
+                max_x = @max(max_x, v.x);
+                min_y = @min(min_y, v.y);
+                max_y = @max(max_y, v.y);
+            }
+            const c = [3]u8{ toU8(verts[base].r), toU8(verts[base].g), toU8(verts[base].b) };
+            const x0 = clampPx(ndcToPx(min_x, w), target.width);
+            const x1 = clampPx(ndcToPx(max_x, w), target.width);
+            const y0 = clampPx(ndcToPx(min_y, h), target.height);
+            const y1 = clampPx(ndcToPx(max_y, h), target.height);
+            var y = y0;
+            while (y < y1) : (y += 1) {
+                var x = x0;
+                while (x < x1) : (x += 1) {
+                    const i = (@as(usize, y) * target.width + x) * 4;
+                    target.pixels[i + 0] = c[0];
+                    target.pixels[i + 1] = c[1];
+                    target.pixels[i + 2] = c[2];
+                    target.pixels[i + 3] = 255;
+                }
+            }
+        }
+    }
+
+    /// End rendering. No-op: immediate-mode writes already landed.
+    pub fn endRendering(self: *CommandList) void {
+        _ = self;
+    }
+
+    /// Copy `texture`'s pixels into `buffer` (readback). Sizes are set up equal by
+    /// `renderScene`; the copy is truncated to the smaller of the two for safety.
+    pub fn copyTextureToBuffer(self: *CommandList, texture: *Texture, buffer: *Buffer) void {
+        _ = self;
+        const n = @min(texture.pixels.len, buffer.bytes.len);
+        @memcpy(buffer.bytes[0..n], texture.pixels[0..n]);
+    }
+
+    /// Release recording resources. No-op for the null backend.
+    pub fn deinit(self: *CommandList, dev: *Device) void {
+        _ = self;
+        _ = dev;
+    }
+};
+
+/// A CPU "device". Holds only the allocator that owns every resource it creates.
+pub const Device = struct {
+    gpa: Allocator,
+
+    /// Acquire the null device. Never fails; `!Device` matches the Vulkan backend's
+    /// fallible signature so `renderScene` is backend-agnostic.
+    pub fn init(gpa: Allocator) !Device {
+        return .{ .gpa = gpa };
+    }
+
+    /// Release the device. No-op: resources are freed by their own `deinit`.
+    pub fn deinit(self: *Device) void {
+        _ = self;
+    }
+
+    /// Create a colour target sized by `desc`, zero-initialized. Caller frees via
+    /// `Texture.deinit`. Errors: `error.OutOfMemory`.
+    pub fn createTexture(self: *Device, desc: port.TextureDesc) !Texture {
+        const pixels = try self.gpa.alloc(u8, @as(usize, desc.width) * desc.height * 4);
+        @memset(pixels, 0);
+        return .{ .width = desc.width, .height = desc.height, .pixels = pixels };
+    }
+
+    /// Create a host byte buffer sized by `desc`. Caller frees via `Buffer.deinit`.
+    /// Errors: `error.OutOfMemory`.
+    pub fn createBuffer(self: *Device, desc: port.BufferDesc) !Buffer {
+        return .{ .bytes = try self.gpa.alloc(u8, @intCast(desc.size)) };
+    }
+
+    /// Create the scene pipeline. Trivial for the null backend. `format` is accepted
+    /// for surface parity. Never fails.
+    pub fn createScenePipeline(self: *Device, format: port.TextureFormat) !Pipeline {
+        _ = self;
+        _ = format;
+        return .{};
+    }
+
+    /// Begin recording. Returns an empty immediate-mode command list. Never fails.
+    pub fn beginCommands(self: *Device) !CommandList {
+        _ = self;
+        return .{};
+    }
+
+    /// Submit recorded work. No-op: the null command list wrote immediately.
+    pub fn submit(self: *Device, cmd: *CommandList) !void {
+        _ = self;
+        _ = cmd;
+    }
+};
+
+fn toU8(v: f32) u8 {
+    return @intFromFloat(@round(std.math.clamp(v, 0, 1) * 255));
+}
+
+fn ndcToPx(ndc: f32, dim: f32) i64 {
+    return @intFromFloat(@floor((ndc + 1) * 0.5 * dim));
+}
+
+fn clampPx(px: i64, dim: u32) u32 {
+    return @intCast(std.math.clamp(px, 0, @as(i64, dim)));
+}
+
+const testing = std.testing;
+
+test "null backend: renderScene surface clears then rasterizes a quad" {
+    var dev = try Device.init(testing.allocator);
+    defer dev.deinit();
+
+    var target = try dev.createTexture(.{ .width = 8, .height = 8, .format = .rgba8_unorm, .usage = .{ .color_attachment = true, .transfer_src = true } });
+    defer target.deinit(&dev);
+
+    // One red quad covering the top-left NDC quadrant: x,y in [-1, 0].
+    const red = [3]f32{ 1, 0, 0 };
+    const q = [_]port.Vertex{
+        .{ .x = -1, .y = -1, .r = red[0], .g = red[1], .b = red[2] },
+        .{ .x = 0, .y = -1, .r = red[0], .g = red[1], .b = red[2] },
+        .{ .x = -1, .y = 0, .r = red[0], .g = red[1], .b = red[2] },
+        .{ .x = -1, .y = 0, .r = red[0], .g = red[1], .b = red[2] },
+        .{ .x = 0, .y = -1, .r = red[0], .g = red[1], .b = red[2] },
+        .{ .x = 0, .y = 0, .r = red[0], .g = red[1], .b = red[2] },
+    };
+    var vbuf = try dev.createBuffer(.{ .size = @sizeOf(@TypeOf(q)), .usage = .{ .vertex = true } });
+    defer vbuf.deinit(&dev);
+    try vbuf.write(&dev, std.mem.asBytes(&q));
+
+    var readback = try dev.createBuffer(.{ .size = target.pixels.len, .usage = .{ .transfer_dst = true } });
+    defer readback.deinit(&dev);
+
+    var pipe = try dev.createScenePipeline(.rgba8_unorm);
+    defer pipe.deinit(&dev);
+
+    var cmd = try dev.beginCommands();
+    defer cmd.deinit(&dev);
+    cmd.beginRendering(&target, .{ 0, 0, 0, 1 });
+    cmd.bindPipeline(&pipe);
+    cmd.bindVertexBuffer(&vbuf);
+    cmd.draw(6);
+    cmd.endRendering();
+    cmd.copyTextureToBuffer(&target, &readback);
+    try dev.submit(&cmd);
+
+    const out = try readback.read(&dev, testing.allocator);
+    defer testing.allocator.free(out);
+
+    // Top-left pixel is inside the quad → red; bottom-right is outside → clear black.
+    try testing.expectEqual(@as(u8, 255), out[0]); // (0,0) R
+    try testing.expectEqual(@as(u8, 0), out[1]); // (0,0) G
+    const last = (7 * 8 + 7) * 4;
+    try testing.expectEqual(@as(u8, 0), out[last + 0]); // (7,7) R stayed clear
+    try testing.expectEqual(@as(u8, 255), out[last + 3]); // (7,7) A from clear
+}
