@@ -204,6 +204,99 @@ pub const Device = struct {
         _ = self;
         _ = cmd;
     }
+
+    /// Create a headless swapchain: a single CPU colour target sized by `desc`
+    /// (ADR 0012). `desc.surface` is ignored — headless has no OS window, so the null
+    /// backend accepts a null surface handle. Caller frees via `Swapchain.deinit`.
+    /// Errors: `error.OutOfMemory`.
+    pub fn createSwapchain(self: *Device, desc: port.SwapchainDesc) !Swapchain {
+        const image = try self.createTexture(.{
+            .width = desc.width,
+            .height = desc.height,
+            .format = desc.format,
+            .usage = .{ .color_attachment = true, .transfer_src = true },
+        });
+        return .{
+            .image = image,
+            .presented = &.{},
+            .present_count = 0,
+            .format = desc.format,
+            .present_mode = desc.present_mode,
+        };
+    }
+};
+
+/// One acquired swapchain image for the frame being rendered. `target` is the null
+/// backend's CPU colour target; the caller records a `CommandList` into it, then
+/// `present`s this frame. Borrowed — valid until the matching `present`.
+pub const Frame = struct {
+    /// The image to render into this frame.
+    target: *Texture,
+    /// Index of the acquired image (always 0: the null chain has one image). Present
+    /// for parity with a multi-image Vulkan swapchain.
+    index: u32,
+    /// Whether the acquired image is optimal for the surface (null: always `.optimal`).
+    status: port.AcquireStatus,
+};
+
+/// The null presentation swapchain — a real, headless adapter satisfying the same
+/// acquire→render→present surface the Vulkan backend will implement (ADR 0012). It
+/// owns one CPU colour target; `acquire` hands it out, `present` captures its pixels
+/// (so a headless run is observable) and is otherwise a no-op, `resize` reallocates
+/// it. It never goes out of date, so every status is `.optimal`.
+pub const Swapchain = struct {
+    /// The single CPU image the null swapchain presents; the `acquire` target.
+    image: Texture,
+    /// Copy of the most recently presented pixels (RGBA8), owned by `dev.gpa`, or
+    /// empty before the first present. Lets a headless present be inspected in tests.
+    presented: []u8,
+    /// Count of frames presented; a headless present is a no-op beyond this capture.
+    present_count: u64,
+    format: port.TextureFormat,
+    present_mode: port.PresentMode,
+
+    /// Release the image and the presented-frame capture. `dev` owns the allocator.
+    pub fn deinit(self: *Swapchain, dev: *Device) void {
+        self.image.deinit(dev);
+        dev.gpa.free(self.presented);
+    }
+
+    /// Acquire the next image to render into. The null chain has one image and never
+    /// goes out of date, so this always returns it, `.optimal`. `dev` is unused (kept
+    /// for parity with the Vulkan backend's fallible acquire). Never fails.
+    pub fn acquire(self: *Swapchain, dev: *Device) !Frame {
+        _ = dev;
+        return .{ .target = &self.image, .index = 0, .status = .optimal };
+    }
+
+    /// Present `frame`. The null backend captures the image's pixels into `presented`
+    /// (so a headless run can be inspected) and reports `.optimal`. `frame.target`
+    /// must be this swapchain's image. Errors: `error.OutOfMemory` growing the capture.
+    pub fn present(self: *Swapchain, dev: *Device, frame: Frame) !port.AcquireStatus {
+        // Proof: the null chain hands out only `&self.image` from `acquire`, so a
+        // frame presented to its own swapchain always targets that image.
+        std.debug.assert(frame.target == &self.image);
+        if (self.presented.len != self.image.pixels.len) {
+            self.presented = try dev.gpa.realloc(self.presented, self.image.pixels.len);
+        }
+        @memcpy(self.presented, self.image.pixels);
+        self.present_count += 1;
+        return .optimal;
+    }
+
+    /// Resize the swapchain's image to `width`×`height` (the surface/window resized;
+    /// the Vulkan analogue recreates on `out_of_date`). Reallocates the render target;
+    /// the stale one is freed. Errors: `error.OutOfMemory`.
+    pub fn resize(self: *Swapchain, dev: *Device, width: u32, height: u32) !void {
+        const image = try dev.createTexture(.{
+            .width = width,
+            .height = height,
+            .format = self.format,
+            .usage = .{ .color_attachment = true, .transfer_src = true },
+        });
+        self.image.deinit(dev);
+        self.image = image;
+    }
 };
 
 fn toU8(v: f32) u8 {
@@ -266,4 +359,45 @@ test "null backend: renderScene surface clears then rasterizes a quad" {
     const last = (7 * 8 + 7) * 4;
     try testing.expectEqual(@as(u8, 0), out[last + 0]); // (7,7) R stayed clear
     try testing.expectEqual(@as(u8, 255), out[last + 3]); // (7,7) A from clear
+}
+
+test "null backend: swapchain acquire -> render -> present captures the frame" {
+    var dev = try Device.init(testing.allocator);
+    defer dev.deinit();
+
+    // Headless swapchain: a null surface handle, 4x4 target.
+    var sc = try dev.createSwapchain(.{
+        .surface = .{},
+        .width = 4,
+        .height = 4,
+        .format = .rgba8_unorm,
+        .present_mode = .fifo,
+    });
+    defer sc.deinit(&dev);
+
+    const frame = try sc.acquire(&dev);
+    try testing.expectEqual(port.AcquireStatus.optimal, frame.status);
+    try testing.expectEqual(@as(u32, 0), frame.index);
+
+    // Render into the acquired image: clear it opaque green.
+    var cmd = try dev.beginCommands();
+    defer cmd.deinit(&dev);
+    cmd.beginRendering(frame.target, .{ 0, 1, 0, 1 });
+    cmd.endRendering();
+    try dev.submit(&cmd);
+
+    const status = try sc.present(&dev, frame);
+    try testing.expectEqual(port.AcquireStatus.optimal, status);
+    try testing.expectEqual(@as(u64, 1), sc.present_count);
+
+    // The presented capture holds the green clear (R=0, G=255, A=255).
+    try testing.expectEqual(@as(u8, 0), sc.presented[0]);
+    try testing.expectEqual(@as(u8, 255), sc.presented[1]);
+    try testing.expectEqual(@as(u8, 255), sc.presented[3]);
+
+    // Resize recreates the target; a fresh acquire yields the new drawable size.
+    try sc.resize(&dev, 8, 8);
+    const bigger = try sc.acquire(&dev);
+    try testing.expectEqual(@as(u32, 8), bigger.target.width);
+    try testing.expectEqual(@as(u32, 8), bigger.target.height);
 }

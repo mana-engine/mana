@@ -23,6 +23,11 @@ pub const BufferUsage = port.BufferUsage;
 pub const TextureDesc = port.TextureDesc;
 pub const BufferDesc = port.BufferDesc;
 pub const Vertex = port.Vertex;
+// Presentation-surface vocabulary (ADR 0012).
+pub const SurfaceHandle = port.SurfaceHandle;
+pub const PresentMode = port.PresentMode;
+pub const AcquireStatus = port.AcquireStatus;
+pub const SwapchainDesc = port.SwapchainDesc;
 
 /// Available GPU backends, selected at comptime via build options.
 pub const Backend = enum { null_backend, vulkan };
@@ -46,6 +51,12 @@ pub const Buffer = impl.Buffer;
 pub const Pipeline = impl.Pipeline;
 /// Records rendering + copy commands for one submission. Backend-owned.
 pub const CommandList = impl.CommandList;
+/// A presentation swapchain over a window surface: acquire → render → present, with
+/// resize/out-of-date recreation (ADR 0012). Built from a `SwapchainDesc`. Backend-owned.
+pub const Swapchain = impl.Swapchain;
+/// One acquired swapchain image plus its acquire status, for the frame being rendered.
+/// `target` is the `Texture` to render into this frame. Backend-owned.
+pub const Frame = impl.Frame;
 
 /// Marker that the module is wired into the build graph.
 pub const ready = core.ready;
