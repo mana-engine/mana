@@ -1,22 +1,27 @@
 //! Vulkan gpu backend (ADR 0006), compiled only under `-Denable-vulkan`. Renders
-//! offscreen — no window, no swapchain. `renderTriangle` (M2) draws a triangle with
-//! a real graphics pipeline via dynamic rendering, reads the image back, and returns
-//! RGBA8 pixels; the runtime turns those into a PNG. Vulkan types stay inside this
-//! subtree; the engine-facing surface is plain data. The loader (`vulkan-1`) is
-//! loaded dynamically at runtime, so no import library / Vulkan SDK is needed.
+//! offscreen — no window, no swapchain. `renderScene` (M3) draws a set of coloured
+//! quads (NDC positions the engine iso-projected) through a graphics pipeline via
+//! dynamic rendering, reads the image back, and returns RGBA8 pixels; the runtime
+//! turns those into a PNG. Vulkan types stay inside this subtree; the engine-facing
+//! surface is plain data. The loader (`vulkan-1`) is loaded dynamically at runtime,
+//! so no import library / Vulkan SDK is needed.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const vk = @import("vulkan");
 const windows = std.os.windows;
+const Quad = @import("../types.zig").Quad;
 const Allocator = std.mem.Allocator;
 
 /// Vulkan API version this backend targets (1.3 for core dynamic rendering).
 pub const target_api_version: u32 = @bitCast(vk.API_VERSION_1_3);
 
-/// Triangle shaders, compiled from WGSL by naga (`mise run shaders`). Aligned to
-/// u32 so it can be handed to Vulkan directly.
-const triangle_spv align(@alignOf(u32)) = @embedFile("shaders/triangle.spv").*;
+/// Scene shaders, compiled from WGSL by naga (`mise run shaders`). Aligned to u32
+/// so it can be handed to Vulkan directly.
+const scene_spv align(@alignOf(u32)) = @embedFile("shaders/scene.spv").*;
+
+/// One vertex as consumed by scene.wgsl: NDC position + RGB colour, tightly packed.
+const Vertex = extern struct { x: f32, y: f32, r: f32, g: f32, b: f32 };
 
 // std.DynLib has no Windows implementation in Zig 0.16, so Windows loads the
 // loader through kernel32; posix uses DynLib.
@@ -59,10 +64,10 @@ const Loader = struct {
     }
 };
 
-/// Draw a triangle into an `width`×`height` offscreen image on the GPU and read it
+/// Draw `quads` into an `width`×`height` offscreen image on the GPU and read it
 /// back. Returns tightly-packed RGBA8 pixels owned by `gpa`. `clear` is the
 /// background colour (RGBA 0..1).
-pub fn renderTriangle(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![]u8 {
+pub fn renderScene(gpa: Allocator, width: u32, height: u32, quads: []const Quad, clear: [4]f32) ![]u8 {
     var loader = Loader.open() orelse return error.VulkanLoaderNotFound;
     defer loader.close();
     const vkb = vk.BaseWrapper.load(loader.get_proc);
@@ -90,15 +95,8 @@ pub fn renderTriangle(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![
 
     // --- Logical device (dynamic rendering enabled) + queue -----------------
     const priority = [_]f32{1.0};
-    const queue_ci: vk.DeviceQueueCreateInfo = .{
-        .queue_family_index = family,
-        .queue_count = 1,
-        .p_queue_priorities = &priority,
-    };
-    var features13: vk.PhysicalDeviceVulkan13Features = .{
-        .s_type = .physical_device_vulkan_1_3_features,
-        .dynamic_rendering = .true,
-    };
+    const queue_ci: vk.DeviceQueueCreateInfo = .{ .queue_family_index = family, .queue_count = 1, .p_queue_priorities = &priority };
+    var features13: vk.PhysicalDeviceVulkan13Features = .{ .s_type = .physical_device_vulkan_1_3_features, .dynamic_rendering = .true };
     const device_handle = try instance.createDevice(pdev, &.{
         .p_next = &features13,
         .queue_create_info_count = 1,
@@ -161,13 +159,44 @@ pub fn renderTriangle(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![
     defer dev.freeMemory(buf_mem, null);
     try dev.bindBufferMemory(buffer, buf_mem, 0);
 
-    // --- Graphics pipeline (dynamic rendering) ------------------------------
-    const module = try dev.createShaderModule(&.{
-        .code_size = triangle_spv.len,
-        .p_code = @ptrCast(&triangle_spv),
-    }, null);
-    defer dev.destroyShaderModule(module, null);
+    // --- Vertex buffer (2 triangles per quad), host-visible -----------------
+    const vertex_count: u32 = @intCast(quads.len * 6);
+    var vbuf: vk.Buffer = .null_handle;
+    var vbuf_mem: vk.DeviceMemory = .null_handle;
+    defer if (vbuf_mem != .null_handle) dev.freeMemory(vbuf_mem, null);
+    defer if (vbuf != .null_handle) dev.destroyBuffer(vbuf, null);
+    if (vertex_count > 0) {
+        const vbytes: u64 = @as(u64, vertex_count) * @sizeOf(Vertex);
+        vbuf = try dev.createBuffer(&.{ .size = vbytes, .usage = .{ .vertex_buffer_bit = true }, .sharing_mode = .exclusive }, null);
+        const vreqs = dev.getBufferMemoryRequirements(vbuf);
+        vbuf_mem = try dev.allocateMemory(&.{
+            .allocation_size = vreqs.size,
+            .memory_type_index = try memoryType(mem_props, vreqs.memory_type_bits, .{ .host_visible_bit = true, .host_coherent_bit = true }),
+        }, null);
+        try dev.bindBufferMemory(vbuf, vbuf_mem, 0);
 
+        const mapped = try dev.mapMemory(vbuf_mem, 0, vbytes, .{});
+        const verts: [*]Vertex = @ptrCast(@alignCast(mapped.?));
+        for (quads, 0..) |q, i| {
+            const x0 = q.center[0] - q.half[0];
+            const x1 = q.center[0] + q.half[0];
+            const y0 = q.center[1] - q.half[1];
+            const y1 = q.center[1] + q.half[1];
+            const c = q.color;
+            const base = i * 6;
+            verts[base + 0] = .{ .x = x0, .y = y0, .r = c[0], .g = c[1], .b = c[2] };
+            verts[base + 1] = .{ .x = x1, .y = y0, .r = c[0], .g = c[1], .b = c[2] };
+            verts[base + 2] = .{ .x = x0, .y = y1, .r = c[0], .g = c[1], .b = c[2] };
+            verts[base + 3] = .{ .x = x0, .y = y1, .r = c[0], .g = c[1], .b = c[2] };
+            verts[base + 4] = .{ .x = x1, .y = y0, .r = c[0], .g = c[1], .b = c[2] };
+            verts[base + 5] = .{ .x = x1, .y = y1, .r = c[0], .g = c[1], .b = c[2] };
+        }
+        dev.unmapMemory(vbuf_mem);
+    }
+
+    // --- Graphics pipeline (dynamic rendering, vertex input) ----------------
+    const module = try dev.createShaderModule(&.{ .code_size = scene_spv.len, .p_code = @ptrCast(&scene_spv) }, null);
+    defer dev.destroyShaderModule(module, null);
     const stages = [_]vk.PipelineShaderStageCreateInfo{
         .{ .stage = .{ .vertex_bit = true }, .module = module, .p_name = "vs_main" },
         .{ .stage = .{ .fragment_bit = true }, .module = module, .p_name = "fs_main" },
@@ -175,6 +204,11 @@ pub fn renderTriangle(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![
     const layout = try dev.createPipelineLayout(&.{}, null);
     defer dev.destroyPipelineLayout(layout, null);
 
+    const binding: vk.VertexInputBindingDescription = .{ .binding = 0, .stride = @sizeOf(Vertex), .input_rate = .vertex };
+    const attributes = [_]vk.VertexInputAttributeDescription{
+        .{ .location = 0, .binding = 0, .format = .r32g32_sfloat, .offset = 0 },
+        .{ .location = 1, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(Vertex, "r") },
+    };
     const dynamic_states = [_]vk.DynamicState{ .viewport, .scissor };
     const blend_attachment: vk.PipelineColorBlendAttachmentState = .{
         .blend_enable = .false,
@@ -199,7 +233,12 @@ pub fn renderTriangle(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![
         .p_next = &rendering_info,
         .stage_count = stages.len,
         .p_stages = &stages,
-        .p_vertex_input_state = &.{},
+        .p_vertex_input_state = &.{
+            .vertex_binding_description_count = 1,
+            .p_vertex_binding_descriptions = @ptrCast(&binding),
+            .vertex_attribute_description_count = attributes.len,
+            .p_vertex_attribute_descriptions = &attributes,
+        },
         .p_input_assembly_state = &.{ .topology = .triangle_list, .primitive_restart_enable = .false },
         .p_viewport_state = &.{ .viewport_count = 1, .scissor_count = 1 },
         .p_rasterization_state = &.{
@@ -239,14 +278,13 @@ pub fn renderTriangle(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![
     const pipeline = pipelines[0];
     defer dev.destroyPipeline(pipeline, null);
 
-    // --- Record: draw the triangle, then copy image → buffer ----------------
+    // --- Record: draw the quads, then copy image → buffer -------------------
     const pool = try dev.createCommandPool(&.{ .queue_family_index = family }, null);
     defer dev.destroyCommandPool(pool, null);
     var cmd: vk.CommandBuffer = undefined;
     try dev.allocateCommandBuffers(&.{ .command_pool = pool, .level = .primary, .command_buffer_count = 1 }, @ptrCast(&cmd));
 
     try dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit_bit = true } });
-
     transition(dev, cmd, image, full_range, .undefined, .color_attachment_optimal, .{}, .{ .color_attachment_write_bit = true }, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true });
 
     const color_attachment: vk.RenderingAttachmentInfo = .{
@@ -268,11 +306,13 @@ pub fn renderTriangle(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![
     dev.cmdBindPipeline(cmd, .graphics, pipeline);
     dev.cmdSetViewport(cmd, 0, &.{.{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }});
     dev.cmdSetScissor(cmd, 0, &.{.{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = width, .height = height } }});
-    dev.cmdDraw(cmd, 3, 1, 0, 0);
+    if (vertex_count > 0) {
+        dev.cmdBindVertexBuffers(cmd, 0, &.{vbuf}, &.{0});
+        dev.cmdDraw(cmd, vertex_count, 1, 0, 0);
+    }
     dev.cmdEndRendering(cmd);
 
     transition(dev, cmd, image, full_range, .color_attachment_optimal, .transfer_src_optimal, .{ .color_attachment_write_bit = true }, .{ .transfer_read_bit = true }, .{ .color_attachment_output_bit = true }, .{ .transfer_bit = true });
-
     dev.cmdCopyImageToBuffer(cmd, image, .transfer_src_optimal, buffer, &.{.{
         .buffer_offset = 0,
         .buffer_row_length = 0,
@@ -283,7 +323,6 @@ pub fn renderTriangle(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![
     }});
     try dev.endCommandBuffer(cmd);
 
-    // --- Submit, wait, read back --------------------------------------------
     const submit: vk.SubmitInfo = .{ .command_buffer_count = 1, .p_command_buffers = @ptrCast(&cmd) };
     try dev.queueSubmit(queue, &.{submit}, .null_handle);
     try dev.queueWaitIdle(queue);

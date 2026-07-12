@@ -18,6 +18,7 @@ pub const components = @import("components.zig");
 pub const world = @import("world.zig");
 pub const systems = @import("systems.zig");
 pub const scene = @import("scene.zig");
+pub const render = @import("render.zig");
 
 pub const World = world.World;
 pub const Scene = scene.Scene;
@@ -36,6 +37,7 @@ test {
     _ = world;
     _ = systems;
     _ = scene;
+    _ = render;
 }
 
 test "engine module assembles all ports" {

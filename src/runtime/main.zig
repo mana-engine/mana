@@ -56,13 +56,12 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    if (render_out) |path| return runRender(out, io, gpa, path);
-
     const pkg = pkg_path orelse {
         try out.writeAll("usage: mana <game-package-dir> [--watch] [--render <out.png>]\n");
         try out.flush();
         return;
     };
+    if (render_out) |path| return runRender(out, io, gpa, pkg, path);
     if (watch) return runWatch(out, io, gpa, pkg);
     return runOnce(out, io, gpa, pkg);
 }
@@ -88,19 +87,30 @@ fn checkScriptApi(out: *Io.Writer, manifest: Manifest) !void {
     }
 }
 
-/// Render one offscreen frame to a PNG (ADR 0006 M1: a cleared image). The Vulkan
-/// branch is comptime-selected, so a default (null-backend) build never references
-/// Vulkan and simply reports that rendering is not compiled in.
-fn runRender(out: *Io.Writer, io: Io, gpa: Allocator, path: []const u8) !void {
+/// Render a package's scene to a PNG (ADR 0006 M3): iso-project each entity's
+/// transform (via `engine.render.project`) and draw it as a quad. The Vulkan branch
+/// is comptime-selected, so a default (null-backend) build never references Vulkan
+/// and just reports rendering is not compiled in.
+fn runRender(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, path: []const u8) !void {
     if (engine.gpu.backend == .vulkan) {
-        const w: u32 = 256;
-        const h: u32 = 256;
-        const pixels = try engine.gpu.vk.renderTriangle(gpa, w, h, .{ 0.10, 0.12, 0.18, 1.0 });
+        const manifest = try loadManifest(io, gpa, pkg);
+        defer manifest_mod.free(gpa, manifest);
+        try checkScriptApi(out, manifest);
+        const scene_path = try std.fs.path.join(gpa, &.{ pkg, manifest.entry_scene });
+        defer gpa.free(scene_path);
+        var world = try engine.scene.loadWorldFromFile(gpa, io, Io.Dir.cwd(), scene_path);
+        defer world.deinit();
+
+        const view: engine.render.View = .{ .width = 512, .height = 512, .tile = .{ .half_w = 30, .half_h = 15, .z_height = 20 } };
+        const quads = try engine.render.project(gpa, &world, view, &engine.render.default_palette);
+        defer gpa.free(quads);
+
+        const pixels = try engine.gpu.vk.renderScene(gpa, view.width, view.height, quads, .{ 0.09, 0.10, 0.14, 1.0 });
         defer gpa.free(pixels);
-        const bytes = try data.png.encode(gpa, w, h, pixels);
+        const bytes = try data.png.encode(gpa, view.width, view.height, pixels);
         defer gpa.free(bytes);
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
-        try out.print("mana: rendered {d}x{d} → {s} ({d} bytes)\n", .{ w, h, path, bytes.len });
+        try out.print("mana: rendered '{s}' — {d} entities, {d}x{d} → {s}\n", .{ manifest.name, world.count(), view.width, view.height, path });
     } else {
         try out.writeAll("mana: rendering not compiled in — rebuild with -Denable-vulkan\n");
     }

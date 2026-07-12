@@ -8,6 +8,9 @@ const std = @import("std");
 const core = @import("core");
 const build_options = @import("build_options");
 
+/// Plain-data quad the engine hands the backend to draw (no Vulkan types).
+pub const Quad = @import("types.zig").Quad;
+
 /// Available GPU backends, selected at comptime via build options.
 pub const Backend = enum { null_backend, vulkan };
 
