@@ -45,9 +45,9 @@ const sandbox_base_fns = [_][:0]const u8{
     "rawlen",
 };
 
-/// Whole library tables copied by reference into a sandboxed `_ENV` as-is:
-/// deterministic, no OS/IO surface (ADR 0003 §7). `math` is handled separately
-/// below since its RNG entry points must be stripped first.
+/// Whole library tables exposed in a sandboxed `_ENV` (as a per-`_ENV` copy, see
+/// `pushSandboxEnv`): deterministic, no OS/IO surface (ADR 0003 §7). `math` is
+/// handled separately below since its RNG entry points must be stripped first.
 const sandbox_whole_libs = [_][:0]const u8{ "string", "table", "coroutine", "utf8" };
 
 /// `math` fields removed for determinism (ADR 0003 §7): nondeterministic global
@@ -82,7 +82,9 @@ pub const State = struct {
 
         // Strip math's nondeterministic entry points once, on the one real
         // `math` table this state has. Never exposed to scripts directly
-        // either way (only via the per-script `_ENV` built below).
+        // either way (only a per-`_ENV` copy is, built below). Proof: `math`
+        // was just opened by `openMath` above and nothing has touched the
+        // global since, so it is still the library table.
         std.debug.assert(l.getGlobal("math") == .table);
         for (sandbox_math_excluded) |name| {
             l.pushNil();
@@ -100,29 +102,66 @@ pub const State = struct {
     }
 
     /// Push a fresh sandboxed environment table (ADR 0003 §7) onto the Lua
-    /// stack: an explicit allowlist of base functions, whole safe libraries,
-    /// `math` minus its RNG, and `print` rerouted to the engine log (never raw
-    /// stdout). Every script module gets its own table from this call, even
-    /// though all share the one `lua_State` above (§8) — the libraries are
-    /// shared references (safe: they carry no identity-sensitive state), the
-    /// table itself is not.
+    /// stack: an explicit allowlist of base functions, safe libraries, `math`
+    /// minus its RNG, and `print` rerouted to the engine log (never raw
+    /// stdout). Every script module gets its own `_ENV` from this call, and its
+    /// own **per-`_ENV` shallow copy** of each library table (§8 isolation).
+    /// The copy is what stops one script from corrupting a stdlib function for
+    /// its siblings sharing this one `lua_State`: because `rawset` is itself an
+    /// allowlisted base function, a single shared (even read-only-proxied)
+    /// library table could be rewritten via `rawset(string, "upper", …)` and
+    /// poison every sibling — a distinct table per `_ENV` closes that hole
+    /// outright. A shallow copy suffices: the entries are immutable C functions
+    /// (and, in `math`, immutable number constants), so the copies share the
+    /// function objects but not the table any script can mutate. Base functions
+    /// and `print` are copied by reference on purpose — they are values, not
+    /// mutable containers, and each `_ENV` is itself private, so reassigning
+    /// e.g. `pairs` inside one script never touches another.
     pub fn pushSandboxEnv(self: *State) void {
         const l = self.lua;
         l.newTable();
 
         for (sandbox_base_fns) |name| {
+            // Proof: opened by `openBase` in `init`; the base allowlist names
+            // only functions `openBase` installs, so each global is a function.
             std.debug.assert(l.getGlobal(name) == .function);
             l.setField(-2, name);
         }
         for (sandbox_whole_libs) |name| {
-            std.debug.assert(l.getGlobal(name) == .table);
+            self.pushLibCopy(name); // fresh shallow copy per `_ENV`
             l.setField(-2, name);
         }
-        std.debug.assert(l.getGlobal("math") == .table);
+        self.pushLibCopy("math"); // already RNG-stripped in `init`
         l.setField(-2, "math");
 
         l.pushFunction(zlua.wrap(sandboxPrint));
         l.setField(-2, "print");
+    }
+
+    /// Push a fresh shallow copy of the library table currently bound to global
+    /// `name`. The new table holds the same key→value entries, but is a
+    /// distinct table, so mutating it (including via `rawset`) cannot affect the
+    /// original or any other copy — the per-`_ENV` isolation `pushSandboxEnv`
+    /// relies on. Copy writes go through `setTableRaw` so a hypothetical
+    /// metatable on the source could never intercept them.
+    fn pushLibCopy(self: *State, name: [:0]const u8) void {
+        const l = self.lua;
+        l.newTable();
+        const dest = l.getTop(); // absolute index; stable as the stack grows
+        // Proof: every `name` passed here was opened in `init` and is untouched,
+        // so the global is still its library table.
+        std.debug.assert(l.getGlobal(name) == .table);
+        l.pushNil(); // first key for the traversal
+        while (l.next(-2)) {
+            // stack top: … src key value. Duplicate both so `setTableRaw`
+            // consumes the copies and leaves the real key for the next step.
+            l.pushValue(-2);
+            l.pushValue(-2);
+            l.setTableRaw(dest);
+            l.pop(1); // drop value; keep key to advance `next`
+        }
+        // `next` returned false having popped the final key; only src remains.
+        l.pop(1); // drop src, leaving the fresh copy (`dest`) on top
     }
 
     /// Load `source` as a script module and rebind its `_ENV` upvalue to a
@@ -138,6 +177,9 @@ pub const State = struct {
         const chunk_index = l.getTop();
         self.pushSandboxEnv();
         const upvalue_name = try l.setUpvalue(chunk_index, 1);
+        // Proof: `loadString` compiled a top-level chunk, whose upvalue 1 is
+        // always `_ENV` (the Lua 5.4 compiler emits it unconditionally); see the
+        // doc above. `setUpvalue` already errored if index 1 were out of range.
         std.debug.assert(std.mem.eql(u8, upvalue_name, "_ENV"));
     }
 };
@@ -289,4 +331,26 @@ test "sandbox: an implicit global set by a script in one Sim is invisible to ano
     try b.lua.protectedCall(.{ .results = 1 });
     try std.testing.expectEqual(zlua.LuaType.nil, b.lua.typeOf(-1));
     b.lua.pop(1);
+}
+
+test "sandbox: one script cannot corrupt a stdlib function for a sibling in the same State" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    // Script A, in one `_ENV`, poisons `string` two ways: a plain reassignment
+    // (which routes through no metamethod) and a `rawset` (which bypasses any
+    // read-only metatable). Both must stay confined to A's own copy.
+    try state.loadSandboxed(
+        \\string.upper = function() return "PWNED" end
+        \\rawset(string, "lower", function() return "PWNED2" end)
+    );
+    try state.lua.protectedCall(.{ .results = 0 });
+
+    // Script B, loaded into a FRESH `_ENV` on the SAME State (same `lua_State`),
+    // must still see the real `string.upper`/`string.lower`.
+    try state.loadSandboxed("return string.upper('ok'), string.lower('OK')");
+    try state.lua.protectedCall(.{ .results = 2 });
+    try std.testing.expectEqualStrings("ok", try state.lua.toString(-1));
+    try std.testing.expectEqualStrings("OK", try state.lua.toString(-2));
+    state.lua.pop(2);
 }
