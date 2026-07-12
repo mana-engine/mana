@@ -1,6 +1,6 @@
 # 0011. Character controller: move-and-slide via the command buffer
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-12
 
 ## Context
