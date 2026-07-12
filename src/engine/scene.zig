@@ -11,6 +11,7 @@ const components = @import("components.zig");
 const World = @import("world.zig").World;
 
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 
 /// One entity as written in a scene file: a name plus whichever components are
 /// present. New built-in components appear here as new optional fields.
@@ -52,6 +53,27 @@ pub fn toWorld(gpa: Allocator, scene: Scene) World.Error!World {
     errdefer world.deinit();
     try load(scene, &world);
     return world;
+}
+
+/// Read `path` (relative to `base`), parse it, and build a fresh `World`. This is
+/// the I/O convenience over the pure `parse`/`toWorld`; determinism tests use the
+/// pure path instead. Caller owns the returned world.
+pub fn loadWorldFromFile(gpa: Allocator, io: Io, base: Io.Dir, path: []const u8) !World {
+    const src = try base.readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0);
+    defer gpa.free(src);
+    const scene = try parse(gpa, src);
+    defer free(gpa, scene);
+    return toWorld(gpa, scene);
+}
+
+/// Hot-reload policy (ADR 0005 §2, §3): rebuild `world` from `path`, **last-good-
+/// wins**. A new world is built first; only on success is the old one replaced. If
+/// reading or parsing fails, `world` is left untouched and the error is returned —
+/// so a file saved mid-edit never installs a half-loaded or empty world.
+pub fn reloadWorldFromFile(gpa: Allocator, io: Io, base: Io.Dir, path: []const u8, world: *World) !void {
+    const next = try loadWorldFromFile(gpa, io, base, path);
+    world.deinit();
+    world.* = next;
 }
 
 const testing = std.testing;

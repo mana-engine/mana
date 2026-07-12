@@ -6,12 +6,14 @@ const std = @import("std");
 const core = @import("core");
 
 pub const zon = @import("zon.zig");
+pub const watch = @import("watch.zig");
 
 // Ergonomic re-exports.
 pub const serialize = zon.serialize;
 pub const parse = zon.parse;
 pub const parseLenient = zon.parseLenient;
 pub const free = zon.free;
+pub const Watcher = watch.Watcher;
 
 /// Marker that the module is wired into the build graph.
 pub const ready = core.ready;
@@ -19,4 +21,5 @@ pub const ready = core.ready;
 test {
     std.testing.refAllDecls(@This());
     _ = zon;
+    _ = watch;
 }

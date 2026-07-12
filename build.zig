@@ -120,17 +120,20 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
 
-    // Integration tests (tests/) — headless engine runs + determinism. These may
-    // reference the game corpus and fixtures; nothing in src/** may.
-    const integration = b.createModule(.{
-        .root_source_file = b.path("tests/determinism.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "core", .module = core },
-            .{ .name = "engine", .module = engine },
-        },
-    });
-    const integration_tests = b.addTest(.{ .root_module = integration });
-    test_step.dependOn(&b.addRunArtifact(integration_tests).step);
+    // Integration tests (tests/) — headless engine runs, determinism, hot reload.
+    // These may reference the game corpus and fixtures; nothing in src/** may.
+    const integration_imports = [_]std.Build.Module.Import{
+        .{ .name = "core", .module = core },
+        .{ .name = "data", .module = data },
+        .{ .name = "engine", .module = engine },
+    };
+    for ([_][]const u8{ "tests/determinism.zig", "tests/hot_reload.zig" }) |path| {
+        const mod = b.createModule(.{
+            .root_source_file = b.path(path),
+            .target = target,
+            .optimize = optimize,
+            .imports = &integration_imports,
+        });
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
+    }
 }
