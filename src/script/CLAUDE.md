@@ -37,3 +37,30 @@ task — only the dependency is wired in (GitHub #3 spike).
   unreferenced decl. Add a dedicated `b.addTest` rooted at `lua.zig` (with the `zlua`
   import) under `-Denable-lua` so `zig build -Denable-lua test` actually runs it;
   verify it truly runs (force a wrong expected value once and watch it fail).
+- **`mana.zig` / `handle.zig` (issue #5) piggyback on that same `lua_mod` test
+  target** — no further `build.zig` changes needed. `lua.zig` does
+  `const mana = @import("mana.zig");` and calls `mana.pushManaTable` for real
+  (from `pushSandboxEnv`), which forces full analysis of `mana.zig`, which in
+  turn genuinely uses (not just imports) `handle.zig`'s types — so both files'
+  `test` blocks land in the same binary `lua_mod` already builds. `handle.zig`
+  has no `zlua` import at all (pure index/generation packing); `mana.zig` is the
+  only new file that touches Lua directly.
+- **`script` intentionally does NOT import `ecs`.** The opaque handle bit layout
+  (u32 generation high, u32 index low, packed into a 64-bit Lua integer) is
+  duplicated in `handle.zig` rather than reusing `ecs.Entity.pack`/`unpack`,
+  because ADR 0003 §4 pins that layout as part of the *scripting* ABI itself
+  (own versioning story), and the module import DAG has `script` depend on
+  `core` only. `handle.Registry` is `script`'s own, `State`-owned live-generation
+  table (not `ecs.EntityAllocator`) — it starts empty and stays empty until a
+  later engine → script wiring task begins mirroring real spawns/despawns into
+  it via `setGeneration`; until then `mana.is_valid` is honestly `false` for
+  every handle, which is correct (no live entities exist without that wiring).
+- **Most of ADR 0003 §2's v1 surface needs a live `Sim`/`World` `script` cannot
+  reach yet** (`position`, `set_velocity`, `get`, `set`, `spawn`, `despawn`,
+  `after`, `every`, `cancel`, `now`, `random`, `random_int`) — component
+  storage, the sim clock, the sim's seeded `core.Rng`, a spawn/despawn command
+  buffer, and the timer wheel are all engine-owned, and nothing wires a
+  `script.State` into `Sim` yet. Do not add fake/stub implementations for these;
+  an absent `mana` key is the honest, checkable signal, exactly like a missing
+  event-handler key meaning "no handler" elsewhere in the ADR. That wiring is
+  its own future task.

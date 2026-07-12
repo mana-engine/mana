@@ -81,6 +81,9 @@ deliberately minimal — grow only via new ADRs):
 
 **Diagnostics**
 - `mana.log(level, msg)` — `level` is an enum-like literal (`.info`/`.warn`/`.error`).
+  In Lua this is passed as the plain string `"info"`/`"warn"`/`"error"` (the
+  `.info` dot-notation is Zig shorthand, not valid Lua syntax); an unknown level
+  is an argument error.
 
 Mutations (`set_velocity`, `set`, `spawn`, `despawn`) are **deferred and
 transactional**: each records intent into a per-invocation command buffer that the
