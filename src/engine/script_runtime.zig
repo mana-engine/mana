@@ -223,6 +223,12 @@ const LuaRuntime = struct {
                 hc.oom = true;
             };
         }
+        fn setPosition(ctx: *anyopaque, handle: u64, pos: core.Vec3) void {
+            const hc = cast(ctx);
+            hc.commands.setTransform(hc.gpa, Entity.unpack(handle), .{ .pos = pos }) catch {
+                hc.oom = true;
+            };
+        }
         fn despawn(ctx: *anyopaque, handle: u64) void {
             const hc = cast(ctx);
             hc.commands.despawn(hc.gpa, Entity.unpack(handle)) catch {
@@ -286,6 +292,7 @@ const LuaRuntime = struct {
             .position = position,
             .now = now,
             .set_velocity = setVelocity,
+            .set_position = setPosition,
             .despawn = despawn,
             .spawn = spawn,
             .timer_after = timerAfter,

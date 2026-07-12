@@ -49,6 +49,9 @@ pub const Host = struct {
         /// next flush (deferred mutation, ADR 0003 §2). A stale handle is dropped at
         /// flush; allocation failure is recorded engine-side and aborts the tick.
         set_velocity: *const fn (ctx: *anyopaque, handle: u64, v: core.Vec3) void,
+        /// Queue a position change on `handle` (a discrete teleport, ADR 0020),
+        /// applied at the next flush. Same deferred model as `set_velocity`.
+        set_position: *const fn (ctx: *anyopaque, handle: u64, pos: core.Vec3) void,
         /// Queue a despawn of `handle`, applied at the next flush (deferred). A stale
         /// handle is dropped at flush.
         despawn: *const fn (ctx: *anyopaque, handle: u64) void,
@@ -83,6 +86,9 @@ pub const Host = struct {
     pub fn setVelocity(self: Host, handle: u64, v: core.Vec3) void {
         self.vtable.set_velocity(self.ctx, handle, v);
     }
+    pub fn setPosition(self: Host, handle: u64, pos: core.Vec3) void {
+        self.vtable.set_position(self.ctx, handle, pos);
+    }
     pub fn despawn(self: Host, handle: u64) void {
         self.vtable.despawn(self.ctx, handle);
     }
@@ -111,6 +117,7 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         t: f64,
         last_despawned: u64 = 0,
         last_vel: core.Vec3 = .{ .x = 0, .y = 0, .z = 0 },
+        last_pos: core.Vec3 = .{ .x = 0, .y = 0, .z = 0 },
         last_spawn_name: []const u8 = "",
         last_spawn_pos: core.Vec3 = .{ .x = 0, .y = 0, .z = 0 },
         last_ref: i32 = 0,
@@ -131,6 +138,10 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         fn setVelocity(ctx: *anyopaque, handle: u64, v: core.Vec3) void {
             _ = handle;
             fromOpaque(ctx).last_vel = v;
+        }
+        fn setPosition(ctx: *anyopaque, handle: u64, pos: core.Vec3) void {
+            _ = handle;
+            fromOpaque(ctx).last_pos = pos;
         }
         fn despawn(ctx: *anyopaque, handle: u64) void {
             fromOpaque(ctx).last_despawned = handle;
@@ -164,6 +175,7 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
             .position = position,
             .now = now,
             .set_velocity = setVelocity,
+            .set_position = setPosition,
             .despawn = despawn,
             .spawn = spawn,
             .timer_after = timerAfter,
@@ -181,6 +193,8 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
 
     host.setVelocity(0, .{ .x = 4, .y = 5, .z = 6 });
     try testing.expect(fake.last_vel.approxEql(.{ .x = 4, .y = 5, .z = 6 }, 1e-6));
+    host.setPosition(0, .{ .x = 1, .y = 2, .z = 3 });
+    try testing.expect(fake.last_pos.approxEql(.{ .x = 1, .y = 2, .z = 3 }, 1e-6));
     host.despawn(42);
     try testing.expectEqual(@as(u64, 42), fake.last_despawned);
     try testing.expectEqual(@as(u64, 77), host.spawn("segment", .{ .x = 7, .y = 8, .z = 9 }));
