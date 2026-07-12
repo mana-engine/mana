@@ -27,7 +27,7 @@ core → (nothing above; only std)
 data, ecs, gpu, platform, script → core
 gpu → may import Vulkan (ONLY place); null backend is the real default
 platform → SDL3 adapter (deferred); headless adapter is the real default
-engine → core + data + ecs + gpu + platform  (+ script once its ADR lands)
+engine → core + data + ecs + gpu + platform + physics + script
 runtime (exe) + tools → engine
 ```
 `runtime` knows the `game.zon` *format* only. **Nothing in `src/**` may reference
