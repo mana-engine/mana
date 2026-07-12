@@ -41,6 +41,16 @@ pub fn free(gpa: Allocator, manifest: Manifest) void {
     data.free(gpa, manifest);
 }
 
+/// The package-relative files whose changes should trigger a hot reload: the
+/// manifest itself plus every scene it references. Returned paths borrow from
+/// `manifest`; the slice is owned by `gpa` (free it, not the elements).
+pub fn watchPaths(gpa: Allocator, manifest: Manifest) Allocator.Error![]const []const u8 {
+    const paths = try gpa.alloc([]const u8, manifest.scenes.len + 1);
+    paths[0] = "game.zon";
+    for (manifest.scenes, paths[1..]) |scene, *dst| dst.* = scene;
+    return paths;
+}
+
 const testing = std.testing;
 
 test "manifest: parse a minimal game.zon" {
@@ -75,6 +85,26 @@ test "manifest: parse an optional native module" {
     defer free(testing.allocator, m);
     try testing.expect(m.native_module != null);
     try testing.expectEqual(@as(u32, 1), m.native_module.?.abi_version);
+}
+
+test "manifest: watchPaths lists the manifest plus every referenced scene" {
+    const src =
+        \\.{
+        \\    .name = "m",
+        \\    .version = "1",
+        \\    .entry_scene = "scenes/a.zon",
+        \\    .scenes = .{ "scenes/a.zon", "scenes/b.zon" },
+        \\}
+    ;
+    const m = try parse(testing.allocator, src);
+    defer free(testing.allocator, m);
+
+    const paths = try watchPaths(testing.allocator, m);
+    defer testing.allocator.free(paths);
+    try testing.expectEqual(@as(usize, 3), paths.len);
+    try testing.expectEqualStrings("game.zon", paths[0]);
+    try testing.expectEqualStrings("scenes/a.zon", paths[1]);
+    try testing.expectEqualStrings("scenes/b.zon", paths[2]);
 }
 
 test "manifest: unknown fields are tolerated" {

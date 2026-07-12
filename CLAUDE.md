@@ -164,3 +164,17 @@ ADR. Building it is a separate task that adds the ziglua dependency (ask first).
   (`if (cond) @compileError("…") else .value`); a following `break :blk x` is
   unreachable-code error.
 - **Windows/mise:** a new `mise.toml` must be `mise trust`ed before tools resolve.
+- **`zig build test` does not compile `pub fn main`.** In test mode only `test`
+  blocks and decls they reference are compiled; `main` (and anything only it calls)
+  is skipped. An API misuse reachable only from `main` passes `zig build test` and
+  fails `zig build` (install). This is exactly why `check` runs *both* build and
+  test, and why hk pre-commit compiles as well as tests. Don't trust a green `test`
+  alone for runner/entry-point code.
+- **Zig 0.16 sleep:** `std.Thread.sleep` is gone. Use `std.Io.sleep(io, dur, clock)`
+  with `Io.Duration.fromMilliseconds(n)` and clock `.awake` (the monotonic one;
+  members are `real`/`awake`/`boot`/`cpu_process`/`cpu_thread`).
+- **Zig 0.16 fs moved under `Io`:** `std.Io.Dir` (`.cwd()`, `openFile`,
+  `statFile(io, path, .{})` → `Stat` with `size`/`mtime.nanoseconds`,
+  `readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0)` for a `[:0]u8`,
+  `writeFile(io, .{ .sub_path, .data })`, `deleteFile`). `std.testing.io` +
+  `std.testing.tmpDir(.{})` give a real Io and temp dir for file tests.

@@ -30,9 +30,21 @@ pub const Watcher = struct {
     }
 
     pub fn deinit(self: *Watcher) void {
-        for (self.entries.items) |e| self.gpa.free(e.path);
+        self.clear();
         self.entries.deinit(self.gpa);
         self.* = undefined;
+    }
+
+    /// Drop all watched paths (retaining capacity), so a fresh set can be added —
+    /// used when a manifest change alters which files should be watched.
+    pub fn clear(self: *Watcher) void {
+        for (self.entries.items) |e| self.gpa.free(e.path);
+        self.entries.clearRetainingCapacity();
+    }
+
+    /// Number of files currently watched.
+    pub fn watchedCount(self: *const Watcher) usize {
+        return self.entries.items.len;
     }
 
     /// Start watching `path` (relative to the base dir). Records current state so
@@ -98,6 +110,30 @@ test "watcher: reports create, modify, and delete" {
     try tmp.dir.deleteFile(io, "s.zon"); // existence flips
     try testing.expect(w.poll(io));
     try testing.expect(!w.poll(io));
+}
+
+test "watcher: multiple files, and clear drops the set" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "a", .data = "1" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b", .data = "1" });
+
+    var w = Watcher.init(testing.allocator, tmp.dir);
+    defer w.deinit();
+    try w.add(io, "a");
+    try w.add(io, "b");
+    try testing.expectEqual(@as(usize, 2), w.watchedCount());
+    try testing.expect(!w.poll(io));
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "b", .data = "222" }); // b changed
+    try testing.expect(w.poll(io));
+
+    w.clear();
+    try testing.expectEqual(@as(usize, 0), w.watchedCount());
+    try tmp.dir.writeFile(io, .{ .sub_path = "a", .data = "3333" });
+    try testing.expect(!w.poll(io)); // nothing watched
 }
 
 test "watcher: watching a missing file, then creating it, is a change" {
