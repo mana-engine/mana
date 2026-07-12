@@ -15,6 +15,7 @@ const ecs = @import("ecs");
 const event = @import("event.zig");
 const command = @import("command.zig");
 const prototype = @import("prototype.zig");
+const timer = @import("timer.zig");
 const World = @import("world.zig").World;
 
 const Entity = ecs.Entity;
@@ -31,6 +32,9 @@ pub const DispatchCtx = struct {
     gpa: Allocator,
     now_seconds: f64,
     prototypes: prototype.Registry = .{},
+    /// The Sim's timer wheel, so `mana.after`/`every` can schedule Lua callbacks on
+    /// it and `advanceTimers` can fire them host-live (ADR 0019).
+    timers: *timer.Timers,
 };
 
 /// The Sim's script runtime: the Lua-backed one under `-Denable-lua`, else a
@@ -44,6 +48,9 @@ const HandlerKey = enum {
     on_scene_enter,
     on_spawn,
     on_collision_begin,
+    /// Lua timer callbacks (ADR 0019) — one breaker slot for all of them, so an
+    /// error-storm from a repeating timer is disabled like any handler key.
+    timer,
 };
 
 /// Consecutive errored dispatches of the *same* handler key, with no success in
@@ -81,12 +88,78 @@ const LuaRuntime = struct {
     /// per `HandlerKey`), zero heap allocation; reset wholesale by `loadHandlers`.
     breakers: std.EnumArray(HandlerKey, BreakerState) = .initFill(.{}),
 
-    /// Tear down the interpreter, if any. `gpa` is unused (the `State` owns the
-    /// allocator it was built with); taken for signature parity with `NoopRuntime`.
+    /// Live Lua-timer records (ADR 0019), each heap-allocated so its address is
+    /// stable while the timer wheel holds a closure pointing at it. Owns the Lua
+    /// callback reference until the timer fires (one-shot), is cancelled, or the
+    /// runtime tears down.
+    lua_timers: std.ArrayList(*LuaTimerRecord) = .empty,
+
+    /// One scheduled Lua timer: the callback reference plus the wheel handle it maps
+    /// to (for `mana.cancel`) and whether it repeats (a one-shot retires itself when
+    /// it fires). The wheel closure's `context` is a `*LuaTimerRecord`.
+    const LuaTimerRecord = struct {
+        runtime: *LuaRuntime,
+        ref: i32,
+        repeating: bool,
+        handle: timer.Handle,
+    };
+
+    /// Tear down the interpreter and release every outstanding timer reference and
+    /// record (ADR 0019) — before the `State` (whose Lua owns the refs) is destroyed.
     pub fn deinit(self: *LuaRuntime, gpa: Allocator) void {
-        _ = gpa;
+        if (self.state) |*s| {
+            for (self.lua_timers.items) |rec| s.releaseTimerRef(rec.ref);
+        }
+        for (self.lua_timers.items) |rec| gpa.destroy(rec);
+        self.lua_timers.deinit(gpa);
         if (self.state) |*s| s.deinit();
         self.* = .{};
+    }
+
+    /// Release a timer record's reference, unlink it, and free it (ADR 0019). Called
+    /// when a one-shot fires or a timer is cancelled.
+    fn retireTimer(self: *LuaRuntime, gpa: Allocator, rec: *LuaTimerRecord) void {
+        if (self.state) |*s| s.releaseTimerRef(rec.ref);
+        for (self.lua_timers.items, 0..) |r, i| {
+            if (r == rec) {
+                _ = self.lua_timers.swapRemove(i);
+                break;
+            }
+        }
+        gpa.destroy(rec);
+    }
+
+    /// Retire the timer record for wheel `handle`, if any (the `mana.cancel` path).
+    fn retireByHandle(self: *LuaRuntime, gpa: Allocator, handle: timer.Handle) void {
+        for (self.lua_timers.items) |rec| {
+            if (rec.handle.index == handle.index and rec.handle.generation == handle.generation) {
+                self.retireTimer(gpa, rec);
+                return;
+            }
+        }
+    }
+
+    /// The wheel closure that fires a Lua timer (ADR 0019). Runs host-live (the host
+    /// is installed by `advanceTimers` around the wheel advance), inside the §9
+    /// command-buffer transaction: a throwing callback is rolled back and reported,
+    /// only OOM (recorded on the host ctx) aborts. A one-shot retires afterward.
+    fn fireLuaTimer(context: *anyopaque, world: *World) void {
+        _ = world;
+        const rec: *LuaTimerRecord = @ptrCast(@alignCast(context));
+        const self = rec.runtime;
+        const s = if (self.state) |*st| st else return;
+        if (self.isDisabled(.timer)) return;
+        // The host installed around the advance carries the command buffer + oom flag.
+        const host = s.host orelse return;
+        const host_ctx: *HostCtx = @ptrCast(@alignCast(host.ctx));
+
+        const mark = host_ctx.commands.mark();
+        const outcome = s.invokeTimerRef(rec.ref);
+        if (outcome == .errored) host_ctx.commands.rollback(host_ctx.world, mark) catch {
+            host_ctx.oom = true;
+        };
+        self.report(.timer, s, outcome);
+        if (!rec.repeating) self.retireTimer(host_ctx.gpa, rec);
     }
 
     /// Load `source` as this Sim's single handler table (ADR 0003 §1), creating
@@ -116,15 +189,19 @@ const LuaRuntime = struct {
         gpa: Allocator,
         now_seconds: f64,
         prototypes: prototype.Registry,
+        timers: *timer.Timers,
+        runtime: *LuaRuntime,
         oom: bool = false,
 
-        fn fromDc(dc: DispatchCtx) HostCtx {
+        fn init(dc: DispatchCtx, runtime: *LuaRuntime) HostCtx {
             return .{
                 .world = dc.world,
                 .commands = dc.commands,
                 .gpa = dc.gpa,
                 .now_seconds = dc.now_seconds,
                 .prototypes = dc.prototypes,
+                .timers = dc.timers,
+                .runtime = runtime,
             };
         }
         fn cast(ctx: *anyopaque) *HostCtx {
@@ -164,6 +241,46 @@ const LuaRuntime = struct {
             };
             return e.pack();
         }
+        fn timerEvery(ctx: *anyopaque, ref: i32, interval: f32) u64 {
+            return cast(ctx).scheduleTimer(ref, interval, true);
+        }
+        fn timerAfter(ctx: *anyopaque, ref: i32, delay: f32) u64 {
+            return cast(ctx).scheduleTimer(ref, delay, false);
+        }
+        /// Reference-owning schedule: on any allocation failure the ref is released
+        /// (never leaked) and an invalid handle returned; `oom` aborts the tick.
+        fn scheduleTimer(hc: *HostCtx, ref: i32, seconds: f32, repeating: bool) u64 {
+            const rec = hc.gpa.create(LuaTimerRecord) catch return hc.timerOom(ref);
+            rec.* = .{ .runtime = hc.runtime, .ref = ref, .repeating = repeating, .handle = undefined };
+            hc.runtime.lua_timers.append(hc.gpa, rec) catch {
+                hc.gpa.destroy(rec);
+                return hc.timerOom(ref);
+            };
+            const cb: timer.Callback = .{ .closure = .{ .context = rec, .func = fireLuaTimer } };
+            const handle = (if (repeating)
+                hc.timers.every(hc.gpa, seconds, cb)
+            else
+                hc.timers.after(hc.gpa, seconds, cb)) catch {
+                _ = hc.runtime.lua_timers.pop();
+                hc.gpa.destroy(rec);
+                return hc.timerOom(ref);
+            };
+            rec.handle = handle;
+            return handle.pack();
+        }
+        /// Record OOM, release the (unscheduled) callback reference, and hand back an
+        /// invalid handle. Keeps `scheduleTimer` honest on the failure path.
+        fn timerOom(hc: *HostCtx, ref: i32) u64 {
+            hc.oom = true;
+            if (hc.runtime.state) |*s| s.releaseTimerRef(ref);
+            return timer.Handle.pack(.{ .index = std.math.maxInt(u32), .generation = 0 });
+        }
+        fn timerCancel(ctx: *anyopaque, handle: u64) void {
+            const hc = cast(ctx);
+            const h = timer.Handle.unpack(handle);
+            hc.timers.cancel(h);
+            hc.runtime.retireByHandle(hc.gpa, h);
+        }
         const vtable: script.lua.Host.VTable = .{
             .is_valid = isValid,
             .position = position,
@@ -171,6 +288,9 @@ const LuaRuntime = struct {
             .set_velocity = setVelocity,
             .despawn = despawn,
             .spawn = spawn,
+            .timer_after = timerAfter,
+            .timer_every = timerEvery,
+            .timer_cancel = timerCancel,
         };
     };
 
@@ -198,7 +318,7 @@ const LuaRuntime = struct {
         };
         if (self.isDisabled(key)) return;
 
-        var host_ctx: HostCtx = .fromDc(dc);
+        var host_ctx: HostCtx = .init(dc, self);
         s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
         defer s.setHost(null); // the borrowed ctx must not outlive this dispatch
 
@@ -229,7 +349,7 @@ const LuaRuntime = struct {
         const s = if (self.state) |*st| st else return;
         if (self.isDisabled(.on_scene_enter)) return;
 
-        var host_ctx: HostCtx = .fromDc(dc);
+        var host_ctx: HostCtx = .init(dc, self);
         s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
         defer s.setHost(null);
 
@@ -238,6 +358,23 @@ const LuaRuntime = struct {
         if (outcome == .errored) try dc.commands.rollback(dc.world, mark);
         if (host_ctx.oom) return error.OutOfMemory;
         self.report(.on_scene_enter, s, outcome);
+    }
+
+    /// Advance the timer wheel by `dt` (ADR 0019), firing due timers — Lua callbacks
+    /// among them run host-live: the host is installed for the duration so a timer's
+    /// `mana` calls resolve. Native timers fire regardless of the host. Only OOM from
+    /// a Lua timer (a queued mutation or a scheduling failure) propagates and aborts
+    /// the tick; a throwing Lua timer is caught per-callback (see `fireLuaTimer`).
+    pub fn advanceTimers(self: *LuaRuntime, dc: DispatchCtx, dt: f32) Allocator.Error!void {
+        const s = if (self.state) |*st| st else {
+            try dc.timers.advance(dc.gpa, dc.world, dt);
+            return;
+        };
+        var host_ctx: HostCtx = .init(dc, self);
+        s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
+        defer s.setHost(null);
+        try dc.timers.advance(dc.gpa, dc.world, dt);
+        if (host_ctx.oom) return error.OutOfMemory;
     }
 
     /// Read integer field `key` off the loaded handler table, or null. Lets the
@@ -343,6 +480,11 @@ const NoopRuntime = struct {
         _ = dc;
     }
 
+    pub fn advanceTimers(self: *NoopRuntime, dc: DispatchCtx, dt: f32) Allocator.Error!void {
+        _ = self;
+        try dc.timers.advance(dc.gpa, dc.world, dt);
+    }
+
     pub fn handlerFieldInt(self: *NoopRuntime, key: [:0]const u8) ?i64 {
         _ = self;
         _ = key;
@@ -384,11 +526,14 @@ test "circuit breaker: a handler disabled after breaker_threshold consecutive er
     defer world.deinit();
     var commands: command.CommandBuffer = .{};
     defer commands.deinit(std.testing.allocator);
+    var timers: timer.Timers = .{};
+    defer timers.deinit(std.testing.allocator);
     try rt.dispatch(.{ .spawned = .{ .index = 1, .generation = 0 } }, .{
         .world = &world,
         .commands = &commands,
         .gpa = std.testing.allocator,
         .now_seconds = 0,
+        .timers = &timers,
     });
     try std.testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("spawns").?);
 }
@@ -413,6 +558,8 @@ test "circuit breaker: disabling one handler key leaves a different key unaffect
     defer world.deinit();
     var commands: command.CommandBuffer = .{};
     defer commands.deinit(std.testing.allocator);
+    var timers: timer.Timers = .{};
+    defer timers.deinit(std.testing.allocator);
     try rt.dispatch(.{ .collision_begin = .{
         .a = .{ .index = 1, .generation = 0 },
         .b = .{ .index = 2, .generation = 0 },
@@ -421,6 +568,7 @@ test "circuit breaker: disabling one handler key leaves a different key unaffect
         .commands = &commands,
         .gpa = std.testing.allocator,
         .now_seconds = 0,
+        .timers = &timers,
     });
     try std.testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("collisions").?);
 }

@@ -201,6 +201,7 @@ pub const Sim = struct {
             .gpa = self.gpa,
             .now_seconds = now_seconds,
             .prototypes = self.prototypes,
+            .timers = &self.timers,
         };
         // A newly-active scene bootstraps first (ADR 0017/0018): its `on_scene_enter`
         // runs host-live before this tick's other events, so a script can query the
@@ -216,7 +217,9 @@ pub const Sim = struct {
             try self.script_runtime.dispatch(ev, dc);
         }
         self.events.clear();
-        try self.timers.advance(self.gpa, &self.world, self.dt);
+        // Advance timers with the host installed (ADR 0019), so Lua timer callbacks
+        // fire host-live; native timers are unaffected. Only OOM propagates.
+        try self.script_runtime.advanceTimers(dc, self.dt);
         self.tick_count += 1;
     }
 
@@ -502,6 +505,65 @@ test "sim: on_scene_enter is a no-op when enterScene was never called (requires 
     // No enterScene: the handler must never run.
     try sim.run(3);
     try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("fired").?);
+}
+
+test "sim: mana.every fires a Lua timer host-live each interval (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+    const protos = [_]prototype.Prototype{.{ .name = "dot" }};
+
+    var sim = Sim.init(testing.allocator, 1.0); // dt = 1s, so timers fire on whole seconds
+    defer sim.deinit();
+    sim.prototypes = .{ .prototypes = &protos };
+    try sim.loadScript(
+        \\local t = { ticks = 0 }
+        \\function t.on_scene_enter(ev)
+        \\  mana.every(1.0, function()
+        \\    t.ticks = t.ticks + 1
+        \\    mana.spawn("dot", t.ticks, 0, 0)  -- proves the host is live inside the timer
+        \\  end)
+        \\end
+        \\return t
+    );
+    sim.enterScene("board");
+
+    try sim.run(3); // on_scene_enter schedules every(1s); it fires at sim-time 1, 2, 3
+    try testing.expectEqual(@as(i64, 3), sim.script_runtime.handlerFieldInt("ticks").?);
+    try testing.expectEqual(@as(usize, 3), sim.world.count()); // one dot reserved per fire
+}
+
+test "sim: mana.after fires once then never again (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    var sim = Sim.init(testing.allocator, 1.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = { fires = 0 }
+        \\function t.on_scene_enter(ev) mana.after(1.0, function() t.fires = t.fires + 1 end) end
+        \\return t
+    );
+    sim.enterScene("board");
+
+    try sim.run(5); // due at sim-time 1; a one-shot must not re-fire on later ticks
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("fires").?);
+}
+
+test "sim: mana.cancel stops a scheduled timer from firing (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    var sim = Sim.init(testing.allocator, 1.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = { fires = 0 }
+        \\function t.on_scene_enter(ev)
+        \\  local h = mana.every(1.0, function() t.fires = t.fires + 1 end)
+        \\  mana.cancel(h)  -- cancel before it ever fires
+        \\end
+        \\return t
+    );
+    sim.enterScene("board");
+
+    try sim.run(5);
+    try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("fires").?);
 }
 
 /// A one-shot system that spawns a single transform-only entity on its first tick,

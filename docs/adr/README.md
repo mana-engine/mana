@@ -30,4 +30,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0016 | Entity prototypes: named component templates for `mana.spawn` | accepted |
 | 0017 | `on_scene_enter`: a per-scene bootstrap event | accepted |
 | 0018 | A game is data: prototypes are prefabs, scenes instance them, scripts query and drive | proposed |
-| 0019 | Scripted timers: `mana.after`/`every`/`cancel` on the timer wheel | proposed |
+| 0019 | Scripted timers: `mana.after`/`every`/`cancel` on the timer wheel | accepted |

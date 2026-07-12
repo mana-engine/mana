@@ -350,6 +350,30 @@ pub const State = struct {
         return self.invokeHandler(2);
     }
 
+    /// Invoke a Lua timer callback by its registry `ref` (ADR 0019 `mana.after`/
+    /// `every`). Pushes the referenced function and calls it in protected mode with
+    /// no arguments; a throwing callback is caught and reported via the return value
+    /// (§9), never raised. The engine installs the host around timer advance, so the
+    /// callback's `mana` calls resolve. `ref` must be a live reference (the engine
+    /// releases it exactly once, on fire/cancel/teardown — never double-invokes).
+    pub fn invokeTimerRef(self: *State, ref: i32) DispatchOutcome {
+        const l = self.lua;
+        _ = l.getIndexRaw(zlua.registry_index, ref); // push the referenced function
+        l.protectedCall(.{ .args = 0, .results = 0 }) catch {
+            self.captureError();
+            l.pop(1); // the error object
+            return .errored;
+        };
+        return .ok;
+    }
+
+    /// Release a Lua timer callback reference (ADR 0019) — called by the engine when
+    /// a one-shot fires, a timer is cancelled, or on teardown. `luaL_unref` tolerates
+    /// a stale reference, so this is safe to call once per reference.
+    pub fn releaseTimerRef(self: *State, ref: i32) void {
+        self.lua.unref(zlua.registry_index, ref);
+    }
+
     /// Read integer field `key` off the loaded handler table, or null if no table
     /// is loaded or the field is absent/non-integer. Lets the engine observe
     /// handler-declared scalars (and dispatch effects, in tests) without exposing

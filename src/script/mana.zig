@@ -12,11 +12,13 @@
 //! prefers the host when present (authoritative live-world check) and falls back to
 //! this `State`'s own `handle.Registry` when no Sim is dispatching, so its pre-seam
 //! behavior and tests still hold; mutations with no host installed are dropped
-//! (`spawn` returns an invalid handle).
+//! (`spawn` returns an invalid handle). Timers `after`/`every`/`cancel` (ADR 0019)
+//! reference the Lua callback in the registry and schedule it on the engine's wheel
+//! through the host, firing host-live in the dispatch phase.
 //!
 //! The remaining §2 members — `set` (needs a data-component store), `get`, and
-//! `random`/`random_int` (seeded `core.Rng`), plus `after`/`every`/`cancel` — land
-//! as additive host-vtable entries in follow-up slices. Do not add stub/fake
+//! `random`/`random_int` (seeded `core.Rng`) — land as additive host-vtable entries
+//! in follow-up slices. Do not add stub/fake
 //! behavior for them; an absent `mana` key is the honest, checkable signal that a
 //! member is not implemented yet, matching how a missing event-handler key means
 //! "no handler" elsewhere in ADR 0003.
@@ -79,6 +81,18 @@ pub fn pushManaTable(l: *Lua, entities: *const Registry, host: *const ?Host) voi
     l.pushLightUserdata(@ptrCast(host));
     l.pushClosure(zlua.wrap(manaSpawn), 1);
     l.setField(-2, "spawn");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaEvery), 1);
+    l.setField(-2, "every");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaAfter), 1);
+    l.setField(-2, "after");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaCancel), 1);
+    l.setField(-2, "cancel");
 }
 
 /// Read a `*const ?Host` back from closure upvalue `idx` (a light-userdata pointer
@@ -211,6 +225,47 @@ fn manaSpawn(l: *Lua) !i32 {
     return 1;
 }
 
+/// Shared body of `mana.after`/`every` (ADR 0003 §2; ADR 0019): reference the Lua
+/// callback (arg 2) in the registry and schedule it on the engine's timer wheel via
+/// the host, returning the packed timer handle. `repeating` picks one-shot vs.
+/// interval. With no Sim dispatching, the ref is released and an invalid handle
+/// returned (the timer could not be scheduled).
+fn scheduleTimer(l: *Lua, comptime repeating: bool) !i32 {
+    const seconds: f32 = @floatCast(l.checkNumber(1));
+    if (l.typeOf(2) != .function) l.argError(2, "expected a function");
+    l.pushValue(2); // copy the callback to the top for `ref`
+    const ref = l.ref(zlua.registry_index); // refs + pops the copy
+    const timer_handle: u64 = if (hostSlot(l, Lua.upvalueIndex(1)).*) |h|
+        (if (repeating) h.timerEvery(ref, seconds) else h.timerAfter(ref, seconds))
+    else blk: {
+        l.unref(zlua.registry_index, ref); // no host: don't leak the reference
+        break :blk invalid_handle;
+    };
+    l.pushInteger(@bitCast(timer_handle));
+    return 1;
+}
+
+/// `mana.every(interval, fn)` (ADR 0003 §2): call `fn` every `interval` seconds of
+/// sim time (deterministic, tick-derived). Returns a timer handle for `mana.cancel`.
+fn manaEvery(l: *Lua) !i32 {
+    return scheduleTimer(l, true);
+}
+
+/// `mana.after(delay, fn)` (ADR 0003 §2): call `fn` once, `delay` seconds from now.
+/// Returns a timer handle for `mana.cancel`.
+fn manaAfter(l: *Lua) !i32 {
+    return scheduleTimer(l, false);
+}
+
+/// `mana.cancel(h)` (ADR 0003 §2): stop a timer scheduled by `after`/`every` and
+/// release its callback. A stale handle (already fired one-shot, already cancelled)
+/// is a no-op. With no Sim dispatching, a no-op.
+fn manaCancel(l: *Lua) !i32 {
+    const raw: u64 = @bitCast(try l.toInteger(1));
+    if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.timerCancel(raw);
+    return 0;
+}
+
 const testing = std.testing;
 
 test "mana: table shape exposes exactly the wired members (version..despawn); version == 1" {
@@ -231,12 +286,12 @@ test "mana: table shape exposes exactly the wired members (version..despawn); ve
         key_count += 1;
         l.pop(1); // drop value; keep key on the stack to advance `next`
     }
-    try testing.expectEqual(@as(usize, 8), key_count);
+    try testing.expectEqual(@as(usize, 11), key_count);
 
     try testing.expectEqual(zlua.LuaType.number, l.getField(t, "version"));
     try testing.expectEqual(@as(i64, 1), try l.toInteger(-1));
     l.pop(1);
-    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "despawn", "spawn" }) |name| {
+    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "despawn", "spawn", "every", "after", "cancel" }) |name| {
         try testing.expectEqual(zlua.LuaType.function, l.getField(t, name));
         l.pop(1);
     }
