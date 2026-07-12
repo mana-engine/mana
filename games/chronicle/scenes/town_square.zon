@@ -1,0 +1,12 @@
+.{
+    .name = "town_square",
+    .entities = .{
+        .{ .name = "narrator_anchor", .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } } },
+        .{ .name = "elder_sage", .transform = .{ .pos = .{ .x = 1, .y = 0, .z = 0 } }, .health = .{ .current = 20, .max = 100 } },
+        .{ .name = "traveling_merchant", .transform = .{ .pos = .{ .x = -2, .y = 1, .z = 0 } }, .health = .{ .current = 6, .max = 12 } },
+        .{ .name = "lantern_item", .transform = .{ .pos = .{ .x = 2, .y = 2, .z = 0 } } },
+        .{ .name = "brass_key_item", .transform = .{ .pos = .{ .x = 3, .y = -1, .z = 0 } } },
+        .{ .name = "coin_pouch_item", .transform = .{ .pos = .{ .x = -1, .y = -2, .z = 0 } } },
+        .{ .name = "quest_ledger_prop", .transform = .{ .pos = .{ .x = 0, .y = 3, .z = 0 } } },
+    },
+}
