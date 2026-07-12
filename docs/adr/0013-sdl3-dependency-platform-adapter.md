@@ -1,6 +1,6 @@
 # 0013. SDL3 dependency + platform adapter (phase 1: window + input)
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-12
 
 ## Context
