@@ -21,6 +21,11 @@ pub const EntityDef = struct {
     transform: ?components.Transform = null,
     velocity: ?components.Velocity = null,
     health: ?components.Health = null,
+    /// Named scalar data components (ADR 0024): game-declared per-entity `f64`
+    /// attributes, e.g. `.data = .{ .{ .name = "score", .value = 0 } }`. Empty ⇒ the
+    /// entity has no data components. Declaring one here registers its column, which
+    /// is what lets a script later `mana.get`/`mana.set` it.
+    data: []const components.NamedValue = &.{},
 };
 
 /// A named collection of entity definitions — the unit a runtime loads.
@@ -47,6 +52,7 @@ pub fn load(scene: Scene, world: *World) World.Error!void {
         if (def.transform) |t| try world.setTransform(e, t);
         if (def.velocity) |v| try world.setVelocity(e, v);
         if (def.health) |h| try world.setHealth(e, h);
+        for (def.data) |nv| try world.setDataByName(e, nv.name, nv.value);
     }
 }
 
@@ -116,6 +122,33 @@ test "scene: load into a world adds the right components" {
     try testing.expectEqual(@as(usize, 2), world.count());
     try testing.expectEqual(@as(usize, 1), world.velocities.count()); // only "a" moves
     try testing.expectEqual(@as(usize, 2), world.transforms.count());
+}
+
+test "scene: named data components parse and load into the world's data store" {
+    const src =
+        \\.{
+        \\    .name = "grid",
+        \\    .entities = .{
+        \\        .{ .name = "player", .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } }, .data = .{ .{ .name = "score", .value = 10 }, .{ .name = "energy", .value = 3 } } },
+        \\        .{ .name = "wall", .transform = .{ .pos = .{ .x = 1, .y = 0, .z = 0 } } },
+        \\    },
+        \\}
+    ;
+    const scene = try parse(testing.allocator, src);
+    defer free(testing.allocator, scene);
+    try testing.expectEqual(@as(usize, 2), scene.entities[0].data.len);
+    try testing.expectEqualStrings("score", scene.entities[0].data[0].name);
+    try testing.expectEqual(@as(f64, 10), scene.entities[0].data[0].value);
+    try testing.expectEqual(@as(usize, 0), scene.entities[1].data.len); // wall has none
+
+    var world = try toWorld(testing.allocator, scene);
+    defer world.deinit();
+    // "player" is the first slot (index 0), so its data reads back.
+    const player: ecs.Entity = .{ .index = 0, .generation = 0 };
+    try testing.expectEqual(@as(?f64, 10), world.getData(player, world.dataColumn("score").?));
+    try testing.expectEqual(@as(?f64, 3), world.getData(player, world.dataColumn("energy").?));
+    const wall: ecs.Entity = .{ .index = 1, .generation = 0 };
+    try testing.expectEqual(@as(?f64, null), world.getData(wall, world.dataColumn("score").?));
 }
 
 test "scene: health round-trips through the ZON scene into a world" {

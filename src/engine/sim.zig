@@ -765,6 +765,68 @@ test "sim: on_spawn spawns a prototype via mana; its components attach at the ne
     try testing.expectEqual(@as(f32, 3), sim.world.getHealth(b).?.current); // from prototype
 }
 
+/// A one-shot system that spawns an entity carrying a "hp" data component on its
+/// first tick, so on_spawn can read/write it via `mana.get`/`mana.set`.
+const OneShotDataSpawner = struct {
+    var did: bool = false;
+    fn system(ctx: *Context) SystemError!void {
+        if (!did) {
+            _ = try ctx.commands.spawn(ctx.gpa, ctx.world, .{
+                .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } },
+                .data = &.{.{ .name = "hp", .value = 3 }},
+            });
+            did = true;
+        }
+    }
+};
+
+test "sim: on_spawn reads a data component and queues mana.set; it applies at the next flush (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+    OneShotDataSpawner.did = false;
+
+    var sim = Sim.init(testing.allocator, 1.0 / 60.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = { seen = -1 }
+        \\function t.on_spawn(self)
+        \\  t.seen = mana.get(self, "hp")          -- the spawn attached hp = 3
+        \\  mana.set(self, "hp", mana.get(self, "hp") + 10) -- deferred: hp := 13
+        \\end
+        \\return t
+    );
+    try sim.addSystem(OneShotDataSpawner.system);
+
+    try sim.tick(); // spawn flush attaches hp=3 → on_spawn reads 3, queues hp=13
+    const e = sim.world.entityAt(0);
+    const col = sim.world.dataColumn("hp").?;
+    try testing.expectEqual(@as(i64, 3), sim.script_runtime.handlerFieldInt("seen").?);
+    try testing.expectEqual(@as(?f64, 3), sim.world.getData(e, col)); // set not applied within the same tick
+    try sim.tick(); // next flush applies the queued mana.set
+    try testing.expectEqual(@as(?f64, 13), sim.world.getData(e, col));
+}
+
+test "sim: mana.get on an undeclared data component is nil and mana.set on it is dropped (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+    OneShotTransformSpawner.did = false; // spawns a bare transform entity, no data columns
+
+    var sim = Sim.init(testing.allocator, 1.0 / 60.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = { was_nil = -1 }
+        \\function t.on_spawn(self)
+        \\  t.was_nil = (mana.get(self, "nope") == nil) and 1 or 0
+        \\  mana.set(self, "nope", 5) -- undeclared: dropped with a warning, never a crash
+        \\end
+        \\return t
+    );
+    try sim.addSystem(OneShotTransformSpawner.system);
+
+    try sim.tick();
+    try sim.tick(); // a dropped set never registers a column, so nothing to apply
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("was_nil").?);
+    try testing.expect(sim.world.dataColumn("nope") == null); // still undeclared
+}
+
 test "sim: mana.random/random_int draw from the sim's seeded core.Rng, in range (requires -Denable-lua)" {
     if (!script.lua_enabled) return error.SkipZigTest;
 

@@ -43,7 +43,12 @@ pub fn free(gpa: Allocator, file: File) void {
 pub fn bundleAt(proto: Prototype, pos: core.Vec3) components.Bundle {
     var transform = proto.transform orelse components.Transform{ .pos = pos };
     transform.pos = pos; // spawn position wins over any template position
-    return .{ .transform = transform, .velocity = proto.velocity, .health = proto.health };
+    return .{
+        .transform = transform,
+        .velocity = proto.velocity,
+        .health = proto.health,
+        .data = proto.data, // named data components (ADR 0024) carry through as-is
+    };
 }
 
 /// Name → prototype lookup `mana.spawn` resolves against. A thin index over a slice
@@ -76,6 +81,15 @@ test "prototype: bundleAt overrides the template position with the spawn point" 
     try testing.expect(bundle.transform.?.pos.approxEql(.{ .x = 1, .y = 2, .z = 3 }, 1e-6));
     try testing.expectEqual(@as(f32, 5), bundle.health.?.current); // other components carry through
     try testing.expect(bundle.velocity == null); // absent template component stays absent
+}
+
+test "prototype: bundleAt carries named data components through to the bundle" {
+    const vals = [_]components.NamedValue{ .{ .name = "hp", .value = 3 }, .{ .name = "score", .value = 0 } };
+    const proto: Prototype = .{ .name = "orb", .data = &vals };
+    const bundle = bundleAt(proto, .{ .x = 1, .y = 1, .z = 0 });
+    try testing.expectEqual(@as(usize, 2), bundle.data.len);
+    try testing.expectEqualStrings("hp", bundle.data[0].name);
+    try testing.expectEqual(@as(f64, 3), bundle.data[0].value);
 }
 
 test "prototype: bundleAt gives a transformless prototype a transform at the spawn point" {

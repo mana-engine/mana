@@ -8,13 +8,13 @@
 //! Compiled only under `-Denable-lua` (imported by `lua.zig`/`mana.zig`); no `zlua`
 //! dependency itself, so this file is plain, dependency-free Zig over `core`.
 //!
-//! Wired so far: the read surface — `is_valid`, `position`, `now`, `random`,
-//! `random_int` (ADR 0022, issue #47) — and the deferred-mutation surface —
+//! Wired: the read surface — `is_valid`, `position`, `now`, `get` (named data
+//! components, ADR 0024), `random`, `random_int` (ADR 0022, issue #47) — and the
+//! deferred-mutation surface — `set` (named data components, ADR 0024),
 //! `set_velocity`, `set_position`, `despawn`, `spawn`, `timer_after`/`timer_every`/
-//! `timer_cancel` (queued on the engine's command buffer/timer wheel, applied at
-//! the next flush). The remaining accessors (`set`, `get`) land as additive vtable
-//! entries in follow-up slices; the *mechanism* here is fixed by ADR 0015 and does
-//! not churn.
+//! `timer_cancel` (queued on the engine's command buffer/timer wheel, applied at the
+//! next flush). With `get`/`set` this completes the ADR 0003 §2 `mana` surface; the
+//! *mechanism* here is fixed by ADR 0015 and does not churn.
 //!
 //! Mutations return nothing: they are fire-and-forget deferred commands (ADR 0003
 //! §2). A stale handle is dropped at flush; allocation failure is recorded on the
@@ -47,6 +47,18 @@ pub const Host = struct {
         /// Current sim time in seconds — tick-derived, never wall-clock, so it is
         /// deterministic and safe to branch on (ADR 0003 §2 `mana.now`).
         now: *const fn (ctx: *anyopaque) f64,
+        /// Read entity `handle`'s named scalar data component `name` (ADR 0024
+        /// `mana.get`) — an immediate read. `null` when the handle is stale, the
+        /// entity lacks a value there, or `name` is not a declared data component
+        /// (an undeclared name is `null`, never an error). `name` is borrowed for the
+        /// call only.
+        get: *const fn (ctx: *anyopaque, handle: u64, name: []const u8) ?f64,
+        /// Queue a write of entity `handle`'s named scalar data component `name` to
+        /// `value` (ADR 0024 `mana.set`), applied at the next flush (deferred, like
+        /// `set_velocity`). An undeclared `name` is dropped with an engine warning; a
+        /// stale handle is dropped at flush. `name` is borrowed for the call only —
+        /// the host resolves it to a column id immediately, never storing the string.
+        set: *const fn (ctx: *anyopaque, handle: u64, name: []const u8, value: f64) void,
         /// Queue a velocity change on `handle` (world units/sec), applied at the
         /// next flush (deferred mutation, ADR 0003 §2). A stale handle is dropped at
         /// flush; allocation failure is recorded engine-side and aborts the tick.
@@ -92,6 +104,12 @@ pub const Host = struct {
     }
     pub fn now(self: Host) f64 {
         return self.vtable.now(self.ctx);
+    }
+    pub fn get(self: Host, handle: u64, name: []const u8) ?f64 {
+        return self.vtable.get(self.ctx, handle, name);
+    }
+    pub fn set(self: Host, handle: u64, name: []const u8, value: f64) void {
+        self.vtable.set(self.ctx, handle, name, value);
     }
     pub fn setVelocity(self: Host, handle: u64, v: core.Vec3) void {
         self.vtable.set_velocity(self.ctx, handle, v);
@@ -142,6 +160,10 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         random_value: f32 = 0,
         last_random_int_lo: i64 = 0,
         last_random_int_hi: i64 = 0,
+        get_value: f64 = 0,
+        last_get_name: []const u8 = "",
+        last_set_name: []const u8 = "",
+        last_set_value: f64 = 0,
 
         fn isValid(ctx: *anyopaque, handle: u64) bool {
             _ = handle;
@@ -153,6 +175,18 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         }
         fn now(ctx: *anyopaque) f64 {
             return fromOpaque(ctx).t;
+        }
+        fn get(ctx: *anyopaque, handle: u64, name: []const u8) ?f64 {
+            _ = handle;
+            const self = fromOpaque(ctx);
+            self.last_get_name = name;
+            return self.get_value;
+        }
+        fn set(ctx: *anyopaque, handle: u64, name: []const u8, value: f64) void {
+            _ = handle;
+            const self = fromOpaque(ctx);
+            self.last_set_name = name;
+            self.last_set_value = value;
         }
         fn setVelocity(ctx: *anyopaque, handle: u64, v: core.Vec3) void {
             _ = handle;
@@ -202,6 +236,8 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
             .is_valid = isValid,
             .position = position,
             .now = now,
+            .get = get,
+            .set = set,
             .set_velocity = setVelocity,
             .set_position = setPosition,
             .despawn = despawn,
@@ -214,12 +250,18 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         };
     };
 
-    var fake: Fake = .{ .valid = true, .pos = .{ .x = 1, .y = 2, .z = 3 }, .t = 0.5, .random_value = 0.25 };
+    var fake: Fake = .{ .valid = true, .pos = .{ .x = 1, .y = 2, .z = 3 }, .t = 0.5, .random_value = 0.25, .get_value = 12.5 };
     const host: Host = .{ .ctx = &fake, .vtable = &Fake.vtable };
 
     try testing.expect(host.isValid(0));
     try testing.expect(host.position(0).?.approxEql(.{ .x = 1, .y = 2, .z = 3 }, 1e-6));
     try testing.expectEqual(@as(f64, 0.5), host.now());
+
+    try testing.expectEqual(@as(?f64, 12.5), host.get(1, "score"));
+    try testing.expectEqualStrings("score", fake.last_get_name);
+    host.set(1, "energy", 7.5);
+    try testing.expectEqualStrings("energy", fake.last_set_name);
+    try testing.expectEqual(@as(f64, 7.5), fake.last_set_value);
 
     host.setVelocity(0, .{ .x = 4, .y = 5, .z = 6 });
     try testing.expect(fake.last_vel.approxEql(.{ .x = 4, .y = 5, .z = 6 }, 1e-6));

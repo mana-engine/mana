@@ -226,6 +226,31 @@ const LuaRuntime = struct {
         fn now(ctx: *anyopaque) f64 {
             return cast(ctx).now_seconds;
         }
+        /// `mana.get` (ADR 0024): immediate read of a named scalar data component.
+        /// Resolves `name` to a column against the live world; an undeclared name or
+        /// stale handle reads `null` (never a deref of freed storage).
+        fn get(ctx: *anyopaque, handle: u64, name: []const u8) ?f64 {
+            const hc = cast(ctx);
+            const col = hc.world.dataColumn(name) orelse return null;
+            return hc.world.getData(Entity.unpack(handle), col);
+        }
+        /// `mana.set` (ADR 0024): queue a named scalar data-component write on
+        /// `commands`, applied at the next flush. An undeclared component is a content
+        /// bug — logged and dropped, never a crash or a mid-dispatch rollback over a
+        /// typo (ADR 0024). Allocation failure sets `oom`, aborting the tick.
+        fn set(ctx: *anyopaque, handle: u64, name: []const u8, value: f64) void {
+            const hc = cast(ctx);
+            const col = hc.world.dataColumn(name) orelse {
+                std.log.scoped(.script).warn(
+                    "mana.set: unknown data component '{s}' (declare it in scene/prototype ZON, ADR 0024)",
+                    .{name},
+                );
+                return;
+            };
+            hc.commands.setData(hc.gpa, Entity.unpack(handle), col, value) catch {
+                hc.oom = true;
+            };
+        }
         fn setVelocity(ctx: *anyopaque, handle: u64, v: core.Vec3) void {
             const hc = cast(ctx);
             hc.commands.setVelocity(hc.gpa, Entity.unpack(handle), .{ .v = v }) catch {
@@ -311,6 +336,8 @@ const LuaRuntime = struct {
             .is_valid = isValid,
             .position = position,
             .now = now,
+            .get = get,
+            .set = set,
             .set_velocity = setVelocity,
             .set_position = setPosition,
             .despawn = despawn,
