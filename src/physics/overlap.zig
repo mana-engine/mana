@@ -68,9 +68,11 @@ fn pointSegDistSq(p: Vec2, a: Vec2, b: Vec2) f32 {
     return dx * dx + dy * dy;
 }
 
-/// Squared distance between segments `p1`–`q1` and `p2`–`q2` (Ericson, Real-Time
-/// Collision Detection §5.1.9). Handles degenerate segments and parallel lines.
-fn segSegDistSq(p1: Vec2, q1: Vec2, p2: Vec2, q2: Vec2) f32 {
+/// Closest points on segments `p1`–`q1` and `p2`–`q2` (Ericson, Real-Time Collision
+/// Detection §5.1.9). Handles degenerate segments and parallel lines. Shared by
+/// `segSegDistSq` (this file's narrow-phase overlap test) and `physics.resolve`
+/// (contact normal/depth for capsule-vs-capsule, ADR 0008 follow-on).
+pub fn closestSegSeg(p1: Vec2, q1: Vec2, p2: Vec2, q2: Vec2) struct { c1: Vec2, c2: Vec2 } {
     const d1x = q1.x - p1.x; // direction of segment 1
     const d1y = q1.y - p1.y;
     const d2x = q2.x - p2.x; // direction of segment 2
@@ -85,7 +87,7 @@ fn segSegDistSq(p1: Vec2, q1: Vec2, p2: Vec2, q2: Vec2) f32 {
     var s: f32 = 0;
     var t: f32 = 0;
     if (a <= eps and e <= eps) {
-        return rx * rx + ry * ry; // both segments are points
+        return .{ .c1 = p1, .c2 = p2 }; // both segments are points
     }
     if (a <= eps) {
         t = std.math.clamp(f / e, 0, 1); // segment 1 is a point
@@ -107,12 +109,17 @@ fn segSegDistSq(p1: Vec2, q1: Vec2, p2: Vec2, q2: Vec2) f32 {
             }
         }
     }
-    const c1x = p1.x + d1x * s;
-    const c1y = p1.y + d1y * s;
-    const c2x = p2.x + d2x * t;
-    const c2y = p2.y + d2y * t;
-    const dx = c1x - c2x;
-    const dy = c1y - c2y;
+    return .{
+        .c1 = .{ .x = p1.x + d1x * s, .y = p1.y + d1y * s },
+        .c2 = .{ .x = p2.x + d2x * t, .y = p2.y + d2y * t },
+    };
+}
+
+/// Squared distance between segments `p1`–`q1` and `p2`–`q2`.
+fn segSegDistSq(p1: Vec2, q1: Vec2, p2: Vec2, q2: Vec2) f32 {
+    const cp = closestSegSeg(p1, q1, p2, q2);
+    const dx = cp.c1.x - cp.c2.x;
+    const dy = cp.c1.y - cp.c2.y;
     return dx * dx + dy * dy;
 }
 
