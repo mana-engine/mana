@@ -73,13 +73,21 @@ compiles only under `-Denable-vulkan`; the **null backend stays the default**, s
 - **Later:** SDL3 window + swapchain (live view, `--watch` integration); VMA; a
   sprite batcher; Tracy zones.
 
-### 5. Shader tooling (settles at M2, not M1)
+### 5. Shader tooling — decided at M2: WGSL + naga
 
-M1 needs no shaders. At M2 we need GLSL→SPIR-V. Options, decided then: pin `glslc`/
-shaderc as a mise tool, or install the Vulkan SDK, or commit pre-compiled SPIR-V for
-the few built-in shaders. Preference: a **pinned `glslc`** invoked by a `build.zig`
-step so shaders compile as part of the build (one source of truth), falling back to
-committed SPIR-V if `glslc` can't be pinned cleanly.
+Shaders are authored in **WGSL** and compiled to SPIR-V by **naga**, pinned via
+mise's cargo backend (`cargo:naga-cli`). The `mise run shaders` task regenerates the
+committed `*.spv`, which the backend `@embedFile`s — so ordinary and CI builds need
+**no** shader tool, while regeneration stays reproducible and mise-managed. WGSL is
+the readable source of truth; the SPIR-V is a small committed artifact.
+
+Why not glslc/GLSL (the conventional choice): `glslc` (shaderc) and glslang are not
+cleanly installable here — Google distributes shaderc binaries via Google Cloud
+Storage rather than GitHub releases, so mise's `ubi:`/`aqua:` backends have no asset
+to fetch, and there is no Vulkan SDK on this machine. naga is a Rust crate, so
+`cargo:naga-cli` installs cleanly. Because the backend consumes **SPIR-V** either
+way, this is swappable to glslc/GLSL later (e.g. if the SDK is installed) with no
+backend change.
 
 ### 6. Testing & determinism
 

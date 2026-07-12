@@ -196,3 +196,14 @@ ADR. Building it is a separate task that adds the ziglua dependency (ask first).
   from `main` (e.g. `std.DynLib` on Windows) passes `test` and fails `zig build`.
   Comptime-guard backend-specific code with `if (gpu.backend == .vulkan) {...}` so a
   default build never analyzes the Vulkan branch.
+- **vulkan-zig API shape:** `vk.Bool32` is `enum(u32){ false, true, _ }` — use the
+  literals `.true`/`.false` in struct fields; `vk.TRUE`/`vk.FALSE` are bare
+  `comptime_int`s that do **not** coerce to it. `vk.DeviceProxy`/`InstanceProxy`
+  methods omit the device/instance handle (the proxy holds it) but `cmd*` still take
+  `command_buffer` first; array params are Zig slices (`&.{x}`), and empty barrier
+  arrays are `null`.
+- **Shaders:** authored in WGSL under `src/gpu/vulkan/shaders/`, compiled to
+  committed `*.spv` by naga (`mise run shaders`, pinned via `cargo:naga-cli`). The
+  backend `@embedFile`s the `.spv` (declare it `align(@alignOf(u32))` so it can be
+  cast to `[*]const u32` for `p_code`). glslc/GLSL isn't cleanly installable here
+  (see ADR 0006 §5); swap is trivial since the backend consumes SPIR-V.

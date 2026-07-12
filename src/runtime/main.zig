@@ -95,7 +95,7 @@ fn runRender(out: *Io.Writer, io: Io, gpa: Allocator, path: []const u8) !void {
     if (engine.gpu.backend == .vulkan) {
         const w: u32 = 256;
         const h: u32 = 256;
-        const pixels = try engine.gpu.vk.renderClear(gpa, w, h, .{ 0.10, 0.12, 0.18, 1.0 });
+        const pixels = try engine.gpu.vk.renderTriangle(gpa, w, h, .{ 0.10, 0.12, 0.18, 1.0 });
         defer gpa.free(pixels);
         const bytes = try data.png.encode(gpa, w, h, pixels);
         defer gpa.free(bytes);

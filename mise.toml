@@ -42,3 +42,7 @@ run = "zig build run --"
 [tasks.cross-win]
 description = "Cross-compile for x86_64-windows (portability gate)."
 run = "zig build -Dtarget=x86_64-windows"
+
+[tasks.shaders]
+description = "Recompile WGSL shaders to committed SPIR-V via mise-pinned naga."
+run = "mise x cargo:naga-cli@30.0.0 -- naga src/gpu/vulkan/shaders/triangle.wgsl src/gpu/vulkan/shaders/triangle.spv"

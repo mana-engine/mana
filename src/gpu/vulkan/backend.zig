@@ -1,9 +1,9 @@
-//! Vulkan gpu backend (ADR 0006), compiled only under `-Denable-vulkan`. M1 renders
-//! offscreen — no window, no swapchain: it clears an image to a colour, copies it to
-//! a host-visible buffer, and returns the RGBA pixels. The runtime turns those into a
-//! PNG. Vulkan types stay inside this subtree; the engine-facing surface is plain
-//! data. The loader (`vulkan-1`) is loaded dynamically at runtime, so no import
-//! library / Vulkan SDK is needed at build time.
+//! Vulkan gpu backend (ADR 0006), compiled only under `-Denable-vulkan`. Renders
+//! offscreen — no window, no swapchain. `renderTriangle` (M2) draws a triangle with
+//! a real graphics pipeline via dynamic rendering, reads the image back, and returns
+//! RGBA8 pixels; the runtime turns those into a PNG. Vulkan types stay inside this
+//! subtree; the engine-facing surface is plain data. The loader (`vulkan-1`) is
+//! loaded dynamically at runtime, so no import library / Vulkan SDK is needed.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -11,19 +11,21 @@ const vk = @import("vulkan");
 const windows = std.os.windows;
 const Allocator = std.mem.Allocator;
 
-/// Vulkan API version this backend targets.
-pub const target_api_version: u32 = @bitCast(vk.API_VERSION_1_2);
+/// Vulkan API version this backend targets (1.3 for core dynamic rendering).
+pub const target_api_version: u32 = @bitCast(vk.API_VERSION_1_3);
 
-// The Vulkan loader is loaded dynamically at runtime (no import library / SDK
-// needed). std.DynLib has no Windows implementation in Zig 0.16, so Windows goes
-// through kernel32 directly; posix uses DynLib.
+/// Triangle shaders, compiled from WGSL by naga (`mise run shaders`). Aligned to
+/// u32 so it can be handed to Vulkan directly.
+const triangle_spv align(@alignOf(u32)) = @embedFile("shaders/triangle.spv").*;
+
+// std.DynLib has no Windows implementation in Zig 0.16, so Windows loads the
+// loader through kernel32; posix uses DynLib.
 extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.winapi) ?windows.HMODULE;
 extern "kernel32" fn GetProcAddress(module: windows.HMODULE, name: [*:0]const u8) callconv(.winapi) ?windows.FARPROC;
 extern "kernel32" fn FreeLibrary(module: windows.HMODULE) callconv(.winapi) windows.BOOL;
 
 const posix_loader_names = [_][]const u8{ "libvulkan.so.1", "libvulkan.so", "libvulkan.dylib", "libvulkan.1.dylib" };
 
-/// A handle to the loaded Vulkan loader plus its `vkGetInstanceProcAddr`.
 const Loader = struct {
     handle: if (builtin.os.tag == .windows) windows.HMODULE else std.DynLib,
     get_proc: vk.PfnGetInstanceProcAddr,
@@ -57,10 +59,10 @@ const Loader = struct {
     }
 };
 
-/// Render an `width`×`height` image cleared to `clear` (RGBA, 0..1) entirely on the
-/// GPU and read it back. Returns tightly-packed RGBA8 pixels owned by `gpa`.
-pub fn renderClear(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![]u8 {
-    // --- Load the Vulkan loader dynamically ---------------------------------
+/// Draw a triangle into an `width`×`height` offscreen image on the GPU and read it
+/// back. Returns tightly-packed RGBA8 pixels owned by `gpa`. `clear` is the
+/// background colour (RGBA 0..1).
+pub fn renderTriangle(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![]u8 {
     var loader = Loader.open() orelse return error.VulkanLoaderNotFound;
     defer loader.close();
     const vkb = vk.BaseWrapper.load(loader.get_proc);
@@ -78,23 +80,27 @@ pub fn renderClear(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![]u8
     const instance = vk.InstanceProxy.init(instance_handle, &vki);
     defer instance.destroyInstance(null);
 
-    // --- Physical device + graphics queue family ----------------------------
+    // --- Physical device + queue family -------------------------------------
     const pdevs = try instance.enumeratePhysicalDevicesAlloc(gpa);
     defer gpa.free(pdevs);
     if (pdevs.len == 0) return error.NoVulkanDevice;
-
     const pdev = pdevs[0];
     const family = try graphicsFamily(instance, pdev, gpa);
     const mem_props = instance.getPhysicalDeviceMemoryProperties(pdev);
 
-    // --- Logical device + queue ---------------------------------------------
+    // --- Logical device (dynamic rendering enabled) + queue -----------------
     const priority = [_]f32{1.0};
     const queue_ci: vk.DeviceQueueCreateInfo = .{
         .queue_family_index = family,
         .queue_count = 1,
         .p_queue_priorities = &priority,
     };
+    var features13: vk.PhysicalDeviceVulkan13Features = .{
+        .s_type = .physical_device_vulkan_1_3_features,
+        .dynamic_rendering = .true,
+    };
     const device_handle = try instance.createDevice(pdev, &.{
+        .p_next = &features13,
         .queue_create_info_count = 1,
         .p_queue_create_infos = @ptrCast(&queue_ci),
     }, null);
@@ -103,21 +109,22 @@ pub fn renderClear(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![]u8
     defer dev.destroyDevice(null);
     const queue = dev.getDeviceQueue(family, 0);
 
-    // --- Offscreen colour image (device-local) ------------------------------
+    const format: vk.Format = .r8g8b8a8_unorm;
+
+    // --- Offscreen colour image + view --------------------------------------
     const image = try dev.createImage(&.{
         .image_type = .@"2d",
-        .format = .r8g8b8a8_unorm,
+        .format = format,
         .extent = .{ .width = width, .height = height, .depth = 1 },
         .mip_levels = 1,
         .array_layers = 1,
         .samples = .{ .@"1_bit" = true },
         .tiling = .optimal,
-        .usage = .{ .transfer_src_bit = true, .transfer_dst_bit = true },
+        .usage = .{ .color_attachment_bit = true, .transfer_src_bit = true },
         .sharing_mode = .exclusive,
         .initial_layout = .undefined,
     }, null);
     defer dev.destroyImage(image, null);
-
     const image_reqs = dev.getImageMemoryRequirements(image);
     const image_mem = try dev.allocateMemory(&.{
         .allocation_size = image_reqs.size,
@@ -126,36 +133,6 @@ pub fn renderClear(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![]u8
     defer dev.freeMemory(image_mem, null);
     try dev.bindImageMemory(image, image_mem, 0);
 
-    // --- Host-visible readback buffer ---------------------------------------
-    const size: u64 = @as(u64, width) * height * 4;
-    const buffer = try dev.createBuffer(&.{
-        .size = size,
-        .usage = .{ .transfer_dst_bit = true },
-        .sharing_mode = .exclusive,
-    }, null);
-    defer dev.destroyBuffer(buffer, null);
-
-    const buf_reqs = dev.getBufferMemoryRequirements(buffer);
-    const buf_mem = try dev.allocateMemory(&.{
-        .allocation_size = buf_reqs.size,
-        .memory_type_index = try memoryType(mem_props, buf_reqs.memory_type_bits, .{
-            .host_visible_bit = true,
-            .host_coherent_bit = true,
-        }),
-    }, null);
-    defer dev.freeMemory(buf_mem, null);
-    try dev.bindBufferMemory(buffer, buf_mem, 0);
-
-    // --- Record: clear, then copy image → buffer ----------------------------
-    const pool = try dev.createCommandPool(&.{ .queue_family_index = family }, null);
-    defer dev.destroyCommandPool(pool, null);
-    var cmd: vk.CommandBuffer = undefined;
-    try dev.allocateCommandBuffers(&.{
-        .command_pool = pool,
-        .level = .primary,
-        .command_buffer_count = 1,
-    }, @ptrCast(&cmd));
-
     const full_range: vk.ImageSubresourceRange = .{
         .aspect_mask = .{ .color_bit = true },
         .base_mip_level = 0,
@@ -163,34 +140,154 @@ pub fn renderClear(gpa: Allocator, width: u32, height: u32, clear: [4]f32) ![]u8
         .base_array_layer = 0,
         .layer_count = 1,
     };
+    const view = try dev.createImageView(&.{
+        .image = image,
+        .view_type = .@"2d",
+        .format = format,
+        .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+        .subresource_range = full_range,
+    }, null);
+    defer dev.destroyImageView(view, null);
+
+    // --- Host-visible readback buffer ---------------------------------------
+    const size: u64 = @as(u64, width) * height * 4;
+    const buffer = try dev.createBuffer(&.{ .size = size, .usage = .{ .transfer_dst_bit = true }, .sharing_mode = .exclusive }, null);
+    defer dev.destroyBuffer(buffer, null);
+    const buf_reqs = dev.getBufferMemoryRequirements(buffer);
+    const buf_mem = try dev.allocateMemory(&.{
+        .allocation_size = buf_reqs.size,
+        .memory_type_index = try memoryType(mem_props, buf_reqs.memory_type_bits, .{ .host_visible_bit = true, .host_coherent_bit = true }),
+    }, null);
+    defer dev.freeMemory(buf_mem, null);
+    try dev.bindBufferMemory(buffer, buf_mem, 0);
+
+    // --- Graphics pipeline (dynamic rendering) ------------------------------
+    const module = try dev.createShaderModule(&.{
+        .code_size = triangle_spv.len,
+        .p_code = @ptrCast(&triangle_spv),
+    }, null);
+    defer dev.destroyShaderModule(module, null);
+
+    const stages = [_]vk.PipelineShaderStageCreateInfo{
+        .{ .stage = .{ .vertex_bit = true }, .module = module, .p_name = "vs_main" },
+        .{ .stage = .{ .fragment_bit = true }, .module = module, .p_name = "fs_main" },
+    };
+    const layout = try dev.createPipelineLayout(&.{}, null);
+    defer dev.destroyPipelineLayout(layout, null);
+
+    const dynamic_states = [_]vk.DynamicState{ .viewport, .scissor };
+    const blend_attachment: vk.PipelineColorBlendAttachmentState = .{
+        .blend_enable = .false,
+        .src_color_blend_factor = .one,
+        .dst_color_blend_factor = .zero,
+        .color_blend_op = .add,
+        .src_alpha_blend_factor = .one,
+        .dst_alpha_blend_factor = .zero,
+        .alpha_blend_op = .add,
+        .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+    };
+    var color_format = format;
+    var rendering_info: vk.PipelineRenderingCreateInfo = .{
+        .s_type = .pipeline_rendering_create_info,
+        .view_mask = 0,
+        .color_attachment_count = 1,
+        .p_color_attachment_formats = @ptrCast(&color_format),
+        .depth_attachment_format = .undefined,
+        .stencil_attachment_format = .undefined,
+    };
+    const pipeline_ci: vk.GraphicsPipelineCreateInfo = .{
+        .p_next = &rendering_info,
+        .stage_count = stages.len,
+        .p_stages = &stages,
+        .p_vertex_input_state = &.{},
+        .p_input_assembly_state = &.{ .topology = .triangle_list, .primitive_restart_enable = .false },
+        .p_viewport_state = &.{ .viewport_count = 1, .scissor_count = 1 },
+        .p_rasterization_state = &.{
+            .depth_clamp_enable = .false,
+            .rasterizer_discard_enable = .false,
+            .polygon_mode = .fill,
+            .cull_mode = .{},
+            .front_face = .counter_clockwise,
+            .depth_bias_enable = .false,
+            .depth_bias_constant_factor = 0,
+            .depth_bias_clamp = 0,
+            .depth_bias_slope_factor = 0,
+            .line_width = 1,
+        },
+        .p_multisample_state = &.{
+            .rasterization_samples = .{ .@"1_bit" = true },
+            .sample_shading_enable = .false,
+            .min_sample_shading = 0,
+            .alpha_to_coverage_enable = .false,
+            .alpha_to_one_enable = .false,
+        },
+        .p_color_blend_state = &.{
+            .logic_op_enable = .false,
+            .logic_op = .copy,
+            .attachment_count = 1,
+            .p_attachments = @ptrCast(&blend_attachment),
+            .blend_constants = .{ 0, 0, 0, 0 },
+        },
+        .p_dynamic_state = &.{ .dynamic_state_count = dynamic_states.len, .p_dynamic_states = &dynamic_states },
+        .layout = layout,
+        .render_pass = .null_handle,
+        .subpass = 0,
+        .base_pipeline_index = -1,
+    };
+    var pipelines = [_]vk.Pipeline{.null_handle};
+    _ = try dev.createGraphicsPipelines(.null_handle, &.{pipeline_ci}, null, &pipelines);
+    const pipeline = pipelines[0];
+    defer dev.destroyPipeline(pipeline, null);
+
+    // --- Record: draw the triangle, then copy image → buffer ----------------
+    const pool = try dev.createCommandPool(&.{ .queue_family_index = family }, null);
+    defer dev.destroyCommandPool(pool, null);
+    var cmd: vk.CommandBuffer = undefined;
+    try dev.allocateCommandBuffers(&.{ .command_pool = pool, .level = .primary, .command_buffer_count = 1 }, @ptrCast(&cmd));
 
     try dev.beginCommandBuffer(cmd, &.{ .flags = .{ .one_time_submit_bit = true } });
 
-    transition(dev, cmd, image, full_range, .undefined, .transfer_dst_optimal, .{}, .{ .transfer_write_bit = true }, .{ .top_of_pipe_bit = true }, .{ .transfer_bit = true });
+    transition(dev, cmd, image, full_range, .undefined, .color_attachment_optimal, .{}, .{ .color_attachment_write_bit = true }, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true });
 
-    const clear_color: vk.ClearColorValue = .{ .float_32 = clear };
-    dev.cmdClearColorImage(cmd, image, .transfer_dst_optimal, &clear_color, &.{full_range});
+    const color_attachment: vk.RenderingAttachmentInfo = .{
+        .image_view = view,
+        .image_layout = .color_attachment_optimal,
+        .resolve_mode = .{},
+        .resolve_image_layout = .undefined,
+        .load_op = .clear,
+        .store_op = .store,
+        .clear_value = .{ .color = .{ .float_32 = clear } },
+    };
+    dev.cmdBeginRendering(cmd, &.{
+        .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = width, .height = height } },
+        .layer_count = 1,
+        .view_mask = 0,
+        .color_attachment_count = 1,
+        .p_color_attachments = @ptrCast(&color_attachment),
+    });
+    dev.cmdBindPipeline(cmd, .graphics, pipeline);
+    dev.cmdSetViewport(cmd, 0, &.{.{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }});
+    dev.cmdSetScissor(cmd, 0, &.{.{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = width, .height = height } }});
+    dev.cmdDraw(cmd, 3, 1, 0, 0);
+    dev.cmdEndRendering(cmd);
 
-    transition(dev, cmd, image, full_range, .transfer_dst_optimal, .transfer_src_optimal, .{ .transfer_write_bit = true }, .{ .transfer_read_bit = true }, .{ .transfer_bit = true }, .{ .transfer_bit = true });
+    transition(dev, cmd, image, full_range, .color_attachment_optimal, .transfer_src_optimal, .{ .color_attachment_write_bit = true }, .{ .transfer_read_bit = true }, .{ .color_attachment_output_bit = true }, .{ .transfer_bit = true });
 
-    const region: vk.BufferImageCopy = .{
+    dev.cmdCopyImageToBuffer(cmd, image, .transfer_src_optimal, buffer, &.{.{
         .buffer_offset = 0,
         .buffer_row_length = 0,
         .buffer_image_height = 0,
         .image_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
         .image_offset = .{ .x = 0, .y = 0, .z = 0 },
         .image_extent = .{ .width = width, .height = height, .depth = 1 },
-    };
-    dev.cmdCopyImageToBuffer(cmd, image, .transfer_src_optimal, buffer, &.{region});
-
+    }});
     try dev.endCommandBuffer(cmd);
 
-    // --- Submit and wait ----------------------------------------------------
+    // --- Submit, wait, read back --------------------------------------------
     const submit: vk.SubmitInfo = .{ .command_buffer_count = 1, .p_command_buffers = @ptrCast(&cmd) };
     try dev.queueSubmit(queue, &.{submit}, .null_handle);
     try dev.queueWaitIdle(queue);
 
-    // --- Read back ----------------------------------------------------------
     const mapped = try dev.mapMemory(buf_mem, 0, size, .{});
     defer dev.unmapMemory(buf_mem);
     const src: [*]const u8 = @ptrCast(mapped.?);
