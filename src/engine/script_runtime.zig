@@ -291,6 +291,31 @@ test "circuit breaker: loadHandlers reload re-enables a disabled key and resets 
     try std.testing.expect(!rt.isDisabled(.on_spawn));
 }
 
+test "circuit breaker: a success resets the consecutive-error count so the breaker does not latch early" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    var rt: LuaRuntime = .{};
+    defer rt.deinit(std.testing.allocator);
+    try rt.loadHandlers(std.testing.allocator, "return {}");
+
+    // One short of the threshold, then a success: the count must zero out, so
+    // these 7 errors leave the key enabled.
+    for (0..breaker_threshold - 1) |_| _ = rt.updateBreaker(.on_spawn, .errored);
+    try std.testing.expect(!rt.isDisabled(.on_spawn));
+    try std.testing.expectEqual(LuaRuntime.BreakerUpdate.unaffected, rt.updateBreaker(.on_spawn, .ok));
+
+    // A fresh run of threshold-1 errors after the reset must still not trip it —
+    // proving the earlier 7 did not carry over past the success.
+    for (0..breaker_threshold - 1) |_| {
+        try std.testing.expectEqual(LuaRuntime.BreakerUpdate.errored, rt.updateBreaker(.on_spawn, .errored));
+    }
+    try std.testing.expect(!rt.isDisabled(.on_spawn));
+
+    // Only the 8th consecutive error *since the reset* disables the key.
+    try std.testing.expectEqual(LuaRuntime.BreakerUpdate.just_disabled, rt.updateBreaker(.on_spawn, .errored));
+    try std.testing.expect(rt.isDisabled(.on_spawn));
+}
+
 test "circuit breaker: the disable transition fires exactly once until the next reload" {
     if (!script.lua_enabled) return error.SkipZigTest;
 
