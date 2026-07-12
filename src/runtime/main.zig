@@ -15,9 +15,9 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Manifest = manifest_mod.Manifest;
 
-/// Highest scripting API version this build provides (ADR 0003 gate). 0 = no
-/// scripting compiled in yet; a package requesting more is refused.
-const provided_script_api: u32 = 0;
+/// Highest scripting API version this build provides (ADR 0003 gate): the `mana`
+/// version under `-Denable-lua`, else 0. A package requesting more is refused.
+const provided_script_api: u32 = engine.script_api_version;
 /// Number of fixed steps a one-shot headless run advances before reporting.
 const tick_steps: u32 = 60;
 /// Poll cadence for `--watch`, in milliseconds.
@@ -91,6 +91,21 @@ fn loadPrototypes(io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest) !
     const src = try Io.Dir.cwd().readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0);
     defer gpa.free(src);
     return try engine.prototype.parse(gpa, src);
+}
+
+/// Load a package's Lua handler script (ADR 0003 §1; issue #51) into `sim`, if the
+/// manifest declares one. The source is borrowed only for the call (the interpreter
+/// compiles it), so it is freed immediately. Under a build without `-Denable-lua`,
+/// `Sim.loadScript` is a comptime no-op; the `script_api` gate already refuses a
+/// package that *requires* scripting the build lacks (its `script_api` exceeds the
+/// provided 0).
+fn loadPackageScript(io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest, sim: *engine.Sim) !void {
+    const rel = manifest.script orelse return;
+    const path = try std.fs.path.join(gpa, &.{ pkg, rel });
+    defer gpa.free(path);
+    const src = try Io.Dir.cwd().readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0);
+    defer gpa.free(src);
+    try sim.loadScript(src);
 }
 
 /// Refuse a package that needs a newer scripting API than this build provides.
@@ -186,6 +201,7 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     defer sim.deinit();
     if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
     try engine.scene.load(parsed, &sim.world);
+    try loadPackageScript(io, gpa, pkg, manifest, &sim); // #51: package Lua handlers
     try sim.addSystem(engine.input.inputMoveSystem); // #30: held keys → velocity
     try sim.addSystem(engine.systems.movementSystem);
     try sim.addSystem(engine.systems.regenSystem);
@@ -279,6 +295,7 @@ fn runOnce(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     defer sim.deinit();
     if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
     try engine.scene.load(parsed, &sim.world);
+    try loadPackageScript(io, gpa, pkg, manifest, &sim); // #51: package Lua handlers
     try sim.addSystem(engine.systems.movementSystem);
     try sim.addSystem(engine.systems.regenSystem);
     try sim.run(tick_steps);

@@ -23,6 +23,11 @@ pub const Lua = zlua.Lua;
 /// (`script.lua.Host`) and hand it to `State.setHost` without importing `host.zig`.
 pub const Host = mana.Host;
 
+/// The `mana` API version this backend implements (ADR 0003 §5), re-exported as a
+/// `u32` so the runner can advertise the provided scripting API without reaching
+/// into `mana.zig`.
+pub const mana_version: u32 = @intCast(mana.version);
+
 test {
     // `script.zig`'s `if (build_options.enable_lua) @import("lua.zig")` does not
     // pull a comptime-conditionally-imported file's tests into the test binary
