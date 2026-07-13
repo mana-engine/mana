@@ -43,3 +43,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0029 | Headless SVG render output: a GPU-free way to see a level | proposed |
 | 0030 | Entity appearance as data: `.appearance` in the scene/prototype schema | accepted |
 | 0031 | Sprite rendering: cosmetic sprite/animation component, dependency-free sheet asset, gpu texture path | proposed |
+| 0032 | Animated-sprite interchange: no existing format fits — evolve MSF, don't replace it | proposed |
