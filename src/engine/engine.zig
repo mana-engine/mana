@@ -38,6 +38,7 @@ pub const tilemap = @import("tilemap.zig");
 pub const prototype = @import("prototype.zig");
 pub const render = @import("render.zig");
 pub const render_svg = @import("render_svg.zig");
+pub const animation = @import("animation.zig");
 pub const collision = @import("collision.zig");
 pub const controller = @import("controller.zig");
 pub const nav = @import("nav.zig");
@@ -63,6 +64,9 @@ pub const Health = components.Health;
 pub const Collider = components.Collider;
 pub const Controller = components.Controller;
 pub const NavAgent = components.NavAgent;
+pub const Sprite = components.Sprite;
+pub const AnimationState = components.AnimationState;
+pub const LoopMode = components.LoopMode;
 pub const Timers = timer.Timers;
 
 /// Marker verifying the module is wired into the build graph and can see every port
@@ -84,6 +88,7 @@ test {
     _ = tilemap;
     _ = render;
     _ = render_svg;
+    _ = animation;
     _ = collision;
     _ = controller;
     _ = nav;

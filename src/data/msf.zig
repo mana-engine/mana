@@ -1,13 +1,17 @@
 //! MSF1 — "mana sprite format", version 1 (ADR 0031 §2): the provisional, dependency-
-//! free container `spritegen` emits and Lane B's engine will decode. It carries raw
-//! straight-alpha RGBA8 frames plus a clip table, little-endian, no compression. It is
-//! deliberately trivial (decode is a header read + slices) and **provisional** —
-//! pending #109's interchange-codec decision, only the per-frame blob encoding would
-//! change, behind the same versioned header.
+//! free container `spritegen` emits (`encode`) and the engine decodes (`decode`). It
+//! carries raw straight-alpha RGBA8 frames plus a clip table, little-endian, no
+//! compression. It is deliberately trivial (decode is a header read + slices) and
+//! **provisional** — pending #109's interchange-codec decision, only the per-frame blob
+//! encoding would change, behind the same versioned header.
+//!
+//! Lives in `data` (the file layer, beside `png`/`zon`) so it is the SINGLE definition
+//! of the format: `tools/spritegen` imports `data.msf` to encode, the engine's sprite
+//! loader imports the same `data.msf` to decode, and the round-trip test below pins the
+//! two directions in lockstep — no external dependency on either side.
 //!
 //! A sheet is a DERIVED artifact (never committed): the recipe `.zon` is the source of
-//! truth (invariant #1). This module is the on-the-wire shape, exercised by a
-//! round-trip test so encode/decode stay in lockstep.
+//! truth (invariant #1). This module is the on-the-wire shape.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

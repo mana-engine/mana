@@ -48,6 +48,14 @@
             .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 1, .mask = 14 } },
             .nav_agent = .{ .speed = 8 },
             .appearance = .{ .color = .{ 1.0, 0.9, 0.2 }, .size = 0.7, .shape = .circle },
+            // Animated chomp sprite (ADR 0031). The sheet is a DERIVED artifact built by
+            // `mise run assets` from sprites/pac.zon (gitignored, never committed). `loop`
+            // is `.loop`, not `.ping_pong`: the `chomp` clip's frame list already runs the
+            // mouth open-then-shut (0,1,2,3,2,1), so a plain loop bounces seamlessly.
+            // `appearance` stays as the flat-quad fallback (used by the headless SVG and,
+            // until the Vulkan textured pipeline lands, the GPU path); its color is the
+            // sprite tint.
+            .sprite = .{ .sheet = "sprites/pac.msf", .clip = "chomp", .loop = .loop },
             .data = .{
                 .{ .name = "kind", .value = 1 },
                 .{ .name = "score", .value = 0 },

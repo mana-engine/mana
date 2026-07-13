@@ -17,6 +17,8 @@ const Collider = components.Collider;
 const Controller = components.Controller;
 const NavAgent = components.NavAgent;
 const Appearance = components.Appearance;
+const Sprite = components.Sprite;
+const AnimationState = components.AnimationState;
 const Entity = ecs.Entity;
 const Allocator = std.mem.Allocator;
 
@@ -39,6 +41,14 @@ pub const World = struct {
     /// Empty until a scene/prototype/tilemap-legend cell declares an `appearance`;
     /// excluded from `stateHash` (cosmetic, never read by sim systems).
     appearances: ecs.SparseSet(Appearance) = .{},
+    /// Sprite references (ADR 0031): the sheet + clip the textured renderer samples.
+    /// Empty until a scene/prototype/tilemap-legend cell declares a `sprite`; excluded
+    /// from `stateHash` (cosmetic, never read by sim systems).
+    sprites: ecs.SparseSet(Sprite) = .{},
+    /// Live animation cursors (ADR 0031), one per sprited entity — attached alongside a
+    /// `Sprite` by `setSprite` and advanced by the render-time animation system from
+    /// wall-clock time. Excluded from `stateHash` (cosmetic; a tick never touches it).
+    animations: ecs.SparseSet(AnimationState) = .{},
     /// Named scalar data components (ADR 0024): game-declared per-entity `f64`
     /// attributes `mana.get`/`mana.set` read and write. Empty until a scene/prototype
     /// declares a `data` component; part of the state hash (`stateHash`).
@@ -57,6 +67,8 @@ pub const World = struct {
         self.controllers.deinit(self.gpa);
         self.nav_agents.deinit(self.gpa);
         self.appearances.deinit(self.gpa);
+        self.sprites.deinit(self.gpa);
+        self.animations.deinit(self.gpa);
         self.data.deinit(self.gpa);
         self.entities.deinit(self.gpa);
         self.* = undefined;
@@ -77,6 +89,8 @@ pub const World = struct {
         self.controllers.remove(e.index);
         self.nav_agents.remove(e.index);
         self.appearances.remove(e.index);
+        self.sprites.remove(e.index);
+        self.animations.remove(e.index);
         self.data.removeEntity(e.index);
         try self.entities.free_entity(self.gpa, e);
     }
@@ -192,6 +206,42 @@ pub const World = struct {
         return self.appearances.get(e.index);
     }
 
+    /// Attach/overwrite `e`'s `Sprite` (ADR 0031) and ensure it has an `AnimationState`
+    /// cursor: a fresh default cursor is attached only if the entity has none, so
+    /// swapping the clip (re-`setSprite`) does not rewind an in-progress animation. The
+    /// cursor is cosmetic (advanced from wall-clock by the render-time system), so
+    /// neither column enters `stateHash`. Errors: `error.InvalidEntity` for a stale
+    /// handle, `error.OutOfMemory` on allocation failure.
+    pub fn setSprite(self: *World, e: Entity, s: Sprite) Error!void {
+        if (!self.entities.isValid(e)) return error.InvalidEntity;
+        try self.sprites.put(self.gpa, e.index, s);
+        if (self.animations.get(e.index) == null)
+            try self.animations.put(self.gpa, e.index, .{});
+    }
+
+    /// Mutable pointer to `e`'s `Sprite`, or null if absent/stale. Invalidated by
+    /// subsequent component adds/removes.
+    pub fn getSprite(self: *World, e: Entity) ?*Sprite {
+        if (!self.entities.isValid(e)) return null;
+        return self.sprites.get(e.index);
+    }
+
+    /// Attach/overwrite `e`'s `AnimationState` cursor directly (ADR 0031). Normally the
+    /// render-time animation system owns this column; exposed so that system (and tests)
+    /// can write a resolved cursor. Errors: `error.InvalidEntity` for a stale handle,
+    /// `error.OutOfMemory` on allocation failure.
+    pub fn setAnimationState(self: *World, e: Entity, a: AnimationState) Error!void {
+        if (!self.entities.isValid(e)) return error.InvalidEntity;
+        try self.animations.put(self.gpa, e.index, a);
+    }
+
+    /// Mutable pointer to `e`'s `AnimationState`, or null if absent/stale. Invalidated by
+    /// subsequent component adds/removes.
+    pub fn getAnimationState(self: *World, e: Entity) ?*AnimationState {
+        if (!self.entities.isValid(e)) return null;
+        return self.animations.get(e.index);
+    }
+
     /// The column id for the named data component `name` (ADR 0024), or `null` if no
     /// scene/prototype has declared it. `mana.get`/`mana.set` resolve a name to a
     /// column through this; an unknown name is the "undeclared" case.
@@ -238,6 +288,10 @@ pub const World = struct {
     /// components), so a scene with no nav agents hashes bit-identically.
     /// `Appearance` (ADR 0030) is excluded too: purely a render-time hint no sim
     /// system reads, so a scene with no declared appearances hashes bit-identically.
+    /// `Sprite` and `AnimationState` (ADR 0031) are excluded for the same reason and one
+    /// more: the animation cursor is advanced from WALL-CLOCK time by a render-time
+    /// system, never a sim tick, so folding it in would make the hash depend on real
+    /// elapsed time — the exact non-determinism the exclusion prevents.
     /// Named data components (ADR 0024) are authoritative sim state and are folded in
     /// last, in registration/dense order; an empty store adds zero bytes, so a scene
     /// with no data components hashes bit-identically to before the store existed.
@@ -359,6 +413,70 @@ test "world: an appearance does not perturb the state hash (cosmetic, excluded)"
     // render-time hint, not authoritative sim state. `shape` (ADR 0030 shape
     // addendum) is part of the same struct and must stay excluded too.
     try with.setAppearance(with.entityAt(0), .{ .color = .{ 0.2, 0.4, 0.9 }, .size = 2, .shape = .circle });
+    try testing.expectEqual(without.stateHash(), with.stateHash());
+}
+
+test "world: a sprite round-trips, attaches a default cursor, and drops both on despawn" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+
+    const e = try w.spawn();
+    try w.setSprite(e, .{ .sheet = "sprites/pac.msf", .clip = "chomp", .loop = .loop });
+    try testing.expectEqualStrings("sprites/pac.msf", w.getSprite(e).?.sheet);
+    try testing.expectEqualStrings("chomp", w.getSprite(e).?.clip);
+    try testing.expectEqual(components.LoopMode.loop, w.getSprite(e).?.loop);
+    // Attaching a sprite also attaches a default animation cursor (frame 0, time 0).
+    try testing.expect(w.getAnimationState(e) != null);
+    try testing.expectEqual(@as(u16, 0), w.getAnimationState(e).?.frame);
+    try testing.expectEqual(@as(usize, 1), w.sprites.count());
+    try testing.expectEqual(@as(usize, 1), w.animations.count());
+
+    try w.despawn(e);
+    try testing.expect(w.getSprite(e) == null);
+    try testing.expect(w.getAnimationState(e) == null);
+    try testing.expectEqual(@as(usize, 0), w.sprites.count());
+    try testing.expectEqual(@as(usize, 0), w.animations.count());
+}
+
+test "world: re-setSprite swaps the clip without rewinding the animation cursor" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+    const e = try w.spawn();
+    try w.setSprite(e, .{ .sheet = "s.msf", .clip = "walk" });
+    // Advance the cursor as the render system would, then swap the clip.
+    try w.setAnimationState(e, .{ .time_s = 1.5, .frame = 3 });
+    try w.setSprite(e, .{ .sheet = "s.msf", .clip = "run" });
+    try testing.expectEqualStrings("run", w.getSprite(e).?.clip);
+    // The existing cursor is preserved (a clip swap is not a rewind).
+    try testing.expectEqual(@as(u16, 3), w.getAnimationState(e).?.frame);
+    try testing.expectEqual(@as(f32, 1.5), w.getAnimationState(e).?.time_s);
+}
+
+test "world: setSprite on a stale handle errors" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+    const e = try w.spawn();
+    try w.despawn(e);
+    try testing.expectError(error.InvalidEntity, w.setSprite(e, .{ .sheet = "x.msf" }));
+    // A rejected setSprite must not leave a dangling animation cursor behind.
+    try testing.expectEqual(@as(usize, 0), w.animations.count());
+}
+
+test "world: a sprite and its animation cursor do not perturb the state hash (cosmetic, excluded)" {
+    var with = World.init(testing.allocator);
+    defer with.deinit();
+    var without = World.init(testing.allocator);
+    defer without.deinit();
+
+    inline for (.{ &with, &without }) |wp| {
+        const e = try wp.spawn();
+        try wp.setTransform(e, .{ .pos = .{ .x = 1, .y = 2, .z = 3 } });
+    }
+    // Attaching a Sprite (and thus a cursor) to one world must not change its hash — both
+    // are cosmetic, and the cursor is wall-clock-driven, so hashing it would break
+    // determinism. Also perturb the cursor's frame to prove the cursor itself is excluded.
+    try with.setSprite(with.entityAt(0), .{ .sheet = "sprites/pac.msf", .clip = "chomp" });
+    try with.setAnimationState(with.entityAt(0), .{ .time_s = 9.9, .frame = 5 });
     try testing.expectEqual(without.stateHash(), with.stateHash());
 }
 

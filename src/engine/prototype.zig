@@ -52,6 +52,7 @@ pub fn bundleAt(proto: Prototype, pos: core.Vec3) components.Bundle {
         .data = proto.data, // named data components (ADR 0024) carry through as-is
         .nav_agent = proto.nav_agent, // nav agent (ADR 0027) carries through as-is
         .appearance = proto.appearance, // appearance (ADR 0030) carries through as-is
+        .sprite = proto.sprite, // sprite ref (ADR 0031) carries through as-is
     };
 }
 
@@ -130,6 +131,17 @@ test "prototype: bundleAt carries an appearance's shape through to the bundle" {
     };
     const bundle = bundleAt(proto, .{ .x = 1, .y = 1, .z = 0 });
     try testing.expectEqual(gpu.Shape.circle, bundle.appearance.?.shape);
+}
+
+test "prototype: bundleAt carries a sprite reference through to the bundle" {
+    const proto: Prototype = .{
+        .name = "pac",
+        .sprite = .{ .sheet = "sprites/pac.msf", .clip = "chomp", .loop = .ping_pong },
+    };
+    const bundle = bundleAt(proto, .{ .x = 1, .y = 1, .z = 0 });
+    try testing.expectEqualStrings("sprites/pac.msf", bundle.sprite.?.sheet);
+    try testing.expectEqualStrings("chomp", bundle.sprite.?.clip);
+    try testing.expectEqual(components.LoopMode.ping_pong, bundle.sprite.?.loop);
 }
 
 test "prototype registry: lookup finds a named prototype and misses cleanly" {
