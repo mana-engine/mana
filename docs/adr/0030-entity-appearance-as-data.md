@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-07-13
+- Amended: 2026-07-13 (Issue #101 — `shape` addendum, below)
 
 ## Context
 
@@ -142,14 +143,72 @@ before, proving the fallback path (above) is exact, not approximate.
 - **Any future package** gets the same tool for free: declare `.appearance` per
   prototype/scene-entity/tilemap-legend-cell, or declare nothing and keep the old
   palette-cycling default.
-- **Committed to:** `Appearance`'s ZON shape is `color`/`size`, nothing richer;
-  `size` is a single scalar (footprint width/height), not per-axis; cosmetic and
-  excluded from the state hash by policy, matching `Velocity`/`Controller`/`NavAgent`.
-- **Explicitly not doing:** no shape field (circle vs. square) — every quad is still an
-  axis-aligned rect (ADR 0029 §7's documented follow-up); no script-side
-  `mana`-surface change — a script cannot read or write `Appearance` (frightened-ghost
-  re-tinting, mentioned as a future want in `games/pacman/prototypes.zon`'s comments,
-  would need its own ADR if ever built); no per-instance appearance override at the
-  `mana.spawn` call site (ADR 0016's existing constraint — a variant is a second named
-  prototype, which is what the three ghost prototypes demonstrate); no derivation from
-  `Collider` (see rationale above).
+- **Committed to:** `Appearance`'s ZON shape is `color`/`size`/`shape` (below),
+  nothing richer; `size` is a single scalar (footprint width/height), not per-axis;
+  cosmetic and excluded from the state hash by policy, matching
+  `Velocity`/`Controller`/`NavAgent`.
+- **Explicitly not doing:** no script-side `mana`-surface change — a script cannot
+  read or write `Appearance` (frightened-ghost re-tinting, mentioned as a future want
+  in `games/pacman/prototypes.zon`'s comments, would need its own ADR if ever built);
+  no per-instance appearance override at the `mana.spawn` call site (ADR 0016's
+  existing constraint — a variant is a second named prototype, which is what the
+  three ghost prototypes demonstrate); no derivation from `Collider` (see rationale
+  above).
+
+## Addendum (Issue #101): `shape` — a second cosmetic field, same treatment as `color`/`size`
+
+The "no shape field" line above was this ADR's documented ADR-0029-§7 follow-up; issue
+#101 is that follow-up. `Appearance` gains one more field:
+
+```zig
+pub const Appearance = struct {
+    color: [3]f32,
+    size: f32 = 1,
+    shape: gpu.Shape = .rect, // NEW
+};
+```
+
+`gpu.Shape` (`src/gpu/types.zig`) is a small, genre-neutral enum: `rect` (default,
+preserves every existing look/golden byte-for-byte) and `circle`. It lives in `gpu`
+alongside `Quad` — the same plain-data vocabulary the null/Vulkan backends already
+consume — rather than in `src/engine`, so `gpu.Quad` itself grows a `shape: gpu.Shape
+= .rect` field `render.project` sets from the entity's `Appearance` (or `.rect` when
+absent, matching the existing color/size fallback).
+
+**No new plumbing at the four call sites.** Unlike `color`/`size` (ADR 0030's original
+threading work), `shape` needed zero changes to `components.Bundle`, `scene.EntityDef`,
+`prototype.Prototype`, or `tilemap.Tile.bundle` — all four already carry `Appearance`
+through as one opaque struct (`bundle.appearance`, `proto.appearance`, …), so a new
+field on `Appearance` rides along automatically. Only the renderer changed:
+`render.project` copies `appearance.shape` onto the quad, and `render_svg.toSvg`
+switches on `gpu.Quad.shape` to emit an `<ellipse>` instead of a `<rect>` for
+`.circle`-shaped quads (`src/engine/render_svg.zig`).
+
+**`polygon` deferred, not built.** The ghost silhouette (a dome + skirt) was the
+motivating case for a third variant, but a polygon needs a vertex-list shape (SVG
+`<polygon>`, plus a GPU-side triangulation the quad rasterizer doesn't have) — genuinely
+new surface, not a drop-in enum value. `games/pacman` renders ghosts as `.circle`
+instead (a `-- TODO(#101 follow-up)` marks the spot in `games/pacman/prototypes.zon`).
+Per CLAUDE.md ("no speculative flexibility"), `polygon` is not added to `gpu.Shape`
+until a concrete need re-justifies it.
+
+**Vulkan/null backend unaffected.** `gpu.Quad.shape` is read only by `render_svg.zig`
+today; `buildVertices` (`src/gpu/gpu.zig`) still rasterizes every quad as its bounding
+rect regardless of `shape` — true circle/polygon geometry on the GPU path is future
+work, not required by this issue (which only asked for headless/SVG legibility).
+
+**Determinism unchanged.** `shape` is one more field on the already-excluded
+`Appearance`/`Bundle.appearance` — the `stateHash` exclusion and its pinning test
+(`world.zig`, "an appearance does not perturb the state hash") cover it without
+modification; the pinned `tests/determinism.zig` golden (`0x65f2a1949cd9fc40`) is
+unchanged by this addendum's `mise run check`.
+
+**Render-goldens:** `tests/fixtures/render_pacman_maze.svg` is regenerated
+(`MANA_UPDATE_GOLDENS=1`, reviewed) — the static scene's dots and pellets now draw as
+`<ellipse>`s; walls stay `<rect>`s (declare no `shape`, default `.rect`). Pac and the
+ghosts carry `.shape = .circle` on their prototypes (unit-tested in
+`src/engine/prototype.zig`), but they are *script-spawned* by `rules.lua`'s
+`on_scene_enter` — and `--render-svg` deliberately renders the static scene without
+ticking or running the package script (`src/runtime/main.zig`), so they do not appear
+in this fixture at all. `tests/fixtures/render_snake_board.svg` is untouched (Snake
+declares no `Appearance` at all).

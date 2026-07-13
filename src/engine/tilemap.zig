@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const gpu = @import("gpu");
 const components = @import("components.zig");
 const World = @import("world.zig").World;
 
@@ -317,6 +318,20 @@ test "tilemap: materialize attaches a legend cell's appearance to its entity" {
     const a = world.getAppearance(e).?;
     try testing.expect(std.mem.eql(f32, &.{ 0.2, 0.3, 0.9 }, &a.color));
     try testing.expectEqual(@as(f32, 1), a.size);
+}
+
+test "tilemap: materialize attaches a legend cell's appearance shape to its entity" {
+    const tm: Tilemap = .{
+        .legend = &.{
+            .{ .glyph = 'o', .bundle = .{ .appearance = .{ .color = .{ 0.9, 0.9, 0.7 }, .size = 0.2, .shape = .circle } } },
+        },
+        .rows = &.{"o"},
+    };
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    try materialize(tm, &world);
+    const e = world.entityAt(0);
+    try testing.expectEqual(gpu.Shape.circle, world.getAppearance(e).?.shape);
 }
 
 test "tilemap: parse a legend+rows grid from ZON (char glyphs, rows of chars)" {

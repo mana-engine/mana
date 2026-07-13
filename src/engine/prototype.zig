@@ -8,6 +8,7 @@
 const std = @import("std");
 const core = @import("core");
 const data = @import("data");
+const gpu = @import("gpu");
 const components = @import("components.zig");
 const scene = @import("scene.zig");
 
@@ -120,6 +121,15 @@ test "prototype: bundleAt carries an appearance through to the bundle" {
     const bundle = bundleAt(proto, .{ .x = 1, .y = 1, .z = 0 });
     try testing.expect(std.mem.eql(f32, &.{ 1, 0.9, 0.2 }, &bundle.appearance.?.color));
     try testing.expectEqual(@as(f32, 0.7), bundle.appearance.?.size);
+}
+
+test "prototype: bundleAt carries an appearance's shape through to the bundle" {
+    const proto: Prototype = .{
+        .name = "pac",
+        .appearance = .{ .color = .{ 1, 0.9, 0.2 }, .shape = .circle },
+    };
+    const bundle = bundleAt(proto, .{ .x = 1, .y = 1, .z = 0 });
+    try testing.expectEqual(gpu.Shape.circle, bundle.appearance.?.shape);
 }
 
 test "prototype registry: lookup finds a named prototype and misses cleanly" {

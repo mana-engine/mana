@@ -263,6 +263,22 @@ test "scene: an appearance parses and, on load, the entity has the expected Appe
     try testing.expect(world.getAppearance(prop) == null);
 }
 
+test "scene: an appearance's shape parses from ZON and defaults to rect when omitted" {
+    const src =
+        \\.{
+        \\    .name = "arena",
+        \\    .entities = .{
+        \\        .{ .name = "dot", .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } }, .appearance = .{ .color = .{ 1, 1, 1 }, .shape = .circle } },
+        \\        .{ .name = "wall", .transform = .{ .pos = .{ .x = 1, .y = 0, .z = 0 } }, .appearance = .{ .color = .{ 1, 1, 1 } } },
+        \\    },
+        \\}
+    ;
+    const scene = try parse(testing.allocator, src);
+    defer free(testing.allocator, scene);
+    try testing.expectEqual(components.Appearance{ .color = .{ 1, 1, 1 }, .shape = .circle }, scene.entities[0].appearance.?);
+    try testing.expectEqual(components.Appearance{ .color = .{ 1, 1, 1 } }, scene.entities[1].appearance.?); // shape omitted -> .rect
+}
+
 test "scene: a tilemap parses and materializes wall colliders on load" {
     // A scene with no explicit entities and a small ring-of-walls tilemap. The maze
     // layout is compact grid data (ADR 0026), not one hand-written entity per cell.
