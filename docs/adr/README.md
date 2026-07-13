@@ -39,3 +39,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0025 | Content-declarable colliders: `.collider` in the scene/prototype schema | accepted |
 | 0026 | Tilemap level data: a grid-of-cells scene resource the engine materializes | accepted |
 | 0027 | Native pathfinding + steering: Lua selects the target, the engine steers | accepted |
+| 0028 | Acceptance / scenario tests: a behavioral oracle atop the deterministic sim | proposed |
