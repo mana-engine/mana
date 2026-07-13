@@ -4,6 +4,10 @@ zig-cache/
 zig-out/
 zig-pkg/
 
+# Generated sprite sheets + previews (ADR 0031): DERIVED from committed `.zon`
+# recipes via `mise run assets`; the recipe is the source of truth, never the sheet.
+**/sprites/generated/
+
 # Editor / OS noise
 *.swp
 .DS_Store
