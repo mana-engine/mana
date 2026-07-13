@@ -21,7 +21,9 @@ pub const View = struct {
     /// World→screen mapping. Defaults to top-down orthographic; content asks for
     /// isometric explicitly (invariant #6: the engine has no default genre/camera).
     projection: Projection = .{ .orthographic = .{} },
-    /// Quad half-size in pixels.
+    /// Fallback quad half-size in pixels for an entity with no `Appearance` (ADR
+    /// 0030) — unchanged legacy behavior. An entity that declares an `Appearance` is
+    /// instead sized from its world-space `size` field × `pxPerWorldUnit`.
     quad_half_px: f32 = 16,
 };
 
@@ -44,6 +46,20 @@ pub const Projection = union(enum) {
     };
 };
 
+/// Screen pixels drawn per one world unit under `proj` (ADR 0030) — used to size an
+/// appearance-declared quad in world space rather than fixed pixels, so an entity's
+/// on-screen footprint scales with the projection instead of every entity drawing the
+/// same size regardless of scale. Orthographic: exactly `scale`. Isometric: `half_w`,
+/// the screen-space spread of one world-X unit — a pragmatic single scale for a square
+/// footprint (the SVG/GPU emitters draw axis-aligned rects, not diamonds; a per-shape
+/// emitter is a documented future follow-up, ADR 0029 §7).
+fn pxPerWorldUnit(proj: Projection) f32 {
+    return switch (proj) {
+        .orthographic => |o| o.scale,
+        .isometric => |tile| tile.half_w,
+    };
+}
+
 /// Screen position and depth-sort key for one world point under `proj`. `origin` is
 /// the screen pixel that world `(0,0,0)` maps to (typically the viewport centre).
 /// Greater `depth` = nearer/front (drawn later, lands on top). Pure and total.
@@ -60,7 +76,8 @@ fn projectPoint(proj: Projection, pos: core.Vec3, origin: core.Vec2) struct { sc
     };
 }
 
-/// Distinct colours cycled per entity so drawn quads are visually separable.
+/// Distinct colours cycled per entity so drawn quads are visually separable. Fallback
+/// only: an entity with a declared `Appearance` (ADR 0030) uses its own color instead.
 pub const default_palette = [_][3]f32{
     .{ 0.90, 0.35, 0.40 },
     .{ 0.35, 0.80, 0.50 },
@@ -93,8 +110,15 @@ fn lessThanDepth(_: void, a: DepthEntry, b: DepthEntry) bool {
 /// (greater = nearer) so the caller can submit quads in order and get correct
 /// painter's-algorithm occlusion — nearer entities are drawn later and land on top.
 /// The sort is stable and tie-breaks equal depth by entity index, so output order is
-/// fully deterministic. The image origin is the screen centre. Caller owns the
-/// returned slice. Pure/deterministic.
+/// fully deterministic. The image origin is the screen centre.
+///
+/// Each entity's color and size come from its `Appearance` (ADR 0030) when present:
+/// `Appearance.color` replaces the `palette` pick, and `Appearance.size` (a world-space
+/// footprint) is scaled by `pxPerWorldUnit(view.projection)` to size the quad — so a
+/// wall on a one-unit grid cell fills its cell and a dot stays small, regardless of the
+/// projection's pixel scale. An entity with no `Appearance` keeps the legacy fallback:
+/// `palette[entity_index % palette.len]` and the fixed `view.quad_half_px`. Caller owns
+/// the returned slice. Pure/deterministic.
 pub fn project(gpa: Allocator, world: *World, view: View, palette: []const [3]f32) Allocator.Error![]gpu.Quad {
     const half_w = @as(f32, @floatFromInt(view.width)) / 2;
     const half_h = @as(f32, @floatFromInt(view.height)) / 2;
@@ -104,11 +128,14 @@ pub fn project(gpa: Allocator, world: *World, view: View, palette: []const [3]f3
     defer entries.deinit(gpa);
     for (world.transforms.entities(), world.transforms.slice()) |entity_index, t| {
         const p = projectPoint(view.projection, t.pos, origin);
+        const appearance = world.appearances.get(entity_index);
+        const color = if (appearance) |a| a.color else palette[entity_index % palette.len];
+        const half_px = if (appearance) |a| (a.size / 2) * pxPerWorldUnit(view.projection) else view.quad_half_px;
         try entries.append(gpa, .{
             .quad = .{
                 .center = .{ p.screen.x / half_w - 1, p.screen.y / half_h - 1 },
-                .half = .{ view.quad_half_px / half_w, view.quad_half_px / half_h },
-                .color = palette[entity_index % palette.len],
+                .half = .{ half_px / half_w, half_px / half_h },
+                .color = color,
             },
             .depth = p.depth,
             .entity_index = entity_index,
@@ -200,6 +227,57 @@ test "project: equal-depth quads tie-break deterministically by entity index" {
     try testing.expectEqual(@as(usize, 2), quads.len);
     try testing.expect(std.mem.eql(f32, &quads[0].color, &default_palette[a.index % default_palette.len]));
     try testing.expect(std.mem.eql(f32, &quads[1].color, &default_palette[b.index % default_palette.len]));
+}
+
+test "project: an entity with an Appearance uses its color, not the palette" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    const e = try world.spawn();
+    try world.setTransform(e, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try world.setAppearance(e, .{ .color = .{ 0.1, 0.2, 0.3 } });
+
+    const view: View = .{ .width = 256, .height = 256, .projection = .{ .orthographic = .{ .scale = 32 } } };
+    const quads = try project(testing.allocator, &world, view, &default_palette);
+    defer testing.allocator.free(quads);
+
+    try testing.expect(std.mem.eql(f32, &.{ 0.1, 0.2, 0.3 }, &quads[0].color));
+    // Not the palette's index-0 fallback colour.
+    try testing.expect(!std.mem.eql(f32, &default_palette[0], &quads[0].color));
+}
+
+test "project: an entity's Appearance.size scales the quad by world-scale, not view.quad_half_px" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    const with_appearance = try world.spawn();
+    try world.setTransform(with_appearance, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try world.setAppearance(with_appearance, .{ .color = .{ 1, 1, 1 }, .size = 1 }); // 1 world unit wide
+    const without_appearance = try world.spawn();
+    try world.setTransform(without_appearance, .{ .pos = .{ .x = 5, .y = 5, .z = 0 } });
+
+    // scale = 24px/unit ⇒ Appearance.size=1 ⇒ half-extent 12px, not the 16px default.
+    const view: View = .{ .width = 256, .height = 256, .projection = .{ .orthographic = .{ .scale = 24 } } };
+    const quads = try project(testing.allocator, &world, view, &default_palette);
+    defer testing.allocator.free(quads);
+
+    const half_w: f32 = 128;
+    try testing.expectApproxEqAbs(@as(f32, 12.0 / 128.0), quads[0].half[0], 1e-6);
+    // The appearance-less entity keeps the legacy fixed 16px half-extent.
+    try testing.expectApproxEqAbs(view.quad_half_px / half_w, quads[1].half[0], 1e-6);
+}
+
+test "project: pxPerWorldUnit uses half_w under isometric to scale an Appearance quad" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    const e = try world.spawn();
+    try world.setTransform(e, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try world.setAppearance(e, .{ .color = .{ 1, 1, 1 }, .size = 2 }); // 2 world units wide
+
+    const view: View = .{ .width = 256, .height = 256, .projection = .{ .isometric = .{ .half_w = 32, .half_h = 16, .z_height = 16 } } };
+    const quads = try project(testing.allocator, &world, view, &default_palette);
+    defer testing.allocator.free(quads);
+
+    // half-extent = (size/2) * half_w = 1 * 32 = 32px.
+    try testing.expectApproxEqAbs(@as(f32, 32.0 / 128.0), quads[0].half[0], 1e-6);
 }
 
 test "project: orthographic maps world axes straight to screen (identity/edge/negative)" {

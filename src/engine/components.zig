@@ -41,6 +41,23 @@ pub const Collider = struct {
     is_static: bool = false,
 };
 
+/// Cosmetic per-entity render appearance (ADR 0030): what the headless/GPU renderer
+/// draws instead of the palette-by-spawn-order fallback (`render.default_palette`).
+/// `color` replaces the palette pick; `size` is the entity's WORLD-space footprint
+/// (full width/height of its square quad, in world units) that `render.project`
+/// multiplies by the projection's pixels-per-world-unit scale — so a wall on a
+/// one-unit grid cell (`size = 1`) fills its cell and a dot (`size = 0.3`) stays
+/// small, regardless of the projection's pixel scale. Purely a render-time hint: it
+/// never affects collision, pathfinding, or any other sim system, so it is excluded
+/// from `World.stateHash` like `Velocity`/`Controller`/`NavAgent`.
+pub const Appearance = struct {
+    /// RGB, each channel 0..1.
+    color: [3]f32,
+    /// Full world-space width/height of the rendered quad. Defaults to one world
+    /// unit (a full grid cell on a unit-cell tilemap).
+    size: f32 = 1,
+};
+
 /// A navigation agent (ADR 0027): an entity the native `nav` steering system drives
 /// toward a target grid cell each tick. `speed` is its movement rate in world units
 /// per second along the path. The target cell itself is *not* held here — it lives in
@@ -77,6 +94,9 @@ pub const Bundle = struct {
     /// entity is steered natively toward its target cell by the `nav` system — the same
     /// `NavAgent` `World.setNavAgent` accepts.
     nav_agent: ?NavAgent = null,
+    /// A render appearance (ADR 0030) to attach — the color/size the renderer draws
+    /// this entity with, in place of the palette-by-index fallback.
+    appearance: ?Appearance = null,
 };
 
 /// Kinematic character-controller intent (ADR 0008 follow-on: move-and-slide).

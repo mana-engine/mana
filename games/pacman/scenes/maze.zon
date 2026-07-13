@@ -25,6 +25,11 @@
 // Layers (physics.Layers, bidirectional mask): wall=16/mask 0 (collides with nothing —
 // nav does the blocking), pac=1, ghost=2, dot=4, pellet=8; pickups & ghosts mask pac
 // (1) only, so the sole collision events are pac↔dot, pac↔pellet, pac↔ghost.
+//
+// Appearance (ADR 0030): walls are a solid blue filling their cell; dots are small and
+// pale (barely more than a speck); pellets are a bigger pale dot, so the two pickups
+// read as distinct without a new shape (a shape field is a documented future follow-up,
+// ADR 0029 §7 — every quad today is a square).
 .{
     .name = "maze",
     .tilemap = .{
@@ -32,7 +37,8 @@
         .origin = .{ .x = -9, .y = -5, .z = 0 },
         .legend = .{
             // '#' → a static wall: a nav-blocking collider that never itself collides.
-            .{ .glyph = '#', .bundle = .{ .collider = .{ .shape = .{ .circle = .{ .radius = 0.5 } }, .layers = .{ .layer = 16, .mask = 0 }, .is_static = true } } },
+            // size 1 fills its one-unit cell exactly (ADR 0030).
+            .{ .glyph = '#', .bundle = .{ .collider = .{ .shape = .{ .circle = .{ .radius = 0.5 } }, .layers = .{ .layer = 16, .mask = 0 }, .is_static = true }, .appearance = .{ .color = .{ 0.15, 0.25, 0.75 }, .size = 1 } } },
         },
         .rows = .{
             "###################",
@@ -53,19 +59,19 @@
     // sharing a pickup's cell fires a collision.
     .entities = .{
         // Power pellets ('o' cells, row 9 cols 1 & 17).
-        .{ .name = "pellet", .transform = .{ .pos = .{ .x = -8, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 8, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 4 }} },
-        .{ .name = "pellet", .transform = .{ .pos = .{ .x = 8, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 8, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 4 }} },
+        .{ .name = "pellet", .transform = .{ .pos = .{ .x = -8, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 8, .mask = 1 } }, .appearance = .{ .color = .{ 0.95, 0.9, 0.7 }, .size = 0.4 }, .data = .{.{ .name = "kind", .value = 4 }} },
+        .{ .name = "pellet", .transform = .{ .pos = .{ .x = 8, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 8, .mask = 1 } }, .appearance = .{ .color = .{ 0.95, 0.9, 0.7 }, .size = 0.4 }, .data = .{.{ .name = "kind", .value = 4 }} },
         // A curated set of dots on open floor cells (a scaffold subset, not every cell).
-        .{ .name = "dot", .transform = .{ .pos = .{ .x = -7, .y = -4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
-        .{ .name = "dot", .transform = .{ .pos = .{ .x = -3, .y = -4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
-        .{ .name = "dot", .transform = .{ .pos = .{ .x = 3, .y = -4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
-        .{ .name = "dot", .transform = .{ .pos = .{ .x = 7, .y = -4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
-        .{ .name = "dot", .transform = .{ .pos = .{ .x = -5, .y = -2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
-        .{ .name = "dot", .transform = .{ .pos = .{ .x = 0, .y = -2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
-        .{ .name = "dot", .transform = .{ .pos = .{ .x = 5, .y = -2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
-        .{ .name = "dot", .transform = .{ .pos = .{ .x = -7, .y = 2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
-        .{ .name = "dot", .transform = .{ .pos = .{ .x = 7, .y = 2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
-        .{ .name = "dot", .transform = .{ .pos = .{ .x = -5, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
-        .{ .name = "dot", .transform = .{ .pos = .{ .x = 5, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = -7, .y = -4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .appearance = .{ .color = .{ 0.85, 0.8, 0.65 }, .size = 0.18 }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = -3, .y = -4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .appearance = .{ .color = .{ 0.85, 0.8, 0.65 }, .size = 0.18 }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = 3, .y = -4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .appearance = .{ .color = .{ 0.85, 0.8, 0.65 }, .size = 0.18 }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = 7, .y = -4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .appearance = .{ .color = .{ 0.85, 0.8, 0.65 }, .size = 0.18 }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = -5, .y = -2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .appearance = .{ .color = .{ 0.85, 0.8, 0.65 }, .size = 0.18 }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = 0, .y = -2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .appearance = .{ .color = .{ 0.85, 0.8, 0.65 }, .size = 0.18 }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = 5, .y = -2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .appearance = .{ .color = .{ 0.85, 0.8, 0.65 }, .size = 0.18 }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = -7, .y = 2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .appearance = .{ .color = .{ 0.85, 0.8, 0.65 }, .size = 0.18 }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = 7, .y = 2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .appearance = .{ .color = .{ 0.85, 0.8, 0.65 }, .size = 0.18 }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = -5, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .appearance = .{ .color = .{ 0.85, 0.8, 0.65 }, .size = 0.18 }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = 5, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .appearance = .{ .color = .{ 0.85, 0.8, 0.65 }, .size = 0.18 }, .data = .{.{ .name = "kind", .value = 3 }} },
     },
 }

@@ -50,6 +50,7 @@ pub fn bundleAt(proto: Prototype, pos: core.Vec3) components.Bundle {
         .collider = proto.collider, // collider (ADR 0025) carries through as-is
         .data = proto.data, // named data components (ADR 0024) carry through as-is
         .nav_agent = proto.nav_agent, // nav agent (ADR 0027) carries through as-is
+        .appearance = proto.appearance, // appearance (ADR 0030) carries through as-is
     };
 }
 
@@ -109,6 +110,16 @@ test "prototype: bundleAt gives a transformless prototype a transform at the spa
     const bundle = bundleAt(proto, .{ .x = 4, .y = 5, .z = 6 });
     try testing.expect(bundle.transform.?.pos.approxEql(.{ .x = 4, .y = 5, .z = 6 }, 1e-6));
     try testing.expect(bundle.velocity.?.v.approxEql(.{ .x = 1, .y = 0, .z = 0 }, 1e-6));
+}
+
+test "prototype: bundleAt carries an appearance through to the bundle" {
+    const proto: Prototype = .{
+        .name = "pac",
+        .appearance = .{ .color = .{ 1, 0.9, 0.2 }, .size = 0.7 },
+    };
+    const bundle = bundleAt(proto, .{ .x = 1, .y = 1, .z = 0 });
+    try testing.expect(std.mem.eql(f32, &.{ 1, 0.9, 0.2 }, &bundle.appearance.?.color));
+    try testing.expectEqual(@as(f32, 0.7), bundle.appearance.?.size);
 }
 
 test "prototype registry: lookup finds a named prototype and misses cleanly" {
