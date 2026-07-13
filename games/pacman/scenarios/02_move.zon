@@ -2,7 +2,12 @@
 // heading (rules.lua `pac_dir` default, native `nav` continuous steering — ADR 0027 —
 // not a grid teleport like Snake). Position at tick 20 is the deterministic float
 // this content + seed always reaches (verified by two independent runs agreeing
-// bit-for-bit; see tests/acceptance_scenarios.zig).
+// bit-for-bit; see tests/acceptance_scenarios.zig). Since #108, pac's nav target is
+// the next cell in its heading rather than a far one (so it never auto-turns around a
+// corner); on this fully open row that changes nothing about *where* pac goes, only
+// that it now covers ground very slightly slower (the 0.1s retarget cadence
+// occasionally lands a tick before pac reaches its current target cell), hence the
+// updated float below.
 .{
     .steps = 20,
     .input_trace = .{
@@ -12,7 +17,7 @@
         .{
             .label = "move: with no input, pac steers left along its default heading",
             .at_tick = 20,
-            .check = .{ .occupied = .{ .x = -2.733, .y = 4, .eps = 0.02 } },
+            .check = .{ .occupied = .{ .x = -2.467, .y = 4, .eps = 0.02 } },
         },
         .{
             .label = "move: the start cell is vacated (continuous steering, not a teleport)",
