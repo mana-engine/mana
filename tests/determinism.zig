@@ -1,9 +1,12 @@
-//! Integration + determinism test: load a golden scene fixture into an ECS world,
-//! run the movement system a fixed number of steps, and assert a bit-identical
-//! state hash. This is the backbone guarantee of the file-driven, deterministic
-//! core; if it regresses, either the sim math or the serializer drifted. The pinned
-//! hash also equals what `mise run run -- games/sandbox` prints for the shipped
-//! scene (the fixture and the sandbox scene are identical).
+//! Integration + determinism test: load a golden scene fixture into a `Sim`, register
+//! the engine's full standard system set in the exact order the runner uses, run a
+//! fixed number of ticks, and assert a bit-identical state hash. This is the backbone
+//! guarantee of the file-driven, deterministic core; if it regresses, either the sim
+//! math or the serializer drifted. The pinned hash also equals what `mise run run --
+//! games/sandbox` prints for the shipped scene (the fixture and the sandbox scene are
+//! identical) — and, because the harness now runs the *whole* set, it doubles as the CI
+//! proof that `nav`/`collision` are genuine no-ops on this plain, tilemap- and
+//! collider-free scene (the invariant the runner's unconditional registration rests on).
 
 const std = @import("std");
 const core = @import("core");
@@ -15,23 +18,30 @@ const tick_steps: u32 = 60;
 /// Known-good scene, embedded at compile time so the on-disk golden is locked in.
 const scene_src: [:0]const u8 = @embedFile("fixtures/scene_hello.zon");
 
-/// The bit-identical state hash after `tick_steps` movement steps. Update only as a
-/// deliberate, reviewed step alongside an intended scene or math change.
+/// The bit-identical state hash after `tick_steps` ticks of the full standard system
+/// set. Update only as a deliberate, reviewed step alongside an intended scene or math
+/// change. Adding `nav`/`collision` to the harness left it unchanged: both no-op on
+/// this tilemap- and collider-free fixture.
 const golden_state_hash: u64 = 0x65f2a1949cd9fc40;
 
-fn buildWorld(gpa: std.mem.Allocator) !engine.World {
+/// Build a `Sim` from the golden fixture and register the engine's full standard system
+/// set in the exact order the runner does (see runtime `registerStandardSystems`):
+/// `nav → movement → collision → regen`. The fixture is a plain scene — no tilemap,
+/// nav agents, or colliders — so `nav` and `collision` MUST be no-ops here; running the
+/// whole set (not just `movement`+`regen`) is what pins the golden hash *and* proves
+/// that no-op invariant in CI, rather than by one-time manual capture. Caller owns the
+/// returned `Sim` (`deinit` it).
+fn buildSim(gpa: std.mem.Allocator) !engine.Sim {
     const scene = try engine.scene.parse(gpa, scene_src);
     defer engine.scene.free(gpa, scene);
-    return engine.scene.toWorld(gpa, scene);
-}
-
-fn run(world: *engine.World) void {
-    // Mirror the runner's Sim: movement then regen each tick. They touch disjoint
-    // columns (transforms vs healths), so this equals the registered-system order.
-    for (0..tick_steps) |_| {
-        engine.systems.movement(world, core.time.default_dt);
-        engine.systems.regen(world, engine.systems.regen_rate, core.time.default_dt);
-    }
+    var sim = engine.Sim.init(gpa, core.time.default_dt);
+    errdefer sim.deinit();
+    try engine.scene.load(scene, &sim.world);
+    try sim.addSystem(engine.nav.navSystem);
+    try sim.addSystem(engine.systems.movementSystem);
+    try sim.addSystem(engine.collision.collisionSystem);
+    try sim.addSystem(engine.systems.regenSystem);
+    return sim;
 }
 
 test "golden scene parses into the expected entities" {
@@ -49,19 +59,19 @@ test "golden scene parses into the expected entities" {
 
 test "determinism: fixed inputs ⇒ pinned state hash after N ticks" {
     const gpa = std.testing.allocator;
-    var world = try buildWorld(gpa);
-    defer world.deinit();
-    run(&world);
-    try std.testing.expectEqual(golden_state_hash, world.stateHash());
+    var sim = try buildSim(gpa);
+    defer sim.deinit();
+    try sim.run(tick_steps);
+    try std.testing.expectEqual(golden_state_hash, sim.stateHash());
 }
 
 test "determinism: two independent runs agree bit-for-bit" {
     const gpa = std.testing.allocator;
-    var a = try buildWorld(gpa);
+    var a = try buildSim(gpa);
     defer a.deinit();
-    var b = try buildWorld(gpa);
+    var b = try buildSim(gpa);
     defer b.deinit();
-    run(&a);
-    run(&b);
+    try a.run(tick_steps);
+    try b.run(tick_steps);
     try std.testing.expectEqual(a.stateHash(), b.stateHash());
 }
