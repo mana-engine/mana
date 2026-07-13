@@ -1,5 +1,5 @@
 ---
-description: Re-read the project rules, then review the current diff against them (hygiene + tests first).
+description: Review the current UNCOMMITTED working diff against this project's own rules in CLAUDE.md (vision invariants, module DAG, hygiene, tests) before you commit. For an opened GitHub PR use /review-pr; for a general correctness/cleanup bug-hunt at an effort level use /code-review.
 ---
 
 Review the current working changes against this project's own rules.
