@@ -442,6 +442,13 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     try sim.addSystem(engine.input.inputMoveSystem); // #30: held keys → velocity (before nav)
     try registerStandardSystems(&sim);
 
+    // Load the sprite sheets this scene references (issue #113 phase 2; ADR 0031 §2):
+    // the DERIVED `.msf` artifacts under `<pkg>/.../generated/` (built by `mise run
+    // assets`). Decoded once here; each frame the animation cursor is advanced from
+    // wall-clock time below. GPU upload + textured sampling is phase 2b.
+    var sheets = try engine.sprite.loadForWorld(gpa, io, Io.Dir.cwd(), pkg, &sim.world);
+    defer sheets.deinit();
+
     // Window before device (ADR 0012 §8): SDL video must be initialised so the Vulkan
     // backend can query surface extensions and build the surface.
     var window = try engine.platform.Window.open(gpa, .{ .title = manifest.name });
@@ -499,6 +506,10 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
             defer z.end();
             for (0..steps) |_| try sim.tick();
         }
+
+        // Cosmetic sprite animation advances by WALL-CLOCK elapsed time, never a sim
+        // tick, so it stays out of `stateHash` (ADR 0031 §1; issue #113 item 3).
+        engine.sprite.advance(&sim.world, &sheets, elapsed_s);
 
         // Plots (ADR 0023): live app-state time series. fps guards a zero-length frame;
         // tick_rate is steps advanced this frame; entities is the live world count.
