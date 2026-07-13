@@ -356,8 +356,9 @@ test "world: an appearance does not perturb the state hash (cosmetic, excluded)"
         try wp.setTransform(e, .{ .pos = .{ .x = 1, .y = 2, .z = 3 } });
     }
     // Attaching an Appearance to one world must not change its hash — it is a
-    // render-time hint, not authoritative sim state.
-    try with.setAppearance(with.entityAt(0), .{ .color = .{ 0.2, 0.4, 0.9 }, .size = 2 });
+    // render-time hint, not authoritative sim state. `shape` (ADR 0030 shape
+    // addendum) is part of the same struct and must stay excluded too.
+    try with.setAppearance(with.entityAt(0), .{ .color = .{ 0.2, 0.4, 0.9 }, .size = 2, .shape = .circle });
     try testing.expectEqual(without.stateHash(), with.stateHash());
 }
 

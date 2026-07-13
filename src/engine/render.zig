@@ -112,13 +112,14 @@ fn lessThanDepth(_: void, a: DepthEntry, b: DepthEntry) bool {
 /// The sort is stable and tie-breaks equal depth by entity index, so output order is
 /// fully deterministic. The image origin is the screen centre.
 ///
-/// Each entity's color and size come from its `Appearance` (ADR 0030) when present:
-/// `Appearance.color` replaces the `palette` pick, and `Appearance.size` (a world-space
-/// footprint) is scaled by `pxPerWorldUnit(view.projection)` to size the quad — so a
-/// wall on a one-unit grid cell fills its cell and a dot stays small, regardless of the
-/// projection's pixel scale. An entity with no `Appearance` keeps the legacy fallback:
-/// `palette[entity_index % palette.len]` and the fixed `view.quad_half_px`. Caller owns
-/// the returned slice. Pure/deterministic.
+/// Each entity's color, size, and shape come from its `Appearance` (ADR 0030) when
+/// present: `Appearance.color` replaces the `palette` pick, `Appearance.size` (a
+/// world-space footprint) is scaled by `pxPerWorldUnit(view.projection)` to size the
+/// quad, and `Appearance.shape` carries straight through to `gpu.Quad.shape` — so a
+/// wall on a one-unit grid cell fills its cell and a dot stays small and round,
+/// regardless of the projection's pixel scale. An entity with no `Appearance` keeps
+/// the legacy fallback: `palette[entity_index % palette.len]`, the fixed
+/// `view.quad_half_px`, and `.rect`. Caller owns the returned slice. Pure/deterministic.
 pub fn project(gpa: Allocator, world: *World, view: View, palette: []const [3]f32) Allocator.Error![]gpu.Quad {
     const half_w = @as(f32, @floatFromInt(view.width)) / 2;
     const half_h = @as(f32, @floatFromInt(view.height)) / 2;
@@ -131,11 +132,13 @@ pub fn project(gpa: Allocator, world: *World, view: View, palette: []const [3]f3
         const appearance = world.appearances.get(entity_index);
         const color = if (appearance) |a| a.color else palette[entity_index % palette.len];
         const half_px = if (appearance) |a| (a.size / 2) * pxPerWorldUnit(view.projection) else view.quad_half_px;
+        const shape = if (appearance) |a| a.shape else .rect;
         try entries.append(gpa, .{
             .quad = .{
                 .center = .{ p.screen.x / half_w - 1, p.screen.y / half_h - 1 },
                 .half = .{ half_px / half_w, half_px / half_h },
                 .color = color,
+                .shape = shape,
             },
             .depth = p.depth,
             .entity_index = entity_index,
@@ -278,6 +281,27 @@ test "project: pxPerWorldUnit uses half_w under isometric to scale an Appearance
 
     // half-extent = (size/2) * half_w = 1 * 32 = 32px.
     try testing.expectApproxEqAbs(@as(f32, 32.0 / 128.0), quads[0].half[0], 1e-6);
+}
+
+test "project: an entity's Appearance.shape carries through to the quad; absent Appearance defaults to rect" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    const circle = try world.spawn();
+    try world.setTransform(circle, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try world.setAppearance(circle, .{ .color = .{ 1, 1, 1 }, .shape = .circle });
+    const default_rect = try world.spawn();
+    try world.setTransform(default_rect, .{ .pos = .{ .x = 1, .y = 0, .z = 0 } });
+    try world.setAppearance(default_rect, .{ .color = .{ 1, 1, 1 } }); // shape omitted
+    const no_appearance = try world.spawn();
+    try world.setTransform(no_appearance, .{ .pos = .{ .x = 2, .y = 0, .z = 0 } });
+
+    const view: View = .{ .width = 256, .height = 256, .projection = .{ .orthographic = .{ .scale = 32 } } };
+    const quads = try project(testing.allocator, &world, view, &default_palette);
+    defer testing.allocator.free(quads);
+
+    try testing.expectEqual(gpu.Shape.circle, quads[0].shape);
+    try testing.expectEqual(gpu.Shape.rect, quads[1].shape);
+    try testing.expectEqual(gpu.Shape.rect, quads[2].shape);
 }
 
 test "project: orthographic maps world axes straight to screen (identity/edge/negative)" {

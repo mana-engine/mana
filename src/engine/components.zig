@@ -5,6 +5,7 @@
 
 const core = @import("core");
 const physics = @import("physics");
+const gpu = @import("gpu");
 
 const Vec2 = core.Vec2;
 const Vec3 = core.Vec3;
@@ -41,21 +42,28 @@ pub const Collider = struct {
     is_static: bool = false,
 };
 
-/// Cosmetic per-entity render appearance (ADR 0030): what the headless/GPU renderer
-/// draws instead of the palette-by-spawn-order fallback (`render.default_palette`).
-/// `color` replaces the palette pick; `size` is the entity's WORLD-space footprint
-/// (full width/height of its square quad, in world units) that `render.project`
-/// multiplies by the projection's pixels-per-world-unit scale — so a wall on a
-/// one-unit grid cell (`size = 1`) fills its cell and a dot (`size = 0.3`) stays
-/// small, regardless of the projection's pixel scale. Purely a render-time hint: it
-/// never affects collision, pathfinding, or any other sim system, so it is excluded
-/// from `World.stateHash` like `Velocity`/`Controller`/`NavAgent`.
+/// Cosmetic per-entity render appearance (ADR 0030, shape addendum): what the
+/// headless/GPU renderer draws instead of the palette-by-spawn-order fallback
+/// (`render.default_palette`). `color` replaces the palette pick; `size` is the
+/// entity's WORLD-space footprint (full width/height of its quad, in world units)
+/// that `render.project` multiplies by the projection's pixels-per-world-unit scale
+/// — so a wall on a one-unit grid cell (`size = 1`) fills its cell and a dot
+/// (`size = 0.3`) stays small, regardless of the projection's pixel scale. `shape`
+/// is the silhouette drawn within that footprint (`gpu.Shape`: `rect` default,
+/// `circle`) — a small, genre-neutral vocabulary; what a shape *means* (a wall vs. a
+/// pellet) is content's job, never `src/`. Purely a render-time hint: none of these
+/// fields ever affect collision, pathfinding, or any other sim system, so `Appearance`
+/// is excluded from `World.stateHash` like `Velocity`/`Controller`/`NavAgent`.
 pub const Appearance = struct {
     /// RGB, each channel 0..1.
     color: [3]f32,
     /// Full world-space width/height of the rendered quad. Defaults to one world
     /// unit (a full grid cell on a unit-cell tilemap).
     size: f32 = 1,
+    /// Silhouette to draw within the quad's footprint. Defaults to `.rect`, the
+    /// pre-existing look — every package that declares no shape renders
+    /// byte-identically to before this field existed.
+    shape: gpu.Shape = .rect,
 };
 
 /// A navigation agent (ADR 0027): an entity the native `nav` steering system drives

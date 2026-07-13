@@ -15,6 +15,9 @@ const Allocator = std.mem.Allocator;
 
 /// Plain-data quad the engine hands the port to draw (no Vulkan types).
 pub const Quad = @import("types.zig").Quad;
+/// The silhouette a `Quad` draws as (ADR 0030 shape addendum): `rect` (default) or
+/// `circle`.
+pub const Shape = @import("types.zig").Shape;
 
 // --- Port vocabulary (engine-owned, backend-free) --------------------------------
 pub const TextureFormat = port.TextureFormat;

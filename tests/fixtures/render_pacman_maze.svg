@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
 <rect x="0.00" y="0.00" width="512.00" height="512.00" fill="rgb(23,26,36)"/>
-<rect x="59.20" y="347.20" width="9.60" height="9.60" fill="rgb(242,230,179)"/>
-<rect x="443.20" y="347.20" width="9.60" height="9.60" fill="rgb(242,230,179)"/>
-<rect x="85.84" y="157.84" width="4.32" height="4.32" fill="rgb(217,204,166)"/>
-<rect x="181.84" y="157.84" width="4.32" height="4.32" fill="rgb(217,204,166)"/>
-<rect x="325.84" y="157.84" width="4.32" height="4.32" fill="rgb(217,204,166)"/>
-<rect x="421.84" y="157.84" width="4.32" height="4.32" fill="rgb(217,204,166)"/>
-<rect x="133.84" y="205.84" width="4.32" height="4.32" fill="rgb(217,204,166)"/>
-<rect x="253.84" y="205.84" width="4.32" height="4.32" fill="rgb(217,204,166)"/>
-<rect x="373.84" y="205.84" width="4.32" height="4.32" fill="rgb(217,204,166)"/>
-<rect x="85.84" y="301.84" width="4.32" height="4.32" fill="rgb(217,204,166)"/>
-<rect x="421.84" y="301.84" width="4.32" height="4.32" fill="rgb(217,204,166)"/>
-<rect x="133.84" y="349.84" width="4.32" height="4.32" fill="rgb(217,204,166)"/>
-<rect x="373.84" y="349.84" width="4.32" height="4.32" fill="rgb(217,204,166)"/>
+<ellipse cx="64.00" cy="352.00" rx="4.80" ry="4.80" fill="rgb(242,230,179)"/>
+<ellipse cx="448.00" cy="352.00" rx="4.80" ry="4.80" fill="rgb(242,230,179)"/>
+<ellipse cx="88.00" cy="160.00" rx="2.16" ry="2.16" fill="rgb(217,204,166)"/>
+<ellipse cx="184.00" cy="160.00" rx="2.16" ry="2.16" fill="rgb(217,204,166)"/>
+<ellipse cx="328.00" cy="160.00" rx="2.16" ry="2.16" fill="rgb(217,204,166)"/>
+<ellipse cx="424.00" cy="160.00" rx="2.16" ry="2.16" fill="rgb(217,204,166)"/>
+<ellipse cx="136.00" cy="208.00" rx="2.16" ry="2.16" fill="rgb(217,204,166)"/>
+<ellipse cx="256.00" cy="208.00" rx="2.16" ry="2.16" fill="rgb(217,204,166)"/>
+<ellipse cx="376.00" cy="208.00" rx="2.16" ry="2.16" fill="rgb(217,204,166)"/>
+<ellipse cx="88.00" cy="304.00" rx="2.16" ry="2.16" fill="rgb(217,204,166)"/>
+<ellipse cx="424.00" cy="304.00" rx="2.16" ry="2.16" fill="rgb(217,204,166)"/>
+<ellipse cx="136.00" cy="352.00" rx="2.16" ry="2.16" fill="rgb(217,204,166)"/>
+<ellipse cx="376.00" cy="352.00" rx="2.16" ry="2.16" fill="rgb(217,204,166)"/>
 <rect x="28.00" y="124.00" width="24.00" height="24.00" fill="rgb(38,64,191)"/>
 <rect x="52.00" y="124.00" width="24.00" height="24.00" fill="rgb(38,64,191)"/>
 <rect x="76.00" y="124.00" width="24.00" height="24.00" fill="rgb(38,64,191)"/>

@@ -1,5 +1,6 @@
-//! Headless SVG render output (ADR 0029): turns `render.project`'s GPU-free quads
-//! into a text SVG document — a background rect plus one `<rect>` per quad. No
+//! Headless SVG render output (ADR 0029, ADR 0030 shape addendum): turns
+//! `render.project`'s GPU-free quads into a text SVG document — a background rect
+//! plus one shape element per quad, `<rect>` or `<ellipse>` per `gpu.Quad.shape`. No
 //! rasterizer, no GPU, no window: this compiles unconditionally into `engine` (never
 //! behind `-Denable-vulkan`), so a level is viewable on the DEFAULT build. Byte-stable
 //! (fixed 2-decimal-place coordinates, draw order = the caller's slice order — which
@@ -23,8 +24,10 @@ pub const default_background = [3]f32{ 0.09, 0.10, 0.14 };
 
 /// Render `quads` (already projected into NDC space by `render.project` through
 /// `view`) as an SVG document: a `view.width` x `view.height` canvas, a full-bleed
-/// `background` rect, then one `<rect>` per quad in `quads`' given order — the
-/// caller's responsibility to have depth-sorted them (`project` already does).
+/// `background` rect, then one shape element per quad in `quads`' given order — a
+/// `<rect>` for `.rect`-shaped quads, an `<ellipse>` for `.circle`-shaped ones
+/// (ADR 0030 shape addendum) — the caller's responsibility to have depth-sorted them
+/// (`project` already does).
 ///
 /// Deterministic and byte-stable: every coordinate and colour channel is printed at
 /// fixed 2-decimal-place precision, and quads are emitted in plain slice order — no
@@ -50,7 +53,10 @@ pub fn toSvg(gpa: Allocator, quads: []const gpu.Quad, view: render.View, backgro
         const cy = (q.center[1] + 1) * half_h;
         const hw = q.half[0] * half_w;
         const hh = q.half[1] * half_h;
-        try appendRect(gpa, &out, cx - hw, cy - hh, hw * 2, hh * 2, q.color);
+        switch (q.shape) {
+            .rect => try appendRect(gpa, &out, cx - hw, cy - hh, hw * 2, hh * 2, q.color),
+            .circle => try appendEllipse(gpa, &out, cx, cy, hw, hh, q.color),
+        }
     }
 
     try out.appendSlice(gpa, "</svg>\n");
@@ -64,6 +70,18 @@ fn appendRect(gpa: Allocator, out: *std.ArrayList(u8), x: f32, y: f32, w: f32, h
         gpa,
         "<rect x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\" fill=\"rgb({d},{d},{d})\"/>\n",
         .{ x, y, w, h, toChannel(color[0]), toChannel(color[1]), toChannel(color[2]) },
+    );
+}
+
+/// Append one `<ellipse>` element at fixed 2-decimal precision, centred at `cx, cy`
+/// with radii `rx, ry` — a `.circle`-shaped quad's silhouette (ADR 0030 shape
+/// addendum), inscribed in the same bounding box `appendRect` would fill with a
+/// square. `color` channels are 0..1 floats, converted to 0..255 `rgb()` integers.
+fn appendEllipse(gpa: Allocator, out: *std.ArrayList(u8), cx: f32, cy: f32, rx: f32, ry: f32, color: [3]f32) Allocator.Error!void {
+    try out.print(
+        gpa,
+        "<ellipse cx=\"{d:.2}\" cy=\"{d:.2}\" rx=\"{d:.2}\" ry=\"{d:.2}\" fill=\"rgb({d},{d},{d})\"/>\n",
+        .{ cx, cy, rx, ry, toChannel(color[0]), toChannel(color[1]), toChannel(color[2]) },
     );
 }
 
@@ -116,6 +134,20 @@ test "toSvg: an empty quad list still emits a valid document with just the backg
     try testing.expect(std.mem.indexOf(u8, svg, "width=\"64\" height=\"32\"") != null);
     try testing.expect(std.mem.indexOf(u8, svg, "fill=\"rgb(255,255,255)\"") != null);
     try testing.expect(std.mem.endsWith(u8, svg, "</svg>\n"));
+}
+
+test "toSvg: a circle-shaped quad emits an ellipse, not a rect" {
+    const quads = [_]gpu.Quad{
+        .{ .center = .{ 0, 0 }, .half = .{ 0.25, 0.25 }, .color = .{ 1, 0, 0 }, .shape = .circle },
+    };
+    const view: render.View = .{ .width = 256, .height = 256 };
+    const svg = try toSvg(testing.allocator, &quads, view, .{ 0, 0, 0 });
+    defer testing.allocator.free(svg);
+
+    // NDC centre (0,0) -> pixel (128,128); half 0.25 NDC -> 32px radius.
+    try testing.expect(std.mem.indexOf(u8, svg, "<ellipse cx=\"128.00\" cy=\"128.00\" rx=\"32.00\" ry=\"32.00\" fill=\"rgb(255,0,0)\"/>") != null);
+    // No rect for this quad (only the background rect, which is 256x256).
+    try testing.expect(std.mem.indexOf(u8, svg, "width=\"64.00\"") == null);
 }
 
 test "toSvg: colour channels round to the nearest 0..255 integer and clamp" {

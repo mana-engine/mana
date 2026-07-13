@@ -284,6 +284,23 @@ test "command buffer: a spawn bundle attaches an appearance at flush" {
     try testing.expectEqual(@as(f32, 0.6), world.getAppearance(e).?.size);
 }
 
+test "command buffer: a spawn bundle attaches an appearance's shape at flush" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+
+    var cb: CommandBuffer = .{};
+    defer cb.deinit(testing.allocator);
+    var events: event.Queue = .{};
+    defer events.deinit(testing.allocator);
+
+    const e = try cb.spawn(testing.allocator, &world, .{
+        .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } },
+        .appearance = .{ .color = .{ 1, 1, 0 }, .shape = .circle },
+    });
+    try cb.flush(testing.allocator, &world, &events);
+    try testing.expectEqual(@import("gpu").Shape.circle, world.getAppearance(e).?.shape);
+}
+
 test "command buffer: rollback discards only commands queued since the mark" {
     var world = World.init(testing.allocator);
     defer world.deinit();
