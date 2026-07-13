@@ -41,6 +41,7 @@ pub const collision = @import("collision.zig");
 pub const controller = @import("controller.zig");
 pub const nav = @import("nav.zig");
 pub const input = @import("input.zig");
+pub const invariants = @import("invariants.zig");
 
 /// The scripting API version this build provides (ADR 0003 §5), surfaced so the
 /// runtime can gate a package's required `script_api` without importing `script`
@@ -84,6 +85,7 @@ test {
     _ = controller;
     _ = nav;
     _ = input;
+    _ = invariants;
 }
 
 test "engine module assembles all ports" {
