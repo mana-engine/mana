@@ -107,6 +107,7 @@ pub const CommandBuffer = struct {
                 if (a.bundle.health) |h| try ignoreInvalid(world.setHealth(a.entity, h));
                 if (a.bundle.collider) |c| try ignoreInvalid(world.setCollider(a.entity, c));
                 if (a.bundle.nav_agent) |na| try ignoreInvalid(world.setNavAgent(a.entity, na));
+                if (a.bundle.appearance) |ap| try ignoreInvalid(world.setAppearance(a.entity, ap));
                 for (a.bundle.data) |nv| try ignoreInvalid(world.setDataByName(a.entity, nv.name, nv.value));
             },
             .set_transform => |s| try ignoreInvalid(world.setTransform(s.entity, s.value)),
@@ -262,6 +263,25 @@ test "command buffer: a spawn bundle attaches a collider at flush" {
     try cb.flush(testing.allocator, &world, &events);
     try testing.expectEqual(@as(f32, 2), world.getCollider(e).?.shape.circle.radius);
     try testing.expect(world.getCollider(e).?.is_static);
+}
+
+test "command buffer: a spawn bundle attaches an appearance at flush" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+
+    var cb: CommandBuffer = .{};
+    defer cb.deinit(testing.allocator);
+    var events: event.Queue = .{};
+    defer events.deinit(testing.allocator);
+
+    const e = try cb.spawn(testing.allocator, &world, .{
+        .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } },
+        .appearance = .{ .color = .{ 1, 1, 0 }, .size = 0.6 },
+    });
+    try testing.expect(world.getAppearance(e) == null); // not yet applied
+    try cb.flush(testing.allocator, &world, &events);
+    try testing.expect(std.mem.eql(f32, &.{ 1, 1, 0 }, &world.getAppearance(e).?.color));
+    try testing.expectEqual(@as(f32, 0.6), world.getAppearance(e).?.size);
 }
 
 test "command buffer: rollback discards only commands queued since the mark" {

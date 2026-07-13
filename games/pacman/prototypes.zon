@@ -1,7 +1,7 @@
 // Entity prototypes (ADR 0016) mana.spawn instantiates. Genre lives here in content,
 // never in src/. Positions come from the spawn call; templates carry the non-spatial
 // component defaults: a collider (ADR 0025), a nav agent + its target cell (ADR 0027),
-// and named scalar data components (ADR 0024).
+// named scalar data components (ADR 0024), and a render appearance (ADR 0030).
 //
 // Only pac and ghosts are script-spawned — they need a Lua handle so rules.lua can
 // select their nav targets and identify them in collisions. The maze walls come from
@@ -19,15 +19,26 @@
 //   - `nav_target_col`/`nav_target_row` (the ADR 0027 selection seam): a script sets
 //     these with `mana.set` to pick a target. They default to (0,0) — a wall cell — so
 //     a freshly spawned mover is stationary until rules.lua selects a real target.
+//   - `appearance` (ADR 0030): the color/size the renderer draws it with — a mover's
+//     collider radius is 0.4 (diameter 0.8), so `size = 0.7` reads as a solid disc-ish
+//     square filling most of its cell without abutting the wall/pickup quads next door.
+//
+// Three named ghost prototypes (rather than one), differing only in `appearance.color`,
+// so ghosts render as distinct pieces (the classic red/pink/cyan) even though every
+// ghost otherwise behaves identically — `rules.lua` picks a name per spawn index. A
+// per-instance appearance override at the `mana.spawn` call site is explicitly out of
+// scope (ADR 0016): a variant is a second named prototype.
 .{
     .prototypes = .{
         // The player. `score` is a data component so the engine (a debug overlay, a
-        // future HUD) can read the running score without asking the script.
+        // future HUD) can read the running score without asking the script. Yellow,
+        // the classic Pac color.
         .{
             .name = "pac",
             .velocity = .{ .v = .{ .x = 0, .y = 0, .z = 0 } },
             .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 1, .mask = 14 } },
             .nav_agent = .{ .speed = 8 },
+            .appearance = .{ .color = .{ 1.0, 0.9, 0.2 }, .size = 0.7 },
             .data = .{
                 .{ .name = "kind", .value = 1 },
                 .{ .name = "score", .value = 0 },
@@ -36,14 +47,42 @@
             },
         },
 
-        // A ghost. `frightened` (0/1) is script-driven per-entity mode, mirrored to a
-        // data component so a future render system could tint frightened ghosts blue
-        // (today every entity draws as an identical quad — a GAP, see README).
+        // Ghosts. `frightened` (0/1) is script-driven per-entity mode; a future render
+        // pass could re-tint a frightened ghost blue by writing its Appearance through a
+        // native system (not today — a script cannot touch Appearance, ADR 0030 keeps
+        // the mana surface unchanged). Identical except name/color.
         .{
-            .name = "ghost",
+            .name = "ghost_red",
             .velocity = .{ .v = .{ .x = 0, .y = 0, .z = 0 } },
             .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
             .nav_agent = .{ .speed = 5 },
+            .appearance = .{ .color = .{ 0.9, 0.2, 0.2 }, .size = 0.7 },
+            .data = .{
+                .{ .name = "kind", .value = 2 },
+                .{ .name = "frightened", .value = 0 },
+                .{ .name = "nav_target_col", .value = 0 },
+                .{ .name = "nav_target_row", .value = 0 },
+            },
+        },
+        .{
+            .name = "ghost_pink",
+            .velocity = .{ .v = .{ .x = 0, .y = 0, .z = 0 } },
+            .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
+            .nav_agent = .{ .speed = 5 },
+            .appearance = .{ .color = .{ 0.95, 0.6, 0.8 }, .size = 0.7 },
+            .data = .{
+                .{ .name = "kind", .value = 2 },
+                .{ .name = "frightened", .value = 0 },
+                .{ .name = "nav_target_col", .value = 0 },
+                .{ .name = "nav_target_row", .value = 0 },
+            },
+        },
+        .{
+            .name = "ghost_cyan",
+            .velocity = .{ .v = .{ .x = 0, .y = 0, .z = 0 } },
+            .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
+            .nav_agent = .{ .speed = 5 },
+            .appearance = .{ .color = .{ 0.3, 0.85, 0.9 }, .size = 0.7 },
             .data = .{
                 .{ .name = "kind", .value = 2 },
                 .{ .name = "frightened", .value = 0 },

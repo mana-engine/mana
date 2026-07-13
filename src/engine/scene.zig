@@ -35,6 +35,9 @@ pub const EntityDef = struct {
     /// this entity toward its target cell (the `nav_target_col`/`nav_target_row` data
     /// components a script sets). Absent ⇒ the entity is not steered.
     nav_agent: ?components.NavAgent = null,
+    /// A render appearance (ADR 0030): the color/size the renderer draws this entity
+    /// with. Absent ⇒ the renderer falls back to its palette-by-index default.
+    appearance: ?components.Appearance = null,
 };
 
 /// A named collection of entity definitions — the unit a runtime loads.
@@ -71,6 +74,7 @@ pub fn load(scene: Scene, world: *World) World.Error!void {
         if (def.health) |h| try world.setHealth(e, h);
         if (def.collider) |c| try world.setCollider(e, c);
         if (def.nav_agent) |na| try world.setNavAgent(e, na);
+        if (def.appearance) |a| try world.setAppearance(e, a);
         for (def.data) |nv| try world.setDataByName(e, nv.name, nv.value);
     }
     if (scene.tilemap) |tm| try tilemap.materialize(tm, world);
@@ -232,6 +236,31 @@ test "scene: overlapping data-declared colliders dispatch collision_begin throug
     // Content-declared colliders (never touched via World.setCollider directly)
     // participate in the native collision system exactly like code-attached ones.
     try testing.expectEqual(@as(u32, 1), Counter.begins);
+}
+
+test "scene: an appearance parses and, on load, the entity has the expected Appearance" {
+    const src =
+        \\.{
+        \\    .name = "arena",
+        \\    .entities = .{
+        \\        .{ .name = "wall", .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } }, .appearance = .{ .color = .{ 0.2, 0.3, 0.9 }, .size = 1.0 } },
+        \\        .{ .name = "prop", .transform = .{ .pos = .{ .x = 1, .y = 0, .z = 0 } } },
+        \\    },
+        \\}
+    ;
+    const scene = try parse(testing.allocator, src);
+    defer free(testing.allocator, scene);
+    try testing.expect(scene.entities[0].appearance != null);
+    try testing.expect(scene.entities[1].appearance == null); // prop has no appearance
+
+    var world = try toWorld(testing.allocator, scene);
+    defer world.deinit();
+    const wall: ecs.Entity = .{ .index = 0, .generation = 0 };
+    const a = world.getAppearance(wall).?;
+    try testing.expect(std.mem.eql(f32, &.{ 0.2, 0.3, 0.9 }, &a.color));
+    try testing.expectEqual(@as(f32, 1.0), a.size);
+    const prop: ecs.Entity = .{ .index = 1, .generation = 0 };
+    try testing.expect(world.getAppearance(prop) == null);
 }
 
 test "scene: a tilemap parses and materializes wall colliders on load" {

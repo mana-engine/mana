@@ -41,6 +41,9 @@ local FRIGHT = 6.0    -- seconds a power pellet keeps ghosts frightened
 local PAC_START = { col = 8, row = 9 }
 local GHOST_STARTS = { { 8, 5 }, { 9, 5 }, { 10, 5 } }
 local SCATTER = { { 1, 1 }, { 17, 1 }, { 1, 9 } }
+-- Three named ghost prototypes (ADR 0030), differing only in appearance color, so
+-- ghosts render as distinct pieces even though they behave identically.
+local GHOST_PROTOTYPES = { "ghost_red", "ghost_pink", "ghost_cyan" }
 
 -- Mutable game state, seeded in on_scene_enter (host-live). Handles come from mana.spawn.
 local pac = nil                    -- pac's entity handle
@@ -135,7 +138,7 @@ return {
         pac = mana.spawn("pac", px, py, 0)
         for i, gc in ipairs(GHOST_STARTS) do
             local gx, gy = cell_to_world(gc[1], gc[2])
-            ghosts[i] = { handle = mana.spawn("ghost", gx, gy, 0), home = gc, scatter = SCATTER[i] }
+            ghosts[i] = { handle = mana.spawn(GHOST_PROTOTYPES[i], gx, gy, 0), home = gc, scatter = SCATTER[i] }
         end
         mana.every(RETARGET, retarget)  -- selection (native nav does the steering)
         mana.every(MODE_SECS, toggle_mode)

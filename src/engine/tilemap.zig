@@ -145,6 +145,7 @@ fn placeCell(world: *World, bundle: components.Bundle, pos: Vec3) World.Error!vo
     if (bundle.health) |h| try world.setHealth(e, h);
     if (bundle.collider) |c| try world.setCollider(e, c);
     if (bundle.nav_agent) |na| try world.setNavAgent(e, na);
+    if (bundle.appearance) |a| try world.setAppearance(e, a);
     for (bundle.data) |nv| try world.setDataByName(e, nv.name, nv.value);
 }
 
@@ -300,6 +301,22 @@ test "tilemap: materialize attaches per-cell data components a script can later 
     try materialize(tm, &world);
     const e = world.entityAt(0);
     try testing.expectEqual(@as(?f64, 50), world.getData(e, world.dataColumn("value").?));
+}
+
+test "tilemap: materialize attaches a legend cell's appearance to its entity" {
+    const tm: Tilemap = .{
+        .legend = &.{
+            .{ .glyph = '#', .bundle = .{ .collider = .{ .shape = .{ .circle = .{ .radius = 0.5 } }, .is_static = true }, .appearance = .{ .color = .{ 0.2, 0.3, 0.9 }, .size = 1 } } },
+        },
+        .rows = &.{"#"},
+    };
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    try materialize(tm, &world);
+    const e = world.entityAt(0);
+    const a = world.getAppearance(e).?;
+    try testing.expect(std.mem.eql(f32, &.{ 0.2, 0.3, 0.9 }, &a.color));
+    try testing.expectEqual(@as(f32, 1), a.size);
 }
 
 test "tilemap: parse a legend+rows grid from ZON (char glyphs, rows of chars)" {
