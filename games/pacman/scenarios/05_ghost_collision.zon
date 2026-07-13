@@ -1,5 +1,5 @@
 // Pac-Man staircase, step 5/5: an un-frightened ghost catching pac resets it to its
-// start cell (rules.lua `reset_pac`), via the same native `on_collision_begin` path
+// start cell (rules.lua `reset_actors`), via the same native `on_collision_begin` path
 // as the dot pickup (ADR 0025), classified by the `kind` data tag. With no input, pac
 // runs its default leftward path, eats the dot and the power pellet in its way
 // (score 60 by tick 55; see 04_eat.zon), parks at its clamped target cell, and Blinky
