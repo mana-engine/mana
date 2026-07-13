@@ -1,7 +1,7 @@
 // Pac-Man staircase, step 6: power pellet -> frightened -> catch -> sent home (Refs
 // #62). With no input pac's default leftward march (see 04_eat.zon) crosses the dot
 // then the power pellet in its path, eating both — `begin_fright` flags every ghost
-// `frightened` (ADR 0024) and pac's score reaches 60 (10 + 50), at tick 55. Ghosts then
+// `frightened` (ADR 0024) and pac's score reaches 60 (10 + 50), at tick 80. Ghosts then
 // flee to their own scatter corners (`retarget`'s frightened branch) rather than
 // chasing pac. Inky's scatter corner (1,9) happens to be the cell pac parks at (its own
 // clamped default target — see 05_ghost_collision.zon), so with zero input Inky's flight
@@ -9,7 +9,12 @@
 // at tick 133: pac does NOT despawn the ghost (a catch is `send_home`, not a kill,
 // mirroring the non-frightened catch in 05_ghost_collision.zon) — Inky teleports to its
 // pen cell (10,5) -> world (1,0) and its own `frightened` flag clears, while the other
-// three ghosts are still within their 6s frightened window.
+// three ghosts are still within their 6s frightened window. Since #108, pac's nav
+// target is the next cell in its heading rather than a far one; the dot and pellet sit
+// on the same open row either way, so pac eats them at the identical positions, just a
+// little later in tick-time (the 0.1s retarget cadence occasionally catches pac
+// mid-cell) — hence the tick-55 checkpoint moved to tick 80. The downstream catch at
+// tick 133 is unaffected (pac is already parked well before then either way).
 .{
     .steps = 133,
     .input_trace = .{
@@ -18,12 +23,12 @@
     .expect = .{
         .{
             .label = "frightened: eating the power pellet flags all four ghosts frightened",
-            .at_tick = 55,
+            .at_tick = 80,
             .check = .{ .data_count = .{ .name = "frightened", .value = 1, .bound = .{ .min = 4, .max = 4 } } },
         },
         .{
             .label = "frightened: the dot + power pellet raise pac's score to 60",
-            .at_tick = 55,
+            .at_tick = 80,
             .check = .{ .data_at = .{ .pos = .{ .x = -7.4, .y = 4, .eps = 0.02 }, .name = "score", .value = 60 } },
         },
         .{

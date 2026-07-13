@@ -83,9 +83,16 @@ local function pac_cell()
 end
 
 -- One selection pass (a coarse timer, a handful of movers — never a per-frame world
--- scan). Pac targets the far interior cell in its heading, so nav paths it steadily down
--- the corridor and turns when the heading changes; a wall straight ahead simply leaves
--- pac's shortest path bending with the corridor. In scatter (or while any ghost is
+-- scan). Pac targets only the NEXT cell in its heading (#108), not a far one: with a
+-- single adjacent cell as the nav target, the native BFS (ADR 0027) has no room to
+-- shortcut around a corner on its own, so pac holds a straight line through an
+-- intersection until the player presses a new heading (the next pass then targets the
+-- next cell in THAT direction) — and a wall dead ahead is simply an unwalkable target,
+-- so `nav.nextStep` returns null and pac stops dead. That is exactly classic Pac-Man:
+-- continue straight, turn only on input, stop at a wall. Retargeting every RETARGET
+-- (0.1s) while nav crosses a whole cell in 1/speed seconds (pac: 1/8s) keeps this
+-- smooth — a fresh next-cell target lands well before pac reaches the current one, so
+-- velocity never actually drops to zero mid-corridor. In scatter (or while any ghost is
 -- frightened) every ghost retreats to its own corner; the native BFS finds the path and
 -- the next step. Interior cells are cols/rows [1, W-2]/[1, H-2] (the border is wall).
 --
@@ -102,7 +109,7 @@ end
 --     closes the final few cells.
 local function retarget()
     local pc, pr = pac_cell()
-    set_target(pac, clampi(pc + pac_dir.dc * W, 1, W - 2), clampi(pr + pac_dir.dr * H, 1, H - 2))
+    set_target(pac, clampi(pc + pac_dir.dc, 1, W - 2), clampi(pr + pac_dir.dr, 1, H - 2))
 
     if frightened or mode == "scatter" then
         for _, g in ipairs(ghosts) do set_target(g.handle, g.scatter[1], g.scatter[2]) end

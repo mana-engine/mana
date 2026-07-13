@@ -1,21 +1,25 @@
 // Pac-Man staircase, step 4/5: pac's default leftward path crosses a dot cell and
 // eats it via native collision (ADR 0025) + rules.lua's `on_collision_begin` — the
 // dot count drops by one and pac's score data component gains 10, the semantic
-// outcome a state hash cannot express.
+// outcome a state hash cannot express. Since #108, pac's nav target is the next cell
+// in its heading rather than a far one; the dot sits on the same open row either way,
+// so pac reaches the identical spot, just a few ticks later (the 0.1s retarget
+// cadence occasionally catches pac mid-cell) — hence `at_tick` moved from 32 to 43,
+// unchanged position.
 .{
-    .steps = 32,
+    .steps = 43,
     .input_trace = .{
-        .{ .ticks = 32, .keys = .{} },
+        .{ .ticks = 43, .keys = .{} },
     },
     .expect = .{
         .{
             .label = "eat: one dot is gone from the curated set (11 -> 10)",
-            .at_tick = 32,
+            .at_tick = 43,
             .check = .{ .data_count = .{ .name = "kind", .value = 3, .bound = .{ .min = 10, .max = 10 } } },
         },
         .{
             .label = "eat: eating a dot adds 10 to pac's score",
-            .at_tick = 32,
+            .at_tick = 43,
             .check = .{ .data_at = .{ .pos = .{ .x = -4.333, .y = 4, .eps = 0.02 }, .name = "score", .value = 10 } },
         },
     },
