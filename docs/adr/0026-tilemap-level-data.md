@@ -1,6 +1,6 @@
 # 0026. Tilemap level data: a grid-of-cells scene resource the engine materializes
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-13
 
 ## Context
@@ -151,6 +151,7 @@ loop and then materializes zero cells, so the pinned determinism golden
     threading the prototype `Registry` through the scene-load seam (which `scene.load` is
     intentionally registry-free today). Deferred to its own ADR/lane.
   - **Migrating `games/pacman`** onto the tilemap (moving its ASCII maze out of
-    `rules.lua`) is a content change, out of this engine-capability lane.
+    `rules.lua`) landed as a separate content lane (#62): its maze is now a scene
+    `.tilemap`, so this was a content change out of this engine-capability lane.
   - No multi-layer grids, no non-rectangular topology, no chunking — added only when a
     real game needs them (no speculative flexibility).
