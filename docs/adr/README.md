@@ -37,3 +37,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0023 | Tracy profiler behind `-Denable-tracy` (ztracy client, `core` shim) | proposed |
 | 0024 | `mana.get`/`mana.set`: named scalar data components | proposed |
 | 0025 | Content-declarable colliders: `.collider` in the scene/prototype schema | accepted |
+| 0026 | Tilemap level data: a grid-of-cells scene resource the engine materializes | proposed |
