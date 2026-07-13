@@ -4,6 +4,12 @@
 //! package — the manifest plus every referenced scene — and hot-reloads on change
 //! (`--watch`, ADR 0005). It knows the manifest *format* but never any specific
 //! game; nothing here references `games/**`.
+//!
+//! Over the ~500-line soft limit by design: this is the single runner entry point,
+//! and each mode (`--watch`/`--play`/`--render`/`--render-svg`/`--filmstrip`) shares
+//! the same small set of load-path helpers below (`loadManifest`, `loadPrototypes`,
+//! `loadPackageScript`, `registerStandardSystems`) rather than duplicating them across
+//! files — splitting by mode would scatter that shared setup instead of removing it.
 
 const std = @import("std");
 const core = @import("core");
@@ -23,6 +29,11 @@ const provided_script_api: u32 = engine.script_api_version;
 const tick_steps: u32 = 60;
 /// Poll cadence for `--watch`, in milliseconds.
 const watch_poll_ms: i64 = 100;
+/// Pixel dimensions for `--render-svg`/`--filmstrip` (ADR 0029) — matches `runRender`'s
+/// PNG size so an SVG and a PNG render of the same scene are directly comparable.
+const svg_view_size: u32 = 512;
+/// Default tick count for `--filmstrip` when `--ticks` is not given.
+const filmstrip_default_ticks: u32 = 60;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -39,12 +50,17 @@ pub fn main(init: std.process.Init) !void {
 
     // First non-flag argument is the package dir; `--watch` enables hot reload;
     // `--render <out.png>` renders one offscreen frame to a PNG (needs -Denable-vulkan);
-    // `--play` runs the live windowed loop (needs -Denable-sdl3 -Denable-vulkan).
+    // `--render-svg <out.svg>` renders one frame to SVG, no GPU needed (ADR 0029);
+    // `--filmstrip <out-dir> [--ticks N]` runs N ticks, writing one SVG per tick
+    // (ADR 0029); `--play` runs the live windowed loop (needs -Denable-sdl3 -Denable-vulkan).
     const args = try init.minimal.args.toSlice(arena);
     var pkg_path: ?[]const u8 = null;
     var watch = false;
     var play = false;
     var render_out: ?[]const u8 = null;
+    var render_svg_out: ?[]const u8 = null;
+    var filmstrip_dir: ?[]const u8 = null;
+    var filmstrip_ticks: u32 = filmstrip_default_ticks;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const a = args[i];
@@ -60,17 +76,50 @@ pub fn main(init: std.process.Init) !void {
                 return;
             }
             render_out = args[i];
+        } else if (std.mem.eql(u8, a, "--render-svg")) {
+            i += 1;
+            if (i >= args.len) {
+                try out.writeAll("usage: mana <pkg> --render-svg <out.svg>\n");
+                try out.flush();
+                return;
+            }
+            render_svg_out = args[i];
+        } else if (std.mem.eql(u8, a, "--filmstrip")) {
+            i += 1;
+            if (i >= args.len) {
+                try out.writeAll("usage: mana <pkg> --filmstrip <out-dir> [--ticks N]\n");
+                try out.flush();
+                return;
+            }
+            filmstrip_dir = args[i];
+        } else if (std.mem.eql(u8, a, "--ticks")) {
+            i += 1;
+            if (i >= args.len) {
+                try out.writeAll("usage: mana <pkg> --filmstrip <out-dir> [--ticks N]\n");
+                try out.flush();
+                return;
+            }
+            filmstrip_ticks = std.fmt.parseInt(u32, args[i], 10) catch {
+                try out.print("mana: invalid --ticks value '{s}'\n", .{args[i]});
+                try out.flush();
+                return;
+            };
         } else if (pkg_path == null) {
             pkg_path = a;
         }
     }
 
     const pkg = pkg_path orelse {
-        try out.writeAll("usage: mana <game-package-dir> [--watch] [--play] [--render <out.png>]\n");
+        try out.writeAll(
+            "usage: mana <game-package-dir> [--watch] [--play] [--render <out.png>] " ++
+                "[--render-svg <out.svg>] [--filmstrip <out-dir> [--ticks N]]\n",
+        );
         try out.flush();
         return;
     };
     if (render_out) |path| return runRender(out, io, gpa, pkg, path);
+    if (render_svg_out) |path| return runRenderSvg(out, io, gpa, pkg, path);
+    if (filmstrip_dir) |dir| return runFilmstrip(out, io, gpa, pkg, dir, filmstrip_ticks);
     if (play) return runPlay(out, io, gpa, pkg);
     if (watch) return runWatch(out, io, gpa, pkg);
     return runOnce(out, io, gpa, pkg);
@@ -183,6 +232,82 @@ fn runRender(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, path: []c
     } else {
         try out.writeAll("mana: rendering not compiled in — rebuild with -Denable-vulkan\n");
     }
+    try out.flush();
+}
+
+/// Render a package's scene to an SVG (ADR 0029): project the entry scene (via
+/// `engine.render.project`) and emit `engine.render_svg.toSvg`. Same load path as
+/// `runRender` (manifest → scene, no ticking, no script) but needs **no GPU** — SVG is
+/// text, not a rasterized image — so, unlike `--render`, this works on the DEFAULT
+/// build. Genre-neutral: it draws whatever the projected quads are.
+fn runRenderSvg(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, path: []const u8) !void {
+    const manifest = try loadManifest(io, gpa, pkg);
+    defer manifest_mod.free(gpa, manifest);
+    try checkScriptApi(out, manifest);
+    const scene_path = try std.fs.path.join(gpa, &.{ pkg, manifest.entry_scene });
+    defer gpa.free(scene_path);
+    var world = try engine.scene.loadWorldFromFile(gpa, io, Io.Dir.cwd(), scene_path);
+    defer world.deinit();
+
+    const view: engine.render.View = .{ .width = svg_view_size, .height = svg_view_size, .projection = manifest.projection };
+    const quads = try engine.render.project(gpa, &world, view, &engine.render.default_palette);
+    defer gpa.free(quads);
+    const svg = try engine.render_svg.toSvg(gpa, quads, view, engine.render_svg.default_background);
+    defer gpa.free(svg);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = svg });
+    try out.print("mana: rendered '{s}' — {d} entities, {d}x{d} → {s}\n", .{ manifest.name, world.count(), view.width, view.height, path });
+    try out.flush();
+}
+
+/// Scrub a headless playthrough (ADR 0029): build a full `Sim` — the same load path as
+/// `runOnce` (standard systems, package script, prototypes) — advance it `ticks` fixed
+/// steps, and write one SVG per tick to `dir/frame_NNNN.svg` (4-digit, zero-padded).
+/// Frame `frame_0000.svg` is the state *after* the first tick (so `on_scene_enter`'s
+/// spawns are already visible, matching `runOnce`'s "fires on the first tick" note).
+/// Lets a human scrub ghosts nav-moving and pickups getting eaten entirely offscreen.
+/// Deliberately does not accept an input trace — that is the scenario-test harness's
+/// concern (ADR 0028, separate lane); this only free-runs the sim.
+fn runFilmstrip(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, dir: []const u8, ticks: u32) !void {
+    const manifest = try loadManifest(io, gpa, pkg);
+    defer manifest_mod.free(gpa, manifest);
+    try checkScriptApi(out, manifest);
+
+    const scene_path = try std.fs.path.join(gpa, &.{ pkg, manifest.entry_scene });
+    defer gpa.free(scene_path);
+    const scene_src = try Io.Dir.cwd().readFileAllocOptions(io, scene_path, gpa, .unlimited, .of(u8), 0);
+    defer gpa.free(scene_src);
+    const parsed = try engine.scene.parse(gpa, scene_src);
+    defer engine.scene.free(gpa, parsed);
+
+    const proto_file = try loadPrototypes(io, gpa, pkg, manifest);
+    defer if (proto_file) |f| engine.prototype.free(gpa, f);
+
+    var sim = engine.Sim.init(gpa, core.time.default_dt);
+    defer sim.deinit();
+    if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
+    try engine.scene.load(parsed, &sim.world);
+    if (parsed.tilemap) |*tm| sim.tilemap = tm; // see runOnce: parsed outlives sim (LIFO defers)
+    try loadPackageScript(io, gpa, pkg, manifest, &sim);
+    sim.enterScene(parsed.name);
+    try registerStandardSystems(&sim);
+
+    try Io.Dir.cwd().createDirPath(io, dir);
+    const view: engine.render.View = .{ .width = svg_view_size, .height = svg_view_size, .projection = manifest.projection };
+
+    var name_buf: [32]u8 = undefined;
+    var t: u32 = 0;
+    while (t < ticks) : (t += 1) {
+        try sim.tick();
+        const quads = try engine.render.project(gpa, &sim.world, view, &engine.render.default_palette);
+        defer gpa.free(quads);
+        const svg = try engine.render_svg.toSvg(gpa, quads, view, engine.render_svg.default_background);
+        defer gpa.free(svg);
+        const name = try std.fmt.bufPrint(&name_buf, "frame_{d:0>4}.svg", .{t});
+        const frame_path = try std.fs.path.join(gpa, &.{ dir, name });
+        defer gpa.free(frame_path);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = frame_path, .data = svg });
+    }
+    try out.print("mana: filmstrip '{s}' — {d} frames, {d}x{d} → {s}\n", .{ manifest.name, ticks, view.width, view.height, dir });
     try out.flush();
 }
 
