@@ -1,0 +1,27 @@
+// Entity prototypes (ADR 0016) mana.spawn instantiates. Genre lives here in content,
+// never in src/. Positions come from the spawn call; templates carry only non-spatial
+// component defaults — here, named scalar data components (ADR 0024) so per-entity
+// script state is engine-visible (a future HUD/render system could read them).
+.{
+    .prototypes = .{
+        // The player. `score` is published as a data component so the engine (a debug
+        // overlay, a future HUD) can read the running score without asking the script.
+        .{ .name = "pac", .data = .{.{ .name = "score", .value = 0 }} },
+
+        // A ghost. `frightened` (0/1) is script-driven per-entity mode, mirrored to a
+        // data component so a future render system could tint frightened ghosts blue
+        // (today every entity draws as an identical quad — a GAP, see README).
+        .{ .name = "ghost", .data = .{.{ .name = "frightened", .value = 0 }} },
+
+        // A pip the player eats. Spawned once per maze cell, despawned on eat.
+        .{ .name = "dot" },
+
+        // A power pellet — eating it opens the frightened window (mana.after timer).
+        .{ .name = "pellet" },
+
+        // A static maze-wall cell. GAP: walls are spawned one entity per '#' from an
+        // in-script ASCII grid because there is no engine tile/level data model; see
+        // README and the filed maze-data gap issue.
+        .{ .name = "wall" },
+    },
+}

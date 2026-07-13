@@ -1,0 +1,15 @@
+// The Pac-Man maze's initial scene. Deliberately empty: the maze walls, dots, power
+// pellets, the player, and the ghosts are all spawned by rules.lua at on_scene_enter
+// (via mana.spawn), so the layout stays in one editable place and every piece goes
+// through the one spawn path. An empty entity list is a valid scene.
+//
+// GAP (tile/maze level data): the maze layout *wants* to be scene data both the engine
+// and content can read — a grid of walls the native collision system consumes and the
+// renderer draws as tiles. No such tile/level data model exists today (scene entities
+// are flat inline component lists, ADR 0004 §6; there is no grid/tilemap concept), so
+// the layout lives as an ASCII grid inside rules.lua instead. See the filed maze-data
+// gap issue and games/pacman/README.md.
+.{
+    .name = "maze",
+    .entities = .{},
+}
