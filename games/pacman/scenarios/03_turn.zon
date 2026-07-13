@@ -1,0 +1,20 @@
+// Pac-Man staircase, step 3/5: an `on_key` press turns pac off its default leftward
+// heading. Holding DOWN from tick 10 changes rules.lua's `pac_dir` immediately, but
+// the corridor pac is in only turns vertical a few columns later (native BFS routes
+// around the maze walls, ADR 0027) — by tick 50 pac has visibly left the default
+// straight-left path (y dropped from 4 toward the corridor above), proving the turn
+// took effect.
+.{
+    .steps = 50,
+    .input_trace = .{
+        .{ .ticks = 10, .keys = .{} },
+        .{ .ticks = 40, .keys = .{"down"} },
+    },
+    .expect = .{
+        .{
+            .label = "turn: on_key(down) steers pac off its default leftward heading",
+            .at_tick = 50,
+            .check = .{ .occupied = .{ .x = -4.968, .y = 1.920, .eps = 0.02 } },
+        },
+    },
+}

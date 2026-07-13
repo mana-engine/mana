@@ -5,22 +5,29 @@ Grid Snake, implemented entirely as content: `game.zon` + `prototypes.zon` +
 the engine cannot yet express something, it is filed as a gap issue, not patched here
 (per the issue #31 constraint and CLAUDE.md invariant #6: genre lives in content).
 
-## Status: blocked (a discovery artifact)
+## Status: runs headlessly and deterministically
 
-The package loads and validates end-to-end today — the manifest, scene, prototypes,
-and `rules.lua` all parse, `script_api = 1` is accepted under `-Denable-lua`, and the
-sim runs — but the snake never appears (**0 entities**): the scripting runtime has
-the `mana` *accessor* surface (#5, #45) but not yet the *event/driver* model a game
-needs. Attempting to build Snake surfaced these concrete gaps:
+The event/driver gaps this package originally surfaced — bootstrap (`on_scene_enter`,
+closing #54), timers (`mana.every`/`after`/`cancel`, #55), `mana.set_position` (#56),
+and script input access (`on_key`, #57) — have all landed as genre-neutral engine
+features `rules.lua` now uses directly; #47 (`mana.random_int`) is still open, so food
+placement uses a content-side deterministic PRNG until the seeded Sim RNG lands. The
+snake spawns, advances one cell per grid tick, turns on input, eats and grows, and
+resets on self/wall collision — see the acceptance staircase below, which is now the
+executable proof (superseding the "0 entities" discovery-era status this section used
+to report). Real-time arrow-key `--play` needs SDL3 + Vulkan (a manual step, out of
+scope for the headless gate).
 
-- **#54** — no start/bootstrap event, so the script can't initialize with a live host
-  (spawn the snake, schedule the timer). `on_room_enter` here is the intended hook.
-- **#55** — timers (`mana.every`/`after`/`cancel`) aren't wired to Lua, so there's no
-  periodic move driver.
-- **#56** — no `mana.set_position`, so segments can't teleport to grid cells.
-- **#57** — no script input access, so the heading can't change on the arrow keys.
-- **#47** — `mana.random_int` (seeded Sim RNG) for food placement.
+## Acceptance staircase (ADR 0028, issue #94)
 
-Each gap is marked `GAP` at its use site in `rules.lua`. As they land, this package
-becomes the acceptance test: `mana games/snake --play` should be a playable arrow-key
-Snake, and it should also tick headlessly and deterministically from an input trace.
+`scenarios/*.zon` is the executable acceptance definition the paragraph above
+gestures at: an ordered, single-mechanic staircase — spawn → advance → turn → eat →
+grow → death — each file isolating one mechanic so a red result names exactly which
+one broke. Run one with the headless CLI:
+
+```
+zig build -Denable-lua run -- games/snake --scenario games/snake/scenarios/04_eat.zon
+```
+
+or the whole suite via `zig build -Denable-lua test` (`tests/acceptance_scenarios.zig`
+drives every file in this directory against `engine.scenario`, the generic referee).

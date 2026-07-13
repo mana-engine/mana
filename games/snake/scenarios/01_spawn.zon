@@ -1,0 +1,28 @@
+// Snake staircase, step 1/6 (ADR 0028 layer 2; issue #94): the bootstrap places the
+// head at the world origin, one food at the deterministic first cell, and a wall
+// ring — 74 entities total (72 wall cells + head + food; games/snake/rules.lua's
+// `spawn_walls`/`reset`). The move timer (`mana.every(0.15, step)`) fires the first
+// grid step at tick 8, so settling 6 ticks observes only the bootstrap, never a step.
+.{
+    .steps = 6,
+    .input_trace = .{
+        .{ .ticks = 6, .keys = .{} },
+    },
+    .expect = .{
+        .{
+            .label = "spawn: the head starts at the world origin",
+            .at_tick = 6,
+            .check = .{ .occupied = .{ .x = 0, .y = 0 } },
+        },
+        .{
+            .label = "spawn: the first food lands on the deterministic cell (-2,-1)",
+            .at_tick = 6,
+            .check = .{ .occupied = .{ .x = -2, .y = -1 } },
+        },
+        .{
+            .label = "spawn: exactly the wall ring plus head and food (74 entities)",
+            .at_tick = 6,
+            .check = .{ .entity_count = .{ .min = 74, .max = 74 } },
+        },
+    },
+}

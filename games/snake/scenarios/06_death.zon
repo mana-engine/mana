@@ -1,0 +1,29 @@
+// Snake staircase, step 6/6: running into the wall resets the run. With no input the
+// head runs right, reaching (7,0) at grid step 7 (tick 63); grid step 8 (tick 72)
+// walks it into the wall at x=8, which resets the run (rules.lua `reset`) — a fresh
+// head at the origin, length back to 1, same 74-entity bootstrap count as
+// 01_spawn.zon. Checking at tick 78 is past the reset but before the next step.
+.{
+    .steps = 78,
+    .input_trace = .{
+        .{ .ticks = 6, .keys = .{} },
+        .{ .ticks = 72, .keys = .{} },
+    },
+    .expect = .{
+        .{
+            .label = "death: settled bootstrap before the run begins (74 entities)",
+            .at_tick = 6,
+            .check = .{ .entity_count = .{ .min = 74, .max = 74 } },
+        },
+        .{
+            .label = "death: running into the wall resets length back to one (74 entities)",
+            .at_tick = 78,
+            .check = .{ .entity_count = .{ .min = 74, .max = 74 } },
+        },
+        .{
+            .label = "death: the head respawned at the world origin",
+            .at_tick = 78,
+            .check = .{ .occupied = .{ .x = 0, .y = 0 } },
+        },
+    },
+}

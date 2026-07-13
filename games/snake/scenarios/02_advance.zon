@@ -1,0 +1,33 @@
+// Snake staircase, step 2/6: with no input the head advances exactly one cell along
+// its default rightward heading per grid step — never a smear, never more than one
+// cell. Grid step 1 fires at tick 8 but the head's `mana.set_position` is deferred to
+// the next flush (tick 9); step 2 fires at tick 17, flushing at tick 18. Checking at
+// ticks 10 and 19 observes both steps settled.
+.{
+    .steps = 19,
+    .input_trace = .{
+        .{ .ticks = 19, .keys = .{} },
+    },
+    .expect = .{
+        .{
+            .label = "advance: one grid step right lands the head on (1,0)",
+            .at_tick = 10,
+            .check = .{ .occupied = .{ .x = 1, .y = 0 } },
+        },
+        .{
+            .label = "advance: the origin cell is vacated after stepping (no smear)",
+            .at_tick = 10,
+            .check = .{ .vacant = .{ .x = 0, .y = 0 } },
+        },
+        .{
+            .label = "advance: a second grid step lands the head on (2,0)",
+            .at_tick = 19,
+            .check = .{ .occupied = .{ .x = 2, .y = 0 } },
+        },
+        .{
+            .label = "advance: the previous cell is vacated after the second step",
+            .at_tick = 19,
+            .check = .{ .vacant = .{ .x = 1, .y = 0 } },
+        },
+    },
+}

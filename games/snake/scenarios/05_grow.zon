@@ -1,0 +1,25 @@
+// Snake staircase, step 5/6: length increases by exactly one after eating — the
+// semantic outcome a state hash cannot express. Same eat path as 04_eat.zon (DOWN
+// then LEFT onto the deterministic food cell), with a checkpoint before eating (still
+// just head + food inside the wall ring: 74 entities) and one after (75: the food is
+// repositioned, not respawned, so the only new entity is the grown segment).
+.{
+    .steps = 30,
+    .input_trace = .{
+        .{ .ticks = 6, .keys = .{"down"} },
+        .{ .ticks = 6, .keys = .{"down"} },
+        .{ .ticks = 18, .keys = .{"left"} },
+    },
+    .expect = .{
+        .{
+            .label = "grow: before eating, still just the wall ring plus head and food (74)",
+            .at_tick = 6,
+            .check = .{ .entity_count = .{ .min = 74, .max = 74 } },
+        },
+        .{
+            .label = "grow: length increases by exactly one after eating (75 entities)",
+            .at_tick = 30,
+            .check = .{ .entity_count = .{ .min = 75, .max = 75 } },
+        },
+    },
+}

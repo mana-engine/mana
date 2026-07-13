@@ -1,0 +1,29 @@
+// Pac-Man staircase, step 1/5 (ADR 0028 layer 2; issue #94): the bootstrap spawns pac
+// at its start cell (8,9) -> world (-1,4) (rules.lua PAC_START, cell_to_world), the
+// full curated 11-dot set is present, and the maze + pickups + pac + three ghosts
+// materialize (121 entities total). `mana.spawn`'s components attach at the *next*
+// flush after on_scene_enter, so a checkpoint at tick 1 (before that flush) would see
+// nothing yet — tick 2 is the first tick pac's own components are queryable.
+.{
+    .steps = 2,
+    .input_trace = .{
+        .{ .ticks = 2, .keys = .{} },
+    },
+    .expect = .{
+        .{
+            .label = "spawn: pac starts at its start cell (8,9) -> world (-1,4)",
+            .at_tick = 2,
+            .check = .{ .occupied = .{ .x = -1, .y = 4 } },
+        },
+        .{
+            .label = "spawn: the full curated pickup set is present (11 dots)",
+            .at_tick = 2,
+            .check = .{ .data_count = .{ .name = "kind", .value = 3, .bound = .{ .min = 11, .max = 11 } } },
+        },
+        .{
+            .label = "spawn: maze, pickups, pac, and three ghosts all materialized (121 entities)",
+            .at_tick = 2,
+            .check = .{ .entity_count = .{ .min = 121, .max = 121 } },
+        },
+    },
+}

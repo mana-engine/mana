@@ -1,0 +1,19 @@
+// Snake staircase, step 4/6: steering the head onto the food cell reaches it. A 180°
+// reversal of the *committed* heading is rejected (rules.lua `try_turn`), so this
+// steers DOWN first (committing before the first grid step at tick 8), then LEFT once
+// that heading has committed (tick 12, between grid steps 1 and 2). Path: (0,0) ->
+// (0,-1) -> (-1,-1) -> (-2,-1) = the deterministic first food cell.
+.{
+    .steps = 30,
+    .input_trace = .{
+        .{ .ticks = 12, .keys = .{"down"} },
+        .{ .ticks = 18, .keys = .{"left"} },
+    },
+    .expect = .{
+        .{
+            .label = "eat: steering the head onto the food cell reaches it",
+            .at_tick = 30,
+            .check = .{ .occupied = .{ .x = -2, .y = -1 } },
+        },
+    },
+}
