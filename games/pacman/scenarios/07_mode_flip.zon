@@ -1,0 +1,38 @@
+// Pac-Man staircase, step 7: the chase/scatter mode timer (`MODE_SECS` = 7s = 420
+// ticks) flips a ghost's target, proving `toggle_mode` + `retarget`'s scatter branch
+// actually changes selection, not just the mode label (Refs #62). Tracks Pinky (spawn
+// index 2): in chase mode she ambushes 4 cells ahead of pac's heading (`retarget`'s
+// PINKY_AHEAD rule); with pac long parked at its clamped default target (see
+// 05_ghost_collision.zon), that ambush cell is pac's own resting cell (1,9). At tick
+// 420 (just before the first flip lands on its next 0.1s retarget pass) her target is
+// still (1,9); by tick 427 (the first retarget pass after the flip) every ghost has been
+// reassigned to its own scatter corner — Pinky's is (17,1) — so her target visibly moves
+// on both axes with no input at all, deterministically, at these exact ticks.
+.{
+    .steps = 427,
+    .input_trace = .{
+        .{ .ticks = 427, .keys = .{} },
+    },
+    .expect = .{
+        .{
+            .label = "mode: in chase mode Pinky's ambush target is pac's resting cell (1,9)",
+            .at_tick = 420,
+            .check = .{ .data_at = .{ .pos = .{ .x = 7.71452, .y = -3.62121, .eps = 0.02 }, .name = "nav_target_col", .value = 1 } },
+        },
+        .{
+            .label = "mode: (row half of the same checkpoint)",
+            .at_tick = 420,
+            .check = .{ .data_at = .{ .pos = .{ .x = 7.71452, .y = -3.62121, .eps = 0.02 }, .name = "nav_target_row", .value = 9 } },
+        },
+        .{
+            .label = "mode: the timer flips to scatter — Pinky now targets her own corner (17,1), both axes moved",
+            .at_tick = 427,
+            .check = .{ .data_at = .{ .pos = .{ .x = 7.84467, .y = -3.05752, .eps = 0.02 }, .name = "nav_target_col", .value = 17 } },
+        },
+        .{
+            .label = "mode: (row half of the same checkpoint)",
+            .at_tick = 427,
+            .check = .{ .data_at = .{ .pos = .{ .x = 7.84467, .y = -3.05752, .eps = 0.02 }, .name = "nav_target_row", .value = 1 } },
+        },
+    },
+}

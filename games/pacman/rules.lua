@@ -37,13 +37,24 @@ local RETARGET = 0.1 -- seconds between target-selection passes (finer than a ce
 local MODE_SECS = 7.0 -- seconds between chase/scatter flips
 local FRIGHT = 6.0    -- seconds a power pellet keeps ghosts frightened
 
--- Start cells and per-ghost scatter corners (walkable floor in the maze).
+-- Start cells and per-ghost scatter corners (walkable floor in the maze) — the four
+-- interior corners of the playable grid (cols/rows [1, W-2]/[1, H-2]).
 local PAC_START = { col = 8, row = 9 }
-local GHOST_STARTS = { { 8, 5 }, { 9, 5 }, { 10, 5 } }
-local SCATTER = { { 1, 1 }, { 17, 1 }, { 1, 9 } }
--- Three named ghost prototypes (ADR 0030), differing only in appearance color, so
--- ghosts render as distinct pieces even though they behave identically.
-local GHOST_PROTOTYPES = { "ghost_red", "ghost_pink", "ghost_cyan" }
+local GHOST_STARTS = { { 8, 5 }, { 9, 5 }, { 10, 5 }, { 11, 5 } }
+local SCATTER = { { 1, 1 }, { 17, 1 }, { 1, 9 }, { 17, 9 } }
+-- Four named ghost prototypes (ADR 0030): appearance color only — the classic
+-- Blinky(red)/Pinky(pink)/Inky(cyan)/Clyde(orange) *behaviors* are selected by spawn
+-- index in `retarget` below (Refs #62), never carried by the prototype itself.
+local GHOST_PROTOTYPES = { "ghost_red", "ghost_pink", "ghost_cyan", "ghost_orange" }
+-- Ghost spawn indices, named for readability at every call site below.
+local BLINKY, PINKY, INKY, CLYDE = 1, 2, 3, 4
+-- Pinky ambushes the cell this many cells ahead of pac's heading; Inky's vector is
+-- doubled through the cell two ahead (the classic arcade constants). Clyde chases
+-- while farther than this many cells (Euclidean, squared to skip a sqrt) from pac,
+-- else retreats to his scatter corner — he never gets close enough to trap pac.
+local PINKY_AHEAD = 4
+local INKY_AHEAD = 2
+local CLYDE_CHASE_DIST_SQ = 8 * 8
 
 -- Mutable game state, seeded in on_scene_enter (host-live). Handles come from mana.spawn.
 local pac = nil                    -- pac's entity handle
@@ -60,26 +71,65 @@ local function set_target(handle, col, row)
     mana.set(handle, "nav_target_row", row)
 end
 
--- Pac's current grid cell, from its live world position.
-local function pac_cell()
-    local x, y = mana.position(pac)
+-- An entity's current grid cell, from its live world position (pac or a ghost — nav
+-- agents are all `Transform`-bearing, so this generalizes `pac_cell`'s old body).
+local function entity_cell(handle)
+    local x, y = mana.position(handle)
     return world_to_cell(x, y)
+end
+
+local function pac_cell()
+    return entity_cell(pac)
 end
 
 -- One selection pass (a coarse timer, a handful of movers — never a per-frame world
 -- scan). Pac targets the far interior cell in its heading, so nav paths it steadily down
 -- the corridor and turns when the heading changes; a wall straight ahead simply leaves
--- pac's shortest path bending with the corridor. Each ghost targets pac's cell (chase),
--- a corner (scatter), or its corner (frightened flee); the native BFS finds the path and
+-- pac's shortest path bending with the corridor. In scatter (or while any ghost is
+-- frightened) every ghost retreats to its own corner; the native BFS finds the path and
 -- the next step. Interior cells are cols/rows [1, W-2]/[1, H-2] (the border is wall).
+--
+-- In chase mode each ghost gets the classic arcade AI's distinct target, using only the
+-- surface already available to Lua (ADR 0027 §3: selection, never steering, and no new
+-- `mana` API) — `pac_dir`, the heading `on_key` already tracks, stands in for "pac's
+-- facing direction":
+--   * Blinky (index 1): pac's own cell — a direct chase.
+--   * Pinky (index 2): the cell `PINKY_AHEAD` cells ahead of pac's heading — an ambush.
+--   * Inky (index 3): the cell two ahead of pac, mirrored through Blinky's cell and
+--     doubled — Blinky's position bends Inky's approach around a corner.
+--   * Clyde (index 4): chases like Blinky while farther than `CLYDE_CHASE_DIST_SQ` from
+--     pac; inside that radius he flees to his own scatter corner instead, so he never
+--     closes the final few cells.
 local function retarget()
     local pc, pr = pac_cell()
     set_target(pac, clampi(pc + pac_dir.dc * W, 1, W - 2), clampi(pr + pac_dir.dr * H, 1, H - 2))
-    for _, g in ipairs(ghosts) do
-        if frightened or mode == "scatter" then
-            set_target(g.handle, g.scatter[1], g.scatter[2])
-        else
-            set_target(g.handle, pc, pr) -- chase pac's cell
+
+    if frightened or mode == "scatter" then
+        for _, g in ipairs(ghosts) do set_target(g.handle, g.scatter[1], g.scatter[2]) end
+        return
+    end
+
+    local bc, br = entity_cell(ghosts[BLINKY].handle)
+    for i, g in ipairs(ghosts) do
+        if i == BLINKY then
+            set_target(g.handle, pc, pr)
+        elseif i == PINKY then
+            set_target(g.handle,
+                clampi(pc + pac_dir.dc * PINKY_AHEAD, 1, W - 2),
+                clampi(pr + pac_dir.dr * PINKY_AHEAD, 1, H - 2))
+        elseif i == INKY then
+            local ac, ar = pc + pac_dir.dc * INKY_AHEAD, pr + pac_dir.dr * INKY_AHEAD
+            set_target(g.handle,
+                clampi(bc + 2 * (ac - bc), 1, W - 2),
+                clampi(br + 2 * (ar - br), 1, H - 2))
+        elseif i == CLYDE then
+            local gc, gr = entity_cell(g.handle)
+            local dc, dr = pc - gc, pr - gr
+            if dc * dc + dr * dr > CLYDE_CHASE_DIST_SQ then
+                set_target(g.handle, pc, pr)
+            else
+                set_target(g.handle, g.scatter[1], g.scatter[2])
+            end
         end
     end
 end

@@ -32,8 +32,24 @@ genre-neutral engine features, and this package is now migrated onto them:
 - **Per-entity appearance — CLOSED (ADR 0030, #98).** Walls, dots, pellets, pac, and
   ghosts each declare an `.appearance` (color + world-space size) in `prototypes.zon`/
   `scenes/maze.zon`; the renderer sizes and colors every quad from that data instead of
-  an identical fixed-size, palette-by-spawn-order square. Three ghost prototypes
-  (`ghost_red`/`ghost_pink`/`ghost_cyan`) give the ghosts distinct colors.
+  an identical fixed-size, palette-by-spawn-order square. Four ghost prototypes
+  (`ghost_red`/`ghost_pink`/`ghost_cyan`/`ghost_orange`) give the ghosts distinct colors.
+
+- **Four ghosts, four distinct chase behaviors — CLOSED (Refs #62).** The one real gap
+  left in this package: three ghosts that all `set_target`ed pac's cell identically.
+  `rules.lua`'s `retarget` now selects a different target per spawn index in chase mode
+  — still selection-only (ADR 0027 §3), no engine surface added:
+  - **Blinky** (red): pac's own cell — a direct chase (the original, unchanged behavior).
+  - **Pinky** (pink): the cell `PINKY_AHEAD` (4) cells ahead of pac's heading — an ambush.
+  - **Inky** (cyan): the cell two ahead of pac, mirrored through Blinky's *current* cell
+    and doubled — Blinky's position bends Inky's approach.
+  - **Clyde** (orange): chases like Blinky while farther than `CLYDE_CHASE_DIST_SQ`
+    (8 cells) from pac; inside that radius he retreats to his own scatter corner instead.
+
+  "Pac's facing direction" (needed for Pinky/Inky) uses **no new `mana` API** — `on_key`
+  already tracks pac's heading in the local `pac_dir` variable (used for pac's own nav
+  target); `retarget` reuses that existing selection state. Scatter and frightened
+  targeting are unchanged (every ghost's own corner / flee-to-corner).
 
 What was **never** a gap and is unchanged: chase/scatter/frightened mode *timing*
 (`mana.after`/`mana.every` + `mana.set`), per-entity data (`score`, `frightened`, ADR
@@ -73,8 +89,9 @@ multiple waves (#62), so this package references it, never closes it.
 
 `scenarios/*.zon` is the analogous staircase to Snake's, per what the native
 tilemap/nav/collision sim supports today: spawn → move → turn → eats a dot → a
-non-frightened ghost catch resets pac (not a kill). Each file isolates one mechanic,
-so a red result names exactly which one broke:
+non-frightened ghost catch resets pac (not a kill) → a frightened catch sends a ghost
+home instead → the chase/scatter mode timer changes a ghost's target. Each file isolates
+one mechanic, so a red result names exactly which one broke:
 
 ```
 zig build -Denable-lua run -- games/pacman --scenario games/pacman/scenarios/04_eat.zon

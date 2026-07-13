@@ -9,7 +9,8 @@
 //      level geometry. The other glyphs — '.', 'o', 'P', 'g' — are unmapped, so they
 //      are walkable floor and materialize nothing. They stay in the rows only as a
 //      human-readable picture of the maze; the collidable pickups are the `entities`
-//      below and pac/ghosts are spawned by rules.lua at the 'P'/'g' cells.
+//      below and pac/ghosts (now four, Refs #62) are spawned by rules.lua at the
+//      'P'/'g' cells.
 //
 //   2. `.entities` — the collidable pickups (dots, pellets) as ADR 0025 colliders with
 //      a `kind` data tag (ADR 0024). They are NOT tilemap cells on purpose: a tilemap
@@ -46,7 +47,7 @@
             "#.####.#.#.#.####.#",
             "#.................#",
             "#.##.###.#.###.##.#",
-            "#....#..ggg..#....#",
+            "#....#..gggg.#....#",
             "#.##.#.#####.#.##.#",
             "#........#........#",
             "#.##.###.#.###.##.#",
