@@ -92,9 +92,10 @@ pub fn loadForWorld(gpa: Allocator, io: Io, base: Io.Dir, pkg: []const u8, world
         if (store.get(sprite.sheet) != null) continue;
         const path = try resolvePath(gpa, pkg, sprite.sheet);
         defer gpa.free(path);
-        const bytes = base.readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0) catch |err| switch (err) {
+        const read = base.readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0);
+        const bytes = read catch |err| switch (err) {
             error.FileNotFound => {
-                std.log.scoped(.sprite).warn("sheet not found: {s} (run `mise run assets`); entities hold frame 0", .{path});
+                std.log.scoped(.sprite).warn("sheet not found: {s} (`mise run assets`)", .{path});
                 continue;
             },
             else => return err,
@@ -190,18 +191,24 @@ test "sprite: loadForWorld reads generated sheets and skips missing ones" {
     // A second entity referencing the SAME sheet proves the load is de-duplicated.
     const e2 = try w.spawn();
     try w.setSprite(e2, .{ .sheet = "sprites/pac.msf", .clip = "chomp" });
+    // A third references a sheet with NO file on disk — exercising the loader's
+    // `error.FileNotFound` → warn-and-continue branch (a package whose assets have not
+    // been generated must still load without erroring). It logs one warning line.
+    const missing = try w.spawn();
+    try w.setSprite(missing, .{ .sheet = "sprites/ghost.msf", .clip = "walk" });
 
     // pkg = "" ⇒ resolvePath yields "sprites/generated/<name>", relative to `base`.
     var store = try loadForWorld(gpa, io, tmp.dir, "", &w);
     defer store.deinit();
 
-    // The one referenced sheet is loaded exactly once and drives the cursor. (A
-    // reference to an absent sheet is skipped — see the "unloaded sheet holds frame 0"
-    // case, which exercises that path without touching the filesystem.)
+    // The on-disk sheet loads exactly once; the absent one is skipped (not an error,
+    // absent from the store), so its entity holds frame 0.
     try testing.expectEqual(@as(usize, 1), store.count());
     try testing.expect(store.get("sprites/pac.msf") != null);
+    try testing.expect(store.get("sprites/ghost.msf") == null);
     advance(&w, &store, 0.15); // 0.15 s at 8 fps → floor(1.2) = 1 → 1 % 2 = 1
     try testing.expectEqual(@as(u16, 1), w.getAnimationState(e).?.frame);
+    try testing.expectEqual(@as(u16, 0), w.getAnimationState(missing).?.frame);
 }
 
 test "sprite: advance resolves the frame cursor from wall-clock time" {
