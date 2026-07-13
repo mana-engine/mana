@@ -1,0 +1,22 @@
+// Snake staircase, step 3/6: an `on_key` press turns the head off its default
+// rightward heading. Holding DOWN from tick 0 sets the pending heading before the
+// first grid step (tick 8), whose deferred `set_position` lands at the next flush
+// (tick 9); checking at tick 10 observes it settled.
+.{
+    .steps = 10,
+    .input_trace = .{
+        .{ .ticks = 10, .keys = .{"down"} },
+    },
+    .expect = .{
+        .{
+            .label = "turn: on_key(down) turns the head downward, off its default heading",
+            .at_tick = 10,
+            .check = .{ .occupied = .{ .x = 0, .y = -1 } },
+        },
+        .{
+            .label = "turn: the head did not keep its default rightward heading",
+            .at_tick = 10,
+            .check = .{ .vacant = .{ .x = 1, .y = 0 } },
+        },
+    },
+}

@@ -68,3 +68,17 @@ deterministically (a stable state hash, bit-identical across two runs), and pac 
 dot through native collision along the way. Real-time arrow-key `--play` needs SDL3 +
 Vulkan (a manual step, out of scope for the headless gate). Pac-Man stays open across
 multiple waves (#62), so this package references it, never closes it.
+
+## Acceptance staircase (ADR 0028, issue #94)
+
+`scenarios/*.zon` is the analogous staircase to Snake's, per what the native
+tilemap/nav/collision sim supports today: spawn → move → turn → eats a dot → a
+non-frightened ghost catch resets pac (not a kill). Each file isolates one mechanic,
+so a red result names exactly which one broke:
+
+```
+zig build -Denable-lua run -- games/pacman --scenario games/pacman/scenarios/04_eat.zon
+```
+
+or the whole suite via `zig build -Denable-lua test` (`tests/acceptance_scenarios.zig`
+drives every file here through `engine.scenario`, the same generic referee Snake uses).

@@ -1,0 +1,27 @@
+// Pac-Man staircase, step 5/5: an un-frightened ghost catching pac resets it to its
+// start cell (rules.lua `reset_pac`), via the same native `on_collision_begin` path
+// as the dot pickup (ADR 0025), classified by the `kind` data tag. With no input, pac
+// runs its default leftward path, eats the dot and the power pellet in its way
+// (score 60 by tick 55; see 04_eat.zon), parks at its clamped target cell, and a
+// chasing ghost (default "chase" mode) reaches it — the first catch, deterministically,
+// at tick 514. A reset teleports pac; it does not despawn anything (119 entities
+// throughout, same as right after the pellet: see 04_eat.zon's dot count plus the
+// eaten pellet).
+.{
+    .steps = 514,
+    .input_trace = .{
+        .{ .ticks = 514, .keys = .{} },
+    },
+    .expect = .{
+        .{
+            .label = "ghost collision: a non-frightened catch resets pac to its start cell",
+            .at_tick = 514,
+            .check = .{ .occupied = .{ .x = -1, .y = 4, .eps = 0.02 } },
+        },
+        .{
+            .label = "ghost collision: the catch is a reset, not a kill (no entity despawned)",
+            .at_tick = 514,
+            .check = .{ .entity_count = .{ .min = 119, .max = 119 } },
+        },
+    },
+}

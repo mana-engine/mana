@@ -9,5 +9,8 @@ is for behavior that spans modules or drives a real content package.
   format drift and are updated only as an explicit, reviewed step ("update
   goldens"). Editing them is blocked by a Claude Code hook otherwise.
 
-Key integration tests: `game.zon` manifest load, and the **determinism** test
-(same seed + inputs ⇒ bit-identical sim state hash after N ticks).
+Key integration tests: `game.zon` manifest load, the **determinism** test (same seed +
+inputs ⇒ bit-identical sim state hash after N ticks), and **acceptance_scenarios.zig**
+(ADR 0028 layer 2, issue #94) — replays every `games/<g>/scenarios/*.zon` staircase
+file through the generic `engine.scenario` referee, one Zig `test` per mechanic, so a
+red result names exactly which mechanic broke rather than "the game broke".

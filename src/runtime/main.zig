@@ -6,10 +6,11 @@
 //! game; nothing here references `games/**`.
 //!
 //! Over the ~500-line soft limit by design: this is the single runner entry point,
-//! and each mode (`--watch`/`--play`/`--render`/`--render-svg`/`--filmstrip`) shares
-//! the same small set of load-path helpers below (`loadManifest`, `loadPrototypes`,
-//! `loadPackageScript`, `registerStandardSystems`) rather than duplicating them across
-//! files — splitting by mode would scatter that shared setup instead of removing it.
+//! and each mode (`--watch`/`--play`/`--render`/`--render-svg`/`--filmstrip`/
+//! `--scenario`) shares the same small set of load-path helpers below
+//! (`loadManifest`, `loadPrototypes`, `loadPackageScript`, `registerStandardSystems`)
+//! rather than duplicating them across files — splitting by mode would scatter that
+//! shared setup instead of removing it.
 
 const std = @import("std");
 const core = @import("core");
@@ -61,6 +62,7 @@ pub fn main(init: std.process.Init) !void {
     var render_svg_out: ?[]const u8 = null;
     var filmstrip_dir: ?[]const u8 = null;
     var filmstrip_ticks: u32 = filmstrip_default_ticks;
+    var scenario_path: ?[]const u8 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const a = args[i];
@@ -68,6 +70,14 @@ pub fn main(init: std.process.Init) !void {
             watch = true;
         } else if (std.mem.eql(u8, a, "--play")) {
             play = true;
+        } else if (std.mem.eql(u8, a, "--scenario")) {
+            i += 1;
+            if (i >= args.len) {
+                try out.writeAll("usage: mana <pkg> --scenario <scenario.zon>\n");
+                try out.flush();
+                return;
+            }
+            scenario_path = args[i];
         } else if (std.mem.eql(u8, a, "--render")) {
             i += 1;
             if (i >= args.len) {
@@ -112,7 +122,8 @@ pub fn main(init: std.process.Init) !void {
     const pkg = pkg_path orelse {
         try out.writeAll(
             "usage: mana <game-package-dir> [--watch] [--play] [--render <out.png>] " ++
-                "[--render-svg <out.svg>] [--filmstrip <out-dir> [--ticks N]]\n",
+                "[--render-svg <out.svg>] [--filmstrip <out-dir> [--ticks N]] " ++
+                "[--scenario <scenario.zon>]\n",
         );
         try out.flush();
         return;
@@ -120,6 +131,7 @@ pub fn main(init: std.process.Init) !void {
     if (render_out) |path| return runRender(out, io, gpa, pkg, path);
     if (render_svg_out) |path| return runRenderSvg(out, io, gpa, pkg, path);
     if (filmstrip_dir) |dir| return runFilmstrip(out, io, gpa, pkg, dir, filmstrip_ticks);
+    if (scenario_path) |path| return runScenario(out, io, gpa, pkg, path);
     if (play) return runPlay(out, io, gpa, pkg);
     if (watch) return runWatch(out, io, gpa, pkg);
     return runOnce(out, io, gpa, pkg);
@@ -309,6 +321,66 @@ fn runFilmstrip(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, dir: [
     }
     try out.print("mana: filmstrip '{s}' — {d} frames, {d}x{d} → {s}\n", .{ manifest.name, ticks, view.width, view.height, dir });
     try out.flush();
+}
+
+/// Run a data-driven scenario (ADR 0028 layer 2, issue #94): load `pkg` exactly as
+/// `runOnce` does (manifest → scene → prototypes → script → standard systems), then
+/// replay `scenario_path`'s input trace against the live `Sim` via the generic
+/// `engine.scenario.run` referee — never any genre knowledge here, only the package
+/// load path every other mode already shares. Prints one line per assertion in file
+/// order (so a red line names the exact broken mechanic), then a summary; a failed
+/// assertion or an aborting Layer-1 invariant violation makes the process exit
+/// non-zero (`error.ScenarioFailed`) so `--scenario` is CI-usable.
+fn runScenario(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, scenario_path: []const u8) !void {
+    const manifest = try loadManifest(io, gpa, pkg);
+    defer manifest_mod.free(gpa, manifest);
+    try checkScriptApi(out, manifest);
+
+    const scene_path = try std.fs.path.join(gpa, &.{ pkg, manifest.entry_scene });
+    defer gpa.free(scene_path);
+    const scene_src = try Io.Dir.cwd().readFileAllocOptions(io, scene_path, gpa, .unlimited, .of(u8), 0);
+    defer gpa.free(scene_src);
+    const parsed = try engine.scene.parse(gpa, scene_src);
+    defer engine.scene.free(gpa, parsed);
+
+    const proto_file = try loadPrototypes(io, gpa, pkg, manifest);
+    defer if (proto_file) |f| engine.prototype.free(gpa, f);
+
+    var sim = engine.Sim.init(gpa, core.time.default_dt);
+    defer sim.deinit();
+    if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
+    try engine.scene.load(parsed, &sim.world);
+    if (parsed.tilemap) |*tm| sim.tilemap = tm; // see runOnce: parsed outlives sim (LIFO defers)
+    try loadPackageScript(io, gpa, pkg, manifest, &sim);
+    sim.enterScene(parsed.name);
+    try registerStandardSystems(&sim);
+
+    const scenario_src = try Io.Dir.cwd().readFileAllocOptions(io, scenario_path, gpa, .unlimited, .of(u8), 0);
+    defer gpa.free(scenario_src);
+    const scenario = try engine.scenario.parse(gpa, scenario_src);
+    defer engine.scenario.free(gpa, scenario);
+
+    var report = try engine.scenario.run(gpa, &sim, scenario);
+    defer report.deinit();
+
+    var passed_n: usize = 0;
+    for (report.results.items) |r| {
+        try out.print("mana: [{s}] {s} (tick {d})\n", .{ if (r.passed) "PASS" else "FAIL", r.label, r.at_tick });
+        if (r.passed) {
+            passed_n += 1;
+        } else if (r.detail.len > 0) {
+            try out.print("       {s}\n", .{r.detail});
+        }
+    }
+    if (report.invariant_violation) |iv| {
+        try out.print("mana: [FAIL] invariant violated at tick {d}: {f}\n", .{ iv.tick, iv.violation });
+    }
+    try out.print(
+        "mana: scenario '{s}' — {d}/{d} assertions passed\n",
+        .{ scenario_path, passed_n, report.results.items.len },
+    );
+    try out.flush();
+    if (!report.passed()) return error.ScenarioFailed;
 }
 
 /// Live windowed play mode (issue #29; ADR 0009 §6 loop + ADR 0012 present): open a
