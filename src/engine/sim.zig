@@ -17,6 +17,7 @@ const script_runtime = @import("script_runtime.zig");
 const script = @import("script");
 const platform = @import("platform");
 const prototype = @import("prototype.zig");
+const Tilemap = @import("tilemap.zig").Tilemap;
 
 const Allocator = std.mem.Allocator;
 
@@ -34,6 +35,10 @@ pub const Context = struct {
     dt: f32,
     tick: u64,
     input: platform.InputSnapshot,
+    /// The scene's grid level (ADR 0026/0027), or null if the sim has none. The `nav`
+    /// steering system paths over it; every other system ignores it. Null for a sim
+    /// that never sets `Sim.tilemap`, so nav no-ops and existing sims are unaffected.
+    tilemap: ?*const Tilemap = null,
 };
 
 /// A system's own reported failure — the native-system analogue of a Lua handler
@@ -87,6 +92,11 @@ pub const Sim = struct {
     /// `Sim` that never calls `setInput` — every existing caller today — ticks
     /// exactly as it did before input delivery existed.
     input: platform.InputSnapshot = .{},
+    /// The scene's grid level (ADR 0026), borrowed for the `nav` steering system (ADR
+    /// 0027) to path over. Null by default, so a sim that never sets it ticks exactly
+    /// as before (nav no-ops). The runner points it at the loaded scene's tilemap; the
+    /// borrowed `Tilemap` must outlive the `Sim` (the runner holds the parsed scene).
+    tilemap: ?*const Tilemap = null,
     /// Last tick's input, diffed against `input` each tick to emit `on_key` edges
     /// (ADR 0021). Defaults empty, so a key held on the very first tick reads as a
     /// press. Not part of the state hash (input never is, ADR 0009).
@@ -200,6 +210,7 @@ pub const Sim = struct {
             .dt = self.dt,
             .tick = self.tick_count,
             .input = self.input,
+            .tilemap = self.tilemap,
         };
         {
             const z = tracy.zone(@src(), "sim.systems");

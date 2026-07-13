@@ -31,6 +31,10 @@ pub const EntityDef = struct {
     /// entity has no data components. Declaring one here registers its column, which
     /// is what lets a script later `mana.get`/`mana.set` it.
     data: []const components.NamedValue = &.{},
+    /// A navigation agent (ADR 0027): declaring one makes the native `nav` system steer
+    /// this entity toward its target cell (the `nav_target_col`/`nav_target_row` data
+    /// components a script sets). Absent ⇒ the entity is not steered.
+    nav_agent: ?components.NavAgent = null,
 };
 
 /// A named collection of entity definitions — the unit a runtime loads.
@@ -66,6 +70,7 @@ pub fn load(scene: Scene, world: *World) World.Error!void {
         if (def.velocity) |v| try world.setVelocity(e, v);
         if (def.health) |h| try world.setHealth(e, h);
         if (def.collider) |c| try world.setCollider(e, c);
+        if (def.nav_agent) |na| try world.setNavAgent(e, na);
         for (def.data) |nv| try world.setDataByName(e, nv.name, nv.value);
     }
     if (scene.tilemap) |tm| try tilemap.materialize(tm, world);

@@ -41,6 +41,20 @@ pub const Collider = struct {
     is_static: bool = false,
 };
 
+/// A navigation agent (ADR 0027): an entity the native `nav` steering system drives
+/// toward a target grid cell each tick. `speed` is its movement rate in world units
+/// per second along the path. The target cell itself is *not* held here — it lives in
+/// the `nav_target_col`/`nav_target_row` named data components (ADR 0024), so a script
+/// selects a new target with the existing `mana.set` (no new scripting API). An entity
+/// needs `Transform` + `Velocity` + `NavAgent` (and the sim's scene tilemap) to be
+/// steered: `nav` sets the agent's `Velocity` toward the next cell on the shortest
+/// path and the `movement` system integrates it. Like `Velocity`/`Controller`, this is
+/// movement *intent*, not authoritative state — its effect lands in the hashed
+/// `Transform`, so it stays out of the determinism hash.
+pub const NavAgent = struct {
+    speed: f32 = 1,
+};
+
 /// The set of built-in components a deferred spawn attaches at once — an omitted
 /// (null) field means the spawned entity lacks that component. This is the same
 /// data-attachable set a scene `EntityDef` carries (ADR 0004 §6) and an entity
@@ -59,6 +73,10 @@ pub const Bundle = struct {
     /// borrowed slice (the scene/prototype ZON owns it); empty ⇒ the spawned entity
     /// has no data components.
     data: []const NamedValue = &.{},
+    /// A navigation agent (ADR 0027) to attach, so a ZON-declared or `mana.spawn`-ed
+    /// entity is steered natively toward its target cell by the `nav` system — the same
+    /// `NavAgent` `World.setNavAgent` accepts.
+    nav_agent: ?NavAgent = null,
 };
 
 /// Kinematic character-controller intent (ADR 0008 follow-on: move-and-slide).
