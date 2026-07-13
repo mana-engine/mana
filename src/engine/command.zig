@@ -105,6 +105,7 @@ pub const CommandBuffer = struct {
                 if (a.bundle.transform) |t| try ignoreInvalid(world.setTransform(a.entity, t));
                 if (a.bundle.velocity) |v| try ignoreInvalid(world.setVelocity(a.entity, v));
                 if (a.bundle.health) |h| try ignoreInvalid(world.setHealth(a.entity, h));
+                if (a.bundle.collider) |c| try ignoreInvalid(world.setCollider(a.entity, c));
                 for (a.bundle.data) |nv| try ignoreInvalid(world.setDataByName(a.entity, nv.name, nv.value));
             },
             .set_transform => |s| try ignoreInvalid(world.setTransform(s.entity, s.value)),
@@ -241,6 +242,25 @@ test "command buffer: a spawn bundle registers and attaches named data component
     try testing.expect(world.dataColumn("hp") == null); // column not registered until flush
     try cb.flush(testing.allocator, &world, &events);
     try testing.expectEqual(@as(?f64, 5), world.getData(e, world.dataColumn("hp").?));
+}
+
+test "command buffer: a spawn bundle attaches a collider at flush" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+
+    var cb: CommandBuffer = .{};
+    defer cb.deinit(testing.allocator);
+    var events: event.Queue = .{};
+    defer events.deinit(testing.allocator);
+
+    const e = try cb.spawn(testing.allocator, &world, .{
+        .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } },
+        .collider = .{ .shape = .{ .circle = .{ .radius = 2 } }, .is_static = true },
+    });
+    try testing.expect(world.getCollider(e) == null); // not yet applied
+    try cb.flush(testing.allocator, &world, &events);
+    try testing.expectEqual(@as(f32, 2), world.getCollider(e).?.shape.circle.radius);
+    try testing.expect(world.getCollider(e).?.is_static);
 }
 
 test "command buffer: rollback discards only commands queued since the mark" {
