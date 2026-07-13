@@ -66,6 +66,42 @@ pub const Appearance = struct {
     shape: gpu.Shape = .rect,
 };
 
+/// A reference to a sprite-sheet asset plus which clip to play (ADR 0031 §1). COSMETIC:
+/// no sim system reads or writes it, so — like `Appearance` — it is excluded from
+/// `World.stateHash`. The frame grid, clip table, and fps live in the sheet asset (the
+/// `.msf` file, decoded by `data.msf`), NOT here, so re-timing/re-framing an animation is
+/// an asset edit, not a content edit (data over code). `Appearance` and `Sprite` coexist:
+/// an entity with a `Sprite` samples the sheet (Vulkan path, follow-up), one with only an
+/// `Appearance` keeps the flat-quad look; `Appearance.color` becomes the sprite tint.
+pub const Sprite = struct {
+    /// Package-relative path to the sheet asset, resolved at load like `manifest.script`
+    /// (e.g. `"sprites/pac.msf"`).
+    sheet: []const u8,
+    /// Name of the clip to play (must exist in the sheet). Empty ⇒ frame 0, no playback.
+    clip: []const u8 = "",
+    /// Playback behaviour when the clip's last frame is reached.
+    loop: LoopMode = .loop,
+};
+
+/// Live per-entity animation cursor (ADR 0031 §1). Advanced by a COSMETIC render-time
+/// system from wall-clock/frame time, NEVER from a sim tick — so, like `Sprite`, it is
+/// excluded from `World.stateHash` and cannot perturb determinism. The engine attaches a
+/// default cursor whenever a `Sprite` is attached (see `World.setSprite`); content never
+/// declares it.
+pub const AnimationState = struct {
+    /// Seconds elapsed since the current clip started playing.
+    time_s: f32 = 0,
+    /// Resolved position within the clip's frame list, computed from `time_s` by the
+    /// render-time animation system (see `animation.clipPosition`); the sheet frame index
+    /// the renderer samples is `clip.frames[frame]`.
+    frame: u16 = 0,
+};
+
+/// Playback behaviour of a `Sprite`'s clip when its last frame is reached (ADR 0031 §1):
+/// restart (`loop`), hold the final frame (`once`), or reverse each time an end is hit
+/// (`ping_pong`). Interpreted by `animation.clipPosition`.
+pub const LoopMode = enum { loop, once, ping_pong };
+
 /// A navigation agent (ADR 0027): an entity the native `nav` steering system drives
 /// toward a target grid cell each tick. `speed` is its movement rate in world units
 /// per second along the path. The target cell itself is *not* held here — it lives in
@@ -105,6 +141,10 @@ pub const Bundle = struct {
     /// A render appearance (ADR 0030) to attach — the color/size the renderer draws
     /// this entity with, in place of the palette-by-index fallback.
     appearance: ?Appearance = null,
+    /// A sprite reference (ADR 0031) to attach — the sheet + clip the textured renderer
+    /// samples for this entity. Attaching one also attaches a default `AnimationState`
+    /// cursor (see `World.setSprite`); cosmetic, excluded from the state hash.
+    sprite: ?Sprite = null,
 };
 
 /// Kinematic character-controller intent (ADR 0008 follow-on: move-and-slide).

@@ -108,6 +108,7 @@ pub const CommandBuffer = struct {
                 if (a.bundle.collider) |c| try ignoreInvalid(world.setCollider(a.entity, c));
                 if (a.bundle.nav_agent) |na| try ignoreInvalid(world.setNavAgent(a.entity, na));
                 if (a.bundle.appearance) |ap| try ignoreInvalid(world.setAppearance(a.entity, ap));
+                if (a.bundle.sprite) |sp| try ignoreInvalid(world.setSprite(a.entity, sp));
                 for (a.bundle.data) |nv| try ignoreInvalid(world.setDataByName(a.entity, nv.name, nv.value));
             },
             .set_transform => |s| try ignoreInvalid(world.setTransform(s.entity, s.value)),
@@ -299,6 +300,25 @@ test "command buffer: a spawn bundle attaches an appearance's shape at flush" {
     });
     try cb.flush(testing.allocator, &world, &events);
     try testing.expectEqual(@import("gpu").Shape.circle, world.getAppearance(e).?.shape);
+}
+
+test "command buffer: a spawn bundle attaches a sprite and default cursor at flush" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+
+    var cb: CommandBuffer = .{};
+    defer cb.deinit(testing.allocator);
+    var events: event.Queue = .{};
+    defer events.deinit(testing.allocator);
+
+    const e = try cb.spawn(testing.allocator, &world, .{
+        .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } },
+        .sprite = .{ .sheet = "sprites/pac.msf", .clip = "chomp" },
+    });
+    try testing.expect(world.getSprite(e) == null); // not yet applied
+    try cb.flush(testing.allocator, &world, &events);
+    try testing.expectEqualStrings("chomp", world.getSprite(e).?.clip);
+    try testing.expect(world.getAnimationState(e) != null); // cursor attached alongside
 }
 
 test "command buffer: rollback discards only commands queued since the mark" {

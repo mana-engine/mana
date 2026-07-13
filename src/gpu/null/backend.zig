@@ -185,6 +185,20 @@ pub const Device = struct {
         return .{ .bytes = try self.gpa.alloc(u8, @intCast(desc.size)) };
     }
 
+    /// Upload tightly-packed RGBA8 `rgba` into `tex` (ADR 0031: a decoded sprite sheet
+    /// reaching the GPU). On the null backend this copies the bytes into the texture's
+    /// host pixel buffer — a real adapter (the bytes are tracked and readable), but the
+    /// null rasterizer still fills a quad's flat colour and never samples them; texel
+    /// sampling is the Vulkan path only. `rgba.len` must equal the texture's byte size.
+    /// `dev` is unused (host memory) but kept for surface parity with the Vulkan backend,
+    /// which needs the device to stage the copy. Never fails on the null backend; `!void`
+    /// matches the Vulkan backend's fallible upload.
+    pub fn uploadTexture(self: *Device, tex: *Texture, rgba: []const u8) !void {
+        _ = self;
+        std.debug.assert(rgba.len == tex.pixels.len);
+        @memcpy(tex.pixels, rgba);
+    }
+
     /// Create the scene pipeline. Trivial for the null backend. `format` is accepted
     /// for surface parity. Never fails.
     pub fn createScenePipeline(self: *Device, format: port.TextureFormat) !Pipeline {
@@ -363,6 +377,23 @@ test "null backend: renderScene surface clears then rasterizes a quad" {
     const last = (7 * 8 + 7) * 4;
     try testing.expectEqual(@as(u8, 0), out[last + 0]); // (7,7) R stayed clear
     try testing.expectEqual(@as(u8, 255), out[last + 3]); // (7,7) A from clear
+}
+
+test "null backend: uploadTexture copies RGBA bytes into a sampled texture" {
+    var dev = try Device.init(testing.allocator);
+    defer dev.deinit();
+
+    // A 2x2 sprite-sheet-style texture: transfer_dst (upload) + sampled (shader read).
+    var tex = try dev.createTexture(.{ .width = 2, .height = 2, .format = .rgba8_unorm, .usage = .{ .transfer_dst = true, .sampled = true } });
+    defer tex.deinit(&dev);
+
+    var rgba: [2 * 2 * 4]u8 = undefined;
+    for (&rgba, 0..) |*b, i| b.* = @intCast(i * 5 & 0xff);
+    try dev.uploadTexture(&tex, &rgba);
+
+    // The null adapter really holds the uploaded bytes (a readable test double), even
+    // though its rasterizer draws flat colour rather than sampling them.
+    try testing.expectEqualSlices(u8, &rgba, tex.pixels);
 }
 
 test "null backend: swapchain acquire -> render -> present captures the frame" {

@@ -147,6 +147,7 @@ fn placeCell(world: *World, bundle: components.Bundle, pos: Vec3) World.Error!vo
     if (bundle.collider) |c| try world.setCollider(e, c);
     if (bundle.nav_agent) |na| try world.setNavAgent(e, na);
     if (bundle.appearance) |a| try world.setAppearance(e, a);
+    if (bundle.sprite) |s| try world.setSprite(e, s);
     for (bundle.data) |nv| try world.setDataByName(e, nv.name, nv.value);
 }
 
@@ -332,6 +333,21 @@ test "tilemap: materialize attaches a legend cell's appearance shape to its enti
     try materialize(tm, &world);
     const e = world.entityAt(0);
     try testing.expectEqual(gpu.Shape.circle, world.getAppearance(e).?.shape);
+}
+
+test "tilemap: materialize attaches a legend cell's sprite and default cursor" {
+    const tm: Tilemap = .{
+        .legend = &.{
+            .{ .glyph = '@', .bundle = .{ .sprite = .{ .sheet = "sprites/pac.msf", .clip = "chomp" } } },
+        },
+        .rows = &.{"@"},
+    };
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    try materialize(tm, &world);
+    const e = world.entityAt(0);
+    try testing.expectEqualStrings("chomp", world.getSprite(e).?.clip);
+    try testing.expect(world.getAnimationState(e) != null);
 }
 
 test "tilemap: parse a legend+rows grid from ZON (char glyphs, rows of chars)" {
