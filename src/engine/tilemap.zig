@@ -26,6 +26,10 @@ pub const Tile = struct {
     bundle: ?components.Bundle = null,
 };
 
+/// A grid coordinate: 0-based column and row. Signed so a pathfinder can probe an
+/// off-grid neighbour (e.g. col -1) before `isWalkable` rejects it, without underflow.
+pub const Cell = struct { col: i32, row: i32 };
+
 /// A grid level on a scene (ADR 0026): `cell_size` world units per cell, `origin` the
 /// world position of cell (col 0, row 0), a glyph `legend`, and `rows` of characters
 /// (one string per row, top-to-bottom as written). Rows need not be equal length — a
@@ -62,6 +66,52 @@ pub const Tilemap = struct {
         }
         return null;
     }
+
+    /// The column count spanning the widest row — the grid's logical width. A
+    /// pathfinder bounds its scratch by `colCount * rows.len`; a ragged short row simply
+    /// has its missing trailing cells treated as walls (`isWalkable` returns false).
+    pub fn colCount(self: Tilemap) usize {
+        var m: usize = 0;
+        for (self.rows) |line| m = @max(m, line.len);
+        return m;
+    }
+
+    /// True if grid cell (`col`, `row`) is walkable — inside the grid and not a wall.
+    /// A cell is a **wall** iff its glyph maps to a legend tile whose `bundle` attaches
+    /// a `Collider` (the static level geometry a maze materializes, ADR 0026); every
+    /// other cell — an unmapped glyph, a bundle-less tile, or a tile with no collider —
+    /// is walkable. Out-of-range indices (negative, past the last row, or past a short
+    /// row's end) are non-walkable, so the grid border bounds a pathfinder without a
+    /// wall ring. This is the topology the `nav` pathfinder (ADR 0027) paths over —
+    /// derived from the tilemap, never a parallel map.
+    pub fn isWalkable(self: Tilemap, col: i32, row: i32) bool {
+        if (col < 0 or row < 0) return false;
+        const r: usize = @intCast(row);
+        if (r >= self.rows.len) return false;
+        const line = self.rows[r];
+        const c: usize = @intCast(col);
+        if (c >= line.len) return false;
+        const tile = self.tileFor(line[c]) orelse return true; // unmapped ⇒ walkable
+        const bundle = tile.bundle orelse return true; // no components ⇒ walkable
+        return bundle.collider == null; // a collider ⇒ wall
+    }
+
+    /// The grid cell containing world point `pos`, or null if `pos` maps outside the
+    /// grid. Inverse of `cellToWorld`: rounds to the nearest cell on each axis; Z is
+    /// ignored (the grid is a plane, ADR 0014). Used to find a nav agent's current cell
+    /// (ADR 0027). `cell_size` must be non-zero (a zero-sized grid returns null).
+    pub fn worldToCell(self: Tilemap, pos: Vec3) ?Cell {
+        if (self.cell_size == 0) return null;
+        const cf = @round((pos.x - self.origin.x) / self.cell_size);
+        const rf = @round((pos.y - self.origin.y) / self.cell_size);
+        const col: i32 = @intFromFloat(cf);
+        const row: i32 = @intFromFloat(rf);
+        if (col < 0 or row < 0) return null;
+        const r: usize = @intCast(row);
+        if (r >= self.rows.len) return null;
+        if (@as(usize, @intCast(col)) >= self.rows[r].len) return null;
+        return .{ .col = col, .row = row };
+    }
 };
 
 /// Materialize `tm` into `world`: for every cell whose glyph maps to a legend tile with
@@ -94,6 +144,7 @@ fn placeCell(world: *World, bundle: components.Bundle, pos: Vec3) World.Error!vo
     if (bundle.velocity) |v| try world.setVelocity(e, v);
     if (bundle.health) |h| try world.setHealth(e, h);
     if (bundle.collider) |c| try world.setCollider(e, c);
+    if (bundle.nav_agent) |na| try world.setNavAgent(e, na);
     for (bundle.data) |nv| try world.setDataByName(e, nv.name, nv.value);
 }
 
@@ -115,6 +166,56 @@ test "tilemap: cellToWorld maps col→+X, row→+Y from origin (identity/edge/ne
         const tm: Tilemap = .{ .cell_size = c.cell, .origin = c.origin };
         try testing.expect(tm.cellToWorld(c.col, c.row).approxEql(c.want, 1e-6));
     }
+}
+
+test "tilemap: isWalkable — walls (collider) block, everything else is walkable, bounds are walls" {
+    // '#' materializes a static collider (a wall); '.' is a declared marker with no
+    // collider (walkable); ' ' is unmapped (walkable). Rows are ragged: row 1 is short.
+    const tm: Tilemap = .{
+        .legend = &.{
+            .{ .glyph = '#', .bundle = .{ .collider = .{ .shape = .{ .circle = .{ .radius = 0.5 } }, .is_static = true } } },
+            .{ .glyph = '.', .bundle = null },
+            .{ .glyph = 'o', .bundle = .{ .health = .{ .current = 1, .max = 1 } } }, // component but no collider
+        },
+        .rows = &.{ "#.o", "#", "###" },
+    };
+    const Case = struct { col: i32, row: i32, want: bool };
+    const cases = [_]Case{
+        .{ .col = 0, .row = 0, .want = false }, // '#' wall
+        .{ .col = 1, .row = 0, .want = true }, // '.' walkable marker
+        .{ .col = 2, .row = 0, .want = true }, // 'o' has a health component but no collider ⇒ walkable
+        .{ .col = 1, .row = 1, .want = false }, // past the short row's end ⇒ wall
+        .{ .col = -1, .row = 0, .want = false }, // negative ⇒ wall
+        .{ .col = 0, .row = 3, .want = false }, // past the last row ⇒ wall
+    };
+    for (cases) |c| try testing.expectEqual(c.want, tm.isWalkable(c.col, c.row));
+}
+
+test "tilemap: worldToCell inverts cellToWorld and rejects off-grid points" {
+    const tm: Tilemap = .{
+        .cell_size = 2,
+        .origin = .{ .x = -1, .y = -1, .z = 0 },
+        .legend = &.{.{ .glyph = '.', .bundle = null }},
+        .rows = &.{ "...", "..." }, // 3 cols x 2 rows
+    };
+    // Round-trip: every in-grid cell centre maps back to itself.
+    for ([_]Cell{ .{ .col = 0, .row = 0 }, .{ .col = 2, .row = 1 }, .{ .col = 1, .row = 0 } }) |cell| {
+        const w = tm.cellToWorld(@intCast(cell.col), @intCast(cell.row));
+        const back = tm.worldToCell(w).?;
+        try testing.expectEqual(cell.col, back.col);
+        try testing.expectEqual(cell.row, back.row);
+    }
+    // A point near a cell centre rounds to that cell.
+    try testing.expectEqual(@as(i32, 1), tm.worldToCell(.{ .x = 0.9, .y = -1.1, .z = 0 }).?.col);
+    // Off-grid points (below origin, past the last row) return null.
+    try testing.expect(tm.worldToCell(.{ .x = -3, .y = -1, .z = 0 }) == null);
+    try testing.expect(tm.worldToCell(.{ .x = -1, .y = 5, .z = 0 }) == null);
+}
+
+test "tilemap: colCount is the widest row's length" {
+    const tm: Tilemap = .{ .rows = &.{ "##", "#####", "###" } };
+    try testing.expectEqual(@as(usize, 5), tm.colCount());
+    try testing.expectEqual(@as(usize, 0), (Tilemap{}).colCount()); // no rows ⇒ zero width
 }
 
 test "tilemap: tileFor resolves a mapped glyph, first-match wins, unmapped is null" {

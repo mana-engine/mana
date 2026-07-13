@@ -39,6 +39,7 @@ pub const prototype = @import("prototype.zig");
 pub const render = @import("render.zig");
 pub const collision = @import("collision.zig");
 pub const controller = @import("controller.zig");
+pub const nav = @import("nav.zig");
 pub const input = @import("input.zig");
 
 /// The scripting API version this build provides (ADR 0003 §5), surfaced so the
@@ -58,6 +59,7 @@ pub const Velocity = components.Velocity;
 pub const Health = components.Health;
 pub const Collider = components.Collider;
 pub const Controller = components.Controller;
+pub const NavAgent = components.NavAgent;
 pub const Timers = timer.Timers;
 
 /// Marker verifying the module is wired into the build graph and can see every port
@@ -80,6 +82,7 @@ test {
     _ = render;
     _ = collision;
     _ = controller;
+    _ = nav;
     _ = input;
 }
 

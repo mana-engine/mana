@@ -106,6 +106,7 @@ pub const CommandBuffer = struct {
                 if (a.bundle.velocity) |v| try ignoreInvalid(world.setVelocity(a.entity, v));
                 if (a.bundle.health) |h| try ignoreInvalid(world.setHealth(a.entity, h));
                 if (a.bundle.collider) |c| try ignoreInvalid(world.setCollider(a.entity, c));
+                if (a.bundle.nav_agent) |na| try ignoreInvalid(world.setNavAgent(a.entity, na));
                 for (a.bundle.data) |nv| try ignoreInvalid(world.setDataByName(a.entity, nv.name, nv.value));
             },
             .set_transform => |s| try ignoreInvalid(world.setTransform(s.entity, s.value)),

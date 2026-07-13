@@ -15,6 +15,7 @@ const Velocity = components.Velocity;
 const Health = components.Health;
 const Collider = components.Collider;
 const Controller = components.Controller;
+const NavAgent = components.NavAgent;
 const Entity = ecs.Entity;
 const Allocator = std.mem.Allocator;
 
@@ -29,6 +30,10 @@ pub const World = struct {
     healths: ecs.SparseSet(Health) = .{},
     colliders: ecs.SparseSet(Collider) = .{},
     controllers: ecs.SparseSet(Controller) = .{},
+    /// Navigation agents (ADR 0027): entities the native `nav` system steers toward a
+    /// target cell over the scene tilemap. Empty until a scene/prototype declares a
+    /// `nav_agent`; excluded from `stateHash` (movement intent, like `Velocity`).
+    nav_agents: ecs.SparseSet(NavAgent) = .{},
     /// Named scalar data components (ADR 0024): game-declared per-entity `f64`
     /// attributes `mana.get`/`mana.set` read and write. Empty until a scene/prototype
     /// declares a `data` component; part of the state hash (`stateHash`).
@@ -45,6 +50,7 @@ pub const World = struct {
         self.healths.deinit(self.gpa);
         self.colliders.deinit(self.gpa);
         self.controllers.deinit(self.gpa);
+        self.nav_agents.deinit(self.gpa);
         self.data.deinit(self.gpa);
         self.entities.deinit(self.gpa);
         self.* = undefined;
@@ -63,6 +69,7 @@ pub const World = struct {
         self.healths.remove(e.index);
         self.colliders.remove(e.index);
         self.controllers.remove(e.index);
+        self.nav_agents.remove(e.index);
         self.data.removeEntity(e.index);
         try self.entities.free_entity(self.gpa, e);
     }
@@ -150,6 +157,20 @@ pub const World = struct {
         return self.controllers.get(e.index);
     }
 
+    /// Attach/overwrite `e`'s `NavAgent` (ADR 0027). Errors: `error.InvalidEntity` for
+    /// a stale handle, `error.OutOfMemory` on allocation failure.
+    pub fn setNavAgent(self: *World, e: Entity, na: NavAgent) Error!void {
+        if (!self.entities.isValid(e)) return error.InvalidEntity;
+        try self.nav_agents.put(self.gpa, e.index, na);
+    }
+
+    /// Mutable pointer to `e`'s `NavAgent`, or null if absent/stale. Invalidated by
+    /// subsequent component adds/removes.
+    pub fn getNavAgent(self: *World, e: Entity) ?*NavAgent {
+        if (!self.entities.isValid(e)) return null;
+        return self.nav_agents.get(e.index);
+    }
+
     /// The column id for the named data component `name` (ADR 0024), or `null` if no
     /// scene/prototype has declared it. `mana.get`/`mana.set` resolve a name to a
     /// column through this; an unknown name is the "undeclared" case.
@@ -191,6 +212,9 @@ pub const World = struct {
     /// `Controller` is likewise excluded: it is input intent (like `Velocity`, also
     /// excluded), not authoritative state — its effect lands in `Transform`, which is
     /// hashed, so the character controller's output stays inside the guarantee.
+    /// `NavAgent` (ADR 0027) is excluded for the same reason: steering intent whose
+    /// effect lands in the hashed `Transform` (its target lives in hashed data
+    /// components), so a scene with no nav agents hashes bit-identically.
     /// Named data components (ADR 0024) are authoritative sim state and are folded in
     /// last, in registration/dense order; an empty store adds zero bytes, so a scene
     /// with no data components hashes bit-identically to before the store existed.
@@ -251,6 +275,44 @@ test "world: controller round-trips and is dropped on despawn" {
     try w.despawn(e);
     try testing.expect(w.getController(e) == null);
     try testing.expectEqual(@as(usize, 0), w.controllers.count());
+}
+
+test "world: nav agent round-trips and is dropped on despawn" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+
+    const e = try w.spawn();
+    try w.setNavAgent(e, .{ .speed = 3.5 });
+    try testing.expectEqual(@as(f32, 3.5), w.getNavAgent(e).?.speed);
+    try testing.expectEqual(@as(usize, 1), w.nav_agents.count());
+
+    try w.despawn(e);
+    try testing.expect(w.getNavAgent(e) == null);
+    try testing.expectEqual(@as(usize, 0), w.nav_agents.count());
+}
+
+test "world: setNavAgent on a stale handle errors" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+    const e = try w.spawn();
+    try w.despawn(e);
+    try testing.expectError(error.InvalidEntity, w.setNavAgent(e, .{ .speed = 1 }));
+}
+
+test "world: a nav agent does not perturb the state hash (steering intent, excluded)" {
+    var with = World.init(testing.allocator);
+    defer with.deinit();
+    var without = World.init(testing.allocator);
+    defer without.deinit();
+
+    inline for (.{ &with, &without }) |wp| {
+        const e = try wp.spawn();
+        try wp.setTransform(e, .{ .pos = .{ .x = 1, .y = 2, .z = 3 } });
+    }
+    // Attaching a NavAgent to one world must not change its hash — like Velocity and
+    // Controller, it is movement intent, not authoritative state.
+    try with.setNavAgent(with.entityAt(0), .{ .speed = 9 });
+    try testing.expectEqual(without.stateHash(), with.stateHash());
 }
 
 test "world: setTransform on a stale handle errors" {

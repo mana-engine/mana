@@ -49,6 +49,7 @@ pub fn bundleAt(proto: Prototype, pos: core.Vec3) components.Bundle {
         .health = proto.health,
         .collider = proto.collider, // collider (ADR 0025) carries through as-is
         .data = proto.data, // named data components (ADR 0024) carry through as-is
+        .nav_agent = proto.nav_agent, // nav agent (ADR 0027) carries through as-is
     };
 }
 
