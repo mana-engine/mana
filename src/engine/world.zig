@@ -84,6 +84,8 @@ pub const World = struct {
         return self.entities.liveCount();
     }
 
+    /// Attach/overwrite `e`'s `Transform`. Errors: `error.InvalidEntity` for a stale
+    /// handle, `error.OutOfMemory` on allocation failure.
     pub fn setTransform(self: *World, e: Entity, t: Transform) Error!void {
         if (!self.entities.isValid(e)) return error.InvalidEntity;
         try self.transforms.put(self.gpa, e.index, t);
@@ -96,6 +98,8 @@ pub const World = struct {
         return self.transforms.get(e.index);
     }
 
+    /// Attach/overwrite `e`'s `Velocity`. Errors: `error.InvalidEntity` for a stale
+    /// handle, `error.OutOfMemory` on allocation failure.
     pub fn setVelocity(self: *World, e: Entity, v: Velocity) Error!void {
         if (!self.entities.isValid(e)) return error.InvalidEntity;
         try self.velocities.put(self.gpa, e.index, v);
@@ -106,6 +110,8 @@ pub const World = struct {
         return self.velocities.get(e.index);
     }
 
+    /// Attach/overwrite `e`'s `Health`. Errors: `error.InvalidEntity` for a stale
+    /// handle, `error.OutOfMemory` on allocation failure.
     pub fn setHealth(self: *World, e: Entity, h: Health) Error!void {
         if (!self.entities.isValid(e)) return error.InvalidEntity;
         try self.healths.put(self.gpa, e.index, h);
@@ -118,6 +124,8 @@ pub const World = struct {
         return self.healths.get(e.index);
     }
 
+    /// Attach/overwrite `e`'s `Collider`. Errors: `error.InvalidEntity` for a stale
+    /// handle, `error.OutOfMemory` on allocation failure.
     pub fn setCollider(self: *World, e: Entity, c: Collider) Error!void {
         if (!self.entities.isValid(e)) return error.InvalidEntity;
         try self.colliders.put(self.gpa, e.index, c);
@@ -245,12 +253,36 @@ test "world: controller round-trips and is dropped on despawn" {
     try testing.expectEqual(@as(usize, 0), w.controllers.count());
 }
 
-test "world: stale handle is rejected by writers" {
+test "world: setTransform on a stale handle errors" {
     var w = World.init(testing.allocator);
     defer w.deinit();
     const e = try w.spawn();
     try w.despawn(e);
     try testing.expectError(error.InvalidEntity, w.setTransform(e, .{ .pos = core.Vec3.zero }));
+}
+
+test "world: setVelocity on a stale handle errors" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+    const e = try w.spawn();
+    try w.despawn(e);
+    try testing.expectError(error.InvalidEntity, w.setVelocity(e, .{ .v = core.Vec3.zero }));
+}
+
+test "world: setHealth on a stale handle errors" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+    const e = try w.spawn();
+    try w.despawn(e);
+    try testing.expectError(error.InvalidEntity, w.setHealth(e, .{ .current = 10, .max = 10 }));
+}
+
+test "world: setCollider on a stale handle errors" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+    const e = try w.spawn();
+    try w.despawn(e);
+    try testing.expectError(error.InvalidEntity, w.setCollider(e, .{ .shape = .{ .circle = .{ .radius = 1 } } }));
 }
 
 test "world: a named data component round-trips and is dropped on despawn" {
