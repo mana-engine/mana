@@ -203,11 +203,24 @@ test "snake scenario: two independent replays of the eat staircase agree bit-for
 }
 
 // --- Pac-Man staircase (games/pacman/scenarios/*.zon): spawn -> move -> turn -> eats
-// dot -> ghost collision -> frightened catch -> chase/scatter mode flip — the analogous
-// staircase issue #94 asks for, per what the native tilemap/nav/collision sim supports
-// today (continuous steering, not a grid teleport; a ghost catch is a reset, not a
-// kill). Steps 6/7 (Refs #62) exercise the fourth ghost and the four distinct classic
-// targeting rules `rules.lua`'s `retarget` now applies by spawn index. -----------------
+// dot -> ghost collision -> frightened catch -> chase/scatter mode flip -> straight
+// through an intersection, no auto-corner -- the analogous staircase issue #94 asks
+// for, per what the native tilemap/nav/collision sim supports today (continuous
+// steering, not a grid teleport; a ghost catch is a reset, not a kill). Steps 6/7 (Refs
+// #62) exercise the fourth ghost and the four distinct classic targeting rules
+// `rules.lua`'s `retarget` now applies by spawn index. Step 8 (#108) is the fix this
+// file's own numbers elsewhere already reflect: pac's nav target is the NEXT cell in
+// its heading, not a far one, so pac holds a straight line through an intersection and
+// stops dead at a wall instead of auto-turning around it. That single content change
+// (rules.lua `retarget`) also nudged every timing-sensitive checkpoint below: pac
+// covers ground very slightly slower now (the 0.1s retarget cadence occasionally
+// catches it mid-cell), so `at_tick` on steps 2-7 moved a little later; the *positions*
+// pac and the pickups occupy did not move at all. Steps 3 and 8 split the two turn
+// fundamentals cleanly (ADR 0028 one-fundamental-per-assertion): 3 is a *blocked* turn
+// holding pac in place (no auto-detour), 8's first checkpoint is an isolated *open* turn
+// changing pac's heading. Step 9 (Refs #102) is a targeted regression guard, not a
+// mechanic rung: it re-pins Pinky's quantitative ambush-offset arithmetic, which used to
+// ride on step 7 before #108's timing shift re-pointed 7 to Blinky's chase target. -----
 
 test "pacman scenario [spawn]: pac, four ghosts, and the curated pickups materialize" {
     try requireLua();
@@ -219,7 +232,7 @@ test "pacman scenario [move]: with no input pac steers along its default heading
     try expectScenarioPasses(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/02_move.zon");
 }
 
-test "pacman scenario [turn]: an on_key press steers pac off its default heading" {
+test "pacman scenario [turn]: an on_key press for a direction blocked at pac's own column holds pac in place, never detouring around the wall" {
     try requireLua();
     try expectScenarioPasses(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/03_turn.zon");
 }
@@ -242,6 +255,16 @@ test "pacman scenario [frightened catch]: eating a power pellet frightens every 
 test "pacman scenario [mode flip]: the chase/scatter timer changes a ghost's target on both axes" {
     try requireLua();
     try expectScenarioPasses(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/07_mode_flip.zon");
+}
+
+test "pacman scenario [straight]: an open turn changes pac's heading, then pac holds it through the row-7 crossing and stops dead at the interior wall, never detouring sideways (#108)" {
+    try requireLua();
+    try expectScenarioPasses(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/08_straight_through.zon");
+}
+
+test "pacman scenario [ambush]: in chase mode Pinky targets PINKY_AHEAD (4) cells ahead of pac's heading (offset arithmetic regression guard, Refs #102)" {
+    try requireLua();
+    try expectScenarioPasses(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/09_pinky_ambush.zon");
 }
 
 test "pacman scenario: two independent replays of the eat staircase agree bit-for-bit" {
