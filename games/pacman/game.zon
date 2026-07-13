@@ -11,10 +11,8 @@
     // is refused rather than running scriptless.
     .script_api = 1,
     // Top-down grid — the projection ADR 0014 added so a grid game is not forced
-    // into an isometric diamond. Orthographic is the default; stated for clarity, and
-    // scaled up so the 32px entity quads don't overlap on a one-unit cell grid (the
-    // proper fix — world-relative entity sizing in the renderer — is a follow-up, and
-    // per-entity appearance so walls/dots/pac/ghosts aren't identical quads is a GAP;
-    // see README).
+    // into an isometric diamond. Orthographic is the default; stated for clarity.
+    // Entity quads are sized from their world-space Appearance.size × this scale
+    // (ADR 0030), so a wall fills its one-unit cell without overlapping its neighbour.
     .projection = .{ .orthographic = .{ .scale = 24 } },
 }

@@ -29,6 +29,12 @@ genre-neutral engine features, and this package is now migrated onto them:
   by that tag — not Lua coordinate math. Layers filter the pairs down to
   pac↔dot / pac↔pellet / pac↔ghost.
 
+- **Per-entity appearance — CLOSED (ADR 0030, #98).** Walls, dots, pellets, pac, and
+  ghosts each declare an `.appearance` (color + world-space size) in `prototypes.zon`/
+  `scenes/maze.zon`; the renderer sizes and colors every quad from that data instead of
+  an identical fixed-size, palette-by-spawn-order square. Three ghost prototypes
+  (`ghost_red`/`ghost_pink`/`ghost_cyan`) give the ghosts distinct colors.
+
 What was **never** a gap and is unchanged: chase/scatter/frightened mode *timing*
 (`mana.after`/`mana.every` + `mana.set`), per-entity data (`score`, `frightened`, ADR
 0024), and the input→heading path (`on_key`) Snake proved.
@@ -41,9 +47,6 @@ agents, or colliders (snake/sandbox are bit-identical).
 
 ## Still deferred (genre-neutral, tracked in the ADRs — not Pac-Man gaps)
 
-- **Per-entity appearance.** Walls, dots, pellets, pac, and ghosts all render as
-  identical fixed-size quads (no per-entity sprite/colour/size, no world-relative
-  sizing). Tracked against the renderer generally (ADR 0014 lineage), not re-filed here.
 - **Tile → prototype-name mapping (ADR 0026 follow-up).** A legend that names a
   `prototype` per cell (rather than an inline bundle) would let dots/pellets be tilemap
   cells too; it needs the prototype `Registry` threaded through the registry-free

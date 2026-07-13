@@ -16,6 +16,7 @@ const Health = components.Health;
 const Collider = components.Collider;
 const Controller = components.Controller;
 const NavAgent = components.NavAgent;
+const Appearance = components.Appearance;
 const Entity = ecs.Entity;
 const Allocator = std.mem.Allocator;
 
@@ -34,6 +35,10 @@ pub const World = struct {
     /// target cell over the scene tilemap. Empty until a scene/prototype declares a
     /// `nav_agent`; excluded from `stateHash` (movement intent, like `Velocity`).
     nav_agents: ecs.SparseSet(NavAgent) = .{},
+    /// Render appearances (ADR 0030): color/size the renderer draws an entity with.
+    /// Empty until a scene/prototype/tilemap-legend cell declares an `appearance`;
+    /// excluded from `stateHash` (cosmetic, never read by sim systems).
+    appearances: ecs.SparseSet(Appearance) = .{},
     /// Named scalar data components (ADR 0024): game-declared per-entity `f64`
     /// attributes `mana.get`/`mana.set` read and write. Empty until a scene/prototype
     /// declares a `data` component; part of the state hash (`stateHash`).
@@ -51,6 +56,7 @@ pub const World = struct {
         self.colliders.deinit(self.gpa);
         self.controllers.deinit(self.gpa);
         self.nav_agents.deinit(self.gpa);
+        self.appearances.deinit(self.gpa);
         self.data.deinit(self.gpa);
         self.entities.deinit(self.gpa);
         self.* = undefined;
@@ -70,6 +76,7 @@ pub const World = struct {
         self.colliders.remove(e.index);
         self.controllers.remove(e.index);
         self.nav_agents.remove(e.index);
+        self.appearances.remove(e.index);
         self.data.removeEntity(e.index);
         try self.entities.free_entity(self.gpa, e);
     }
@@ -171,6 +178,20 @@ pub const World = struct {
         return self.nav_agents.get(e.index);
     }
 
+    /// Attach/overwrite `e`'s `Appearance` (ADR 0030). Errors: `error.InvalidEntity` for
+    /// a stale handle, `error.OutOfMemory` on allocation failure.
+    pub fn setAppearance(self: *World, e: Entity, a: Appearance) Error!void {
+        if (!self.entities.isValid(e)) return error.InvalidEntity;
+        try self.appearances.put(self.gpa, e.index, a);
+    }
+
+    /// Mutable pointer to `e`'s `Appearance`, or null if absent/stale. Invalidated by
+    /// subsequent component adds/removes.
+    pub fn getAppearance(self: *World, e: Entity) ?*Appearance {
+        if (!self.entities.isValid(e)) return null;
+        return self.appearances.get(e.index);
+    }
+
     /// The column id for the named data component `name` (ADR 0024), or `null` if no
     /// scene/prototype has declared it. `mana.get`/`mana.set` resolve a name to a
     /// column through this; an unknown name is the "undeclared" case.
@@ -215,6 +236,8 @@ pub const World = struct {
     /// `NavAgent` (ADR 0027) is excluded for the same reason: steering intent whose
     /// effect lands in the hashed `Transform` (its target lives in hashed data
     /// components), so a scene with no nav agents hashes bit-identically.
+    /// `Appearance` (ADR 0030) is excluded too: purely a render-time hint no sim
+    /// system reads, so a scene with no declared appearances hashes bit-identically.
     /// Named data components (ADR 0024) are authoritative sim state and are folded in
     /// last, in registration/dense order; an empty store adds zero bytes, so a scene
     /// with no data components hashes bit-identically to before the store existed.
@@ -297,6 +320,45 @@ test "world: setNavAgent on a stale handle errors" {
     const e = try w.spawn();
     try w.despawn(e);
     try testing.expectError(error.InvalidEntity, w.setNavAgent(e, .{ .speed = 1 }));
+}
+
+test "world: appearance round-trips and is dropped on despawn" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+
+    const e = try w.spawn();
+    try w.setAppearance(e, .{ .color = .{ 1, 0.8, 0 }, .size = 0.5 });
+    try testing.expect(std.mem.eql(f32, &.{ 1, 0.8, 0 }, &w.getAppearance(e).?.color));
+    try testing.expectEqual(@as(f32, 0.5), w.getAppearance(e).?.size);
+    try testing.expectEqual(@as(usize, 1), w.appearances.count());
+
+    try w.despawn(e);
+    try testing.expect(w.getAppearance(e) == null);
+    try testing.expectEqual(@as(usize, 0), w.appearances.count());
+}
+
+test "world: setAppearance on a stale handle errors" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+    const e = try w.spawn();
+    try w.despawn(e);
+    try testing.expectError(error.InvalidEntity, w.setAppearance(e, .{ .color = .{ 1, 1, 1 } }));
+}
+
+test "world: an appearance does not perturb the state hash (cosmetic, excluded)" {
+    var with = World.init(testing.allocator);
+    defer with.deinit();
+    var without = World.init(testing.allocator);
+    defer without.deinit();
+
+    inline for (.{ &with, &without }) |wp| {
+        const e = try wp.spawn();
+        try wp.setTransform(e, .{ .pos = .{ .x = 1, .y = 2, .z = 3 } });
+    }
+    // Attaching an Appearance to one world must not change its hash — it is a
+    // render-time hint, not authoritative sim state.
+    try with.setAppearance(with.entityAt(0), .{ .color = .{ 0.2, 0.4, 0.9 }, .size = 2 });
+    try testing.expectEqual(without.stateHash(), with.stateHash());
 }
 
 test "world: a nav agent does not perturb the state hash (steering intent, excluded)" {
