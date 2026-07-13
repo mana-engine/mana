@@ -204,7 +204,11 @@ modification; the pinned `tests/determinism.zig` golden (`0x65f2a1949cd9fc40`) i
 unchanged by this addendum's `mise run check`.
 
 **Render-goldens:** `tests/fixtures/render_pacman_maze.svg` is regenerated
-(`MANA_UPDATE_GOLDENS=1`, reviewed) — dots, pellets, Pac, and the ghosts now draw as
-`<ellipse>`s; walls stay `<rect>`s (declare no `shape`, default `.rect`).
-`tests/fixtures/render_snake_board.svg` is untouched (Snake declares no `Appearance`
-at all).
+(`MANA_UPDATE_GOLDENS=1`, reviewed) — the static scene's dots and pellets now draw as
+`<ellipse>`s; walls stay `<rect>`s (declare no `shape`, default `.rect`). Pac and the
+ghosts carry `.shape = .circle` on their prototypes (unit-tested in
+`src/engine/prototype.zig`), but they are *script-spawned* by `rules.lua`'s
+`on_scene_enter` — and `--render-svg` deliberately renders the static scene without
+ticking or running the package script (`src/runtime/main.zig`), so they do not appear
+in this fixture at all. `tests/fixtures/render_snake_board.svg` is untouched (Snake
+declares no `Appearance` at all).
