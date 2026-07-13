@@ -29,22 +29,6 @@ pub const NamedValue = struct {
     value: f64,
 };
 
-/// The set of built-in components a deferred spawn attaches at once — an omitted
-/// (null) field means the spawned entity lacks that component. This is the same
-/// data-attachable set a scene `EntityDef` carries (ADR 0004 §6) and an entity
-/// prototype declares (ADR 0016); the command buffer's `spawn`/`attach` carry a
-/// `Bundle` so any built-in combination spawns in one deferred command. Grows
-/// alongside the built-in components a scene/prototype may declare.
-pub const Bundle = struct {
-    transform: ?Transform = null,
-    velocity: ?Velocity = null,
-    health: ?Health = null,
-    /// Named scalar data components (ADR 0024) to register + attach at flush. A
-    /// borrowed slice (the scene/prototype ZON owns it); empty ⇒ the spawned entity
-    /// has no data components.
-    data: []const NamedValue = &.{},
-};
-
 /// A collision shape attached to an entity for the physics `collision` system
 /// (ADR 0008). `shape` is a *local* collider placed at the entity's `Transform`
 /// (collision is on the XY plane, 2.5D); `layers` filters which colliders may
@@ -55,6 +39,26 @@ pub const Collider = struct {
     shape: physics.Shape,
     layers: physics.Layers = .{},
     is_static: bool = false,
+};
+
+/// The set of built-in components a deferred spawn attaches at once — an omitted
+/// (null) field means the spawned entity lacks that component. This is the same
+/// data-attachable set a scene `EntityDef` carries (ADR 0004 §6) and an entity
+/// prototype declares (ADR 0016); the command buffer's `spawn`/`attach` carry a
+/// `Bundle` so any built-in combination spawns in one deferred command. Grows
+/// alongside the built-in components a scene/prototype may declare.
+pub const Bundle = struct {
+    transform: ?Transform = null,
+    velocity: ?Velocity = null,
+    health: ?Health = null,
+    /// A collider to attach (ADR 0025), so a ZON-declared or `mana.spawn`-ed entity
+    /// participates natively in the `collision` system and can reach
+    /// `on_collision_begin` — the same shape `World.setCollider` already accepts.
+    collider: ?Collider = null,
+    /// Named scalar data components (ADR 0024) to register + attach at flush. A
+    /// borrowed slice (the scene/prototype ZON owns it); empty ⇒ the spawned entity
+    /// has no data components.
+    data: []const NamedValue = &.{},
 };
 
 /// Kinematic character-controller intent (ADR 0008 follow-on: move-and-slide).

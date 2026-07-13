@@ -21,6 +21,10 @@ pub const EntityDef = struct {
     transform: ?components.Transform = null,
     velocity: ?components.Velocity = null,
     health: ?components.Health = null,
+    /// A collider (ADR 0025): the same shape `World.setCollider` accepts (`shape`
+    /// circle/capsule, `layers`, `is_static`). Declaring one here lets the entity
+    /// participate in the native `collision` system and reach `on_collision_begin`.
+    collider: ?components.Collider = null,
     /// Named scalar data components (ADR 0024): game-declared per-entity `f64`
     /// attributes, e.g. `.data = .{ .{ .name = "score", .value = 0 } }`. Empty ⇒ the
     /// entity has no data components. Declaring one here registers its column, which
@@ -52,6 +56,7 @@ pub fn load(scene: Scene, world: *World) World.Error!void {
         if (def.transform) |t| try world.setTransform(e, t);
         if (def.velocity) |v| try world.setVelocity(e, v);
         if (def.health) |h| try world.setHealth(e, h);
+        if (def.collider) |c| try world.setCollider(e, c);
         for (def.data) |nv| try world.setDataByName(e, nv.name, nv.value);
     }
 }
@@ -86,6 +91,8 @@ pub fn reloadWorldFromFile(gpa: Allocator, io: Io, base: Io.Dir, path: []const u
 }
 
 const testing = std.testing;
+const collision = @import("collision.zig");
+const Sim = @import("sim.zig").Sim;
 
 test "scene: parse entities with optional components" {
     const src =
@@ -149,6 +156,67 @@ test "scene: named data components parse and load into the world's data store" {
     try testing.expectEqual(@as(?f64, 3), world.getData(player, world.dataColumn("energy").?));
     const wall: ecs.Entity = .{ .index = 1, .generation = 0 };
     try testing.expectEqual(@as(?f64, null), world.getData(wall, world.dataColumn("score").?));
+}
+
+test "scene: a collider parses and, on load, the entity has the expected Collider" {
+    const src =
+        \\.{
+        \\    .name = "arena",
+        \\    .entities = .{
+        \\        .{ .name = "wall", .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 1.5 } }, .layers = .{ .layer = 2, .mask = 3 }, .is_static = true } },
+        \\        .{ .name = "prop", .transform = .{ .pos = .{ .x = 1, .y = 0, .z = 0 } } },
+        \\    },
+        \\}
+    ;
+    const scene = try parse(testing.allocator, src);
+    defer free(testing.allocator, scene);
+    try testing.expect(scene.entities[0].collider != null);
+    try testing.expect(scene.entities[1].collider == null); // prop has no collider
+
+    var world = try toWorld(testing.allocator, scene);
+    defer world.deinit();
+    // Entities are spawned in scene order into a fresh world, so "wall" is the
+    // first slot: index 0, generation 0.
+    const wall: ecs.Entity = .{ .index = 0, .generation = 0 };
+    const c = world.getCollider(wall).?;
+    try testing.expectEqual(@as(f32, 1.5), c.shape.circle.radius);
+    try testing.expectEqual(@as(u32, 2), c.layers.layer);
+    try testing.expectEqual(@as(u32, 3), c.layers.mask);
+    try testing.expect(c.is_static);
+    const prop: ecs.Entity = .{ .index = 1, .generation = 0 };
+    try testing.expect(world.getCollider(prop) == null);
+}
+
+test "scene: overlapping data-declared colliders dispatch collision_begin through the sim" {
+    const src =
+        \\.{
+        \\    .name = "arena",
+        \\    .entities = .{
+        \\        .{ .name = "a", .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 1 } } } },
+        \\        .{ .name = "b", .transform = .{ .pos = .{ .x = 1, .y = 0, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 1 } } } },
+        \\    },
+        \\}
+    ;
+    const parsed = try parse(testing.allocator, src);
+    defer free(testing.allocator, parsed);
+
+    var sim = Sim.init(testing.allocator, 1.0 / 60.0);
+    defer sim.deinit();
+    try load(parsed, &sim.world);
+
+    const Counter = struct {
+        var begins: u32 = 0;
+        fn handler(_: *@import("world.zig").World, ev: @import("event.zig").Event) void {
+            if (ev == .collision_begin) begins += 1;
+        }
+    };
+    Counter.begins = 0;
+    try sim.addSystem(collision.collisionSystem);
+    try sim.addHandler(Counter.handler);
+    try sim.tick();
+    // Content-declared colliders (never touched via World.setCollider directly)
+    // participate in the native collision system exactly like code-attached ones.
+    try testing.expectEqual(@as(u32, 1), Counter.begins);
 }
 
 test "scene: health round-trips through the ZON scene into a world" {

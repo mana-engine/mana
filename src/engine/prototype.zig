@@ -47,6 +47,7 @@ pub fn bundleAt(proto: Prototype, pos: core.Vec3) components.Bundle {
         .transform = transform,
         .velocity = proto.velocity,
         .health = proto.health,
+        .collider = proto.collider, // collider (ADR 0025) carries through as-is
         .data = proto.data, // named data components (ADR 0024) carry through as-is
     };
 }
@@ -92,6 +93,16 @@ test "prototype: bundleAt carries named data components through to the bundle" {
     try testing.expectEqual(@as(f64, 3), bundle.data[0].value);
 }
 
+test "prototype: bundleAt carries a collider through to the bundle" {
+    const proto: Prototype = .{
+        .name = "turret",
+        .collider = .{ .shape = .{ .circle = .{ .radius = 0.5 } }, .is_static = true },
+    };
+    const bundle = bundleAt(proto, .{ .x = 2, .y = 3, .z = 0 });
+    try testing.expectEqual(@as(f32, 0.5), bundle.collider.?.shape.circle.radius);
+    try testing.expect(bundle.collider.?.is_static);
+}
+
 test "prototype: bundleAt gives a transformless prototype a transform at the spawn point" {
     const proto: Prototype = .{ .name = "spark", .velocity = .{ .v = .{ .x = 1, .y = 0, .z = 0 } } };
     const bundle = bundleAt(proto, .{ .x = 4, .y = 5, .z = 6 });
@@ -126,4 +137,22 @@ test "prototype file: parse round-trips a package prototype list into a registry
     const reg: Registry = .{ .prototypes = file.prototypes };
     try testing.expectEqualStrings("segment", reg.lookup("segment").?.name);
     try testing.expectEqual(@as(f32, 1), reg.lookup("food").?.health.?.current);
+}
+
+test "prototype file: parse round-trips a collider-bearing prototype" {
+    const src =
+        \\.{
+        \\    .prototypes = .{
+        \\        .{ .name = "food", .collider = .{ .shape = .{ .circle = .{ .radius = 0.3 } }, .layers = .{ .layer = 4, .mask = 1 } } },
+        \\    },
+        \\}
+    ;
+    const file = try parse(testing.allocator, src);
+    defer free(testing.allocator, file);
+
+    const reg: Registry = .{ .prototypes = file.prototypes };
+    const food = reg.lookup("food").?;
+    try testing.expectEqual(@as(f32, 0.3), food.collider.?.shape.circle.radius);
+    try testing.expectEqual(@as(u32, 4), food.collider.?.layers.layer);
+    try testing.expect(!food.collider.?.is_static);
 }
