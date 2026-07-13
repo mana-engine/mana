@@ -169,12 +169,21 @@ local function send_home(handle)
     end
 end
 
--- Pac caught by a non-frightened ghost: teleport back to the start cell (a run/lives
--- loop is out of scope for this scaffold).
-local function reset_pac()
+-- Pac caught by a non-frightened ghost: restart the round. Teleport pac back to its
+-- start cell AND return every ghost to its pen, so the actors are re-separated instead
+-- of the pack staying piled on pac's death cell and immediately re-catching it (the
+-- classic "reset the level on a death" — a run/lives count is still out of scope for
+-- this scaffold). Nav has no ghost-vs-ghost avoidance yet (ADR 0027 follow-up), so
+-- resetting the ghosts is what actually breaks up the corner-mob.
+local function reset_actors()
     local wx, wy = cell_to_world(PAC_START.col, PAC_START.row)
     mana.set_position(pac, wx, wy, 0)
     pac_dir = { dc = -1, dr = 0 }
+    for _, g in ipairs(ghosts) do
+        local gx, gy = cell_to_world(g.home[1], g.home[2])
+        mana.set_position(g.handle, gx, gy, 0)
+        mana.set(g.handle, "frightened", 0)
+    end
 end
 
 return {
@@ -215,7 +224,7 @@ return {
             add_score(50)
             begin_fright()
         elseif other_kind == KIND_GHOST then
-            if frightened then send_home(other) else reset_pac() end
+            if frightened then send_home(other) else reset_actors() end
         end
     end,
 

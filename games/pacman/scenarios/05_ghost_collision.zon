@@ -1,13 +1,15 @@
 // Pac-Man staircase, step 5/5: an un-frightened ghost catching pac resets it to its
-// start cell (rules.lua `reset_pac`), via the same native `on_collision_begin` path
+// start cell (rules.lua `reset_actors`), via the same native `on_collision_begin` path
 // as the dot pickup (ADR 0025), classified by the `kind` data tag. With no input, pac
 // runs its default leftward path, eats the dot and the power pellet in its way
 // (score 60 by tick 55; see 04_eat.zon), parks at its clamped target cell, and Blinky
 // (index 1, direct chase in every mode — Refs #62's Pinky/Inky/Clyde diverge only in
 // their own targeting) reaches it — the first catch, deterministically, at tick 514,
-// unchanged by the other three ghosts' distinct rules. A reset teleports pac; it does
-// not despawn anything (120 entities throughout — four ghosts now — same as right after
-// the pellet: see 04_eat.zon's dot count plus the eaten pellet).
+// unchanged by the other three ghosts' distinct rules. A reset teleports pac AND returns
+// every ghost to its pen (rules.lua `reset_actors`, so the pack cannot stay piled on
+// pac's death cell); it does not despawn anything (120 entities throughout — four ghosts
+// now — same as right after the pellet: see 04_eat.zon's dot count plus the eaten
+// pellet). Blinky, the catcher, is back on its home cell (8,5)→world (-1,0), not on pac.
 .{
     .steps = 514,
     .input_trace = .{
@@ -23,6 +25,11 @@
             .label = "ghost collision: the catch is a reset, not a kill (no entity despawned)",
             .at_tick = 514,
             .check = .{ .entity_count = .{ .min = 120, .max = 120 } },
+        },
+        .{
+            .label = "ghost collision: the reset returns the ghosts to their pen (no corner-mob)",
+            .at_tick = 514,
+            .check = .{ .occupied = .{ .x = -1, .y = 0, .eps = 0.02 } },
         },
     },
 }
