@@ -37,6 +37,7 @@ pub const scene = @import("scene.zig");
 pub const tilemap = @import("tilemap.zig");
 pub const prototype = @import("prototype.zig");
 pub const render = @import("render.zig");
+pub const render_svg = @import("render_svg.zig");
 pub const collision = @import("collision.zig");
 pub const controller = @import("controller.zig");
 pub const nav = @import("nav.zig");
@@ -81,6 +82,7 @@ test {
     _ = scene;
     _ = tilemap;
     _ = render;
+    _ = render_svg;
     _ = collision;
     _ = controller;
     _ = nav;
