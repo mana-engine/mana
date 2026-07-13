@@ -203,11 +203,13 @@ test "snake scenario: two independent replays of the eat staircase agree bit-for
 }
 
 // --- Pac-Man staircase (games/pacman/scenarios/*.zon): spawn -> move -> turn -> eats
-// dot -> ghost collision — the analogous staircase issue #94 asks for, per what the
-// native tilemap/nav/collision sim supports today (continuous steering, not a grid
-// teleport; a ghost catch is a reset, not a kill). ------------------------------------
+// dot -> ghost collision -> frightened catch -> chase/scatter mode flip — the analogous
+// staircase issue #94 asks for, per what the native tilemap/nav/collision sim supports
+// today (continuous steering, not a grid teleport; a ghost catch is a reset, not a
+// kill). Steps 6/7 (Refs #62) exercise the fourth ghost and the four distinct classic
+// targeting rules `rules.lua`'s `retarget` now applies by spawn index. -----------------
 
-test "pacman scenario [spawn]: pac, three ghosts, and the curated pickups materialize" {
+test "pacman scenario [spawn]: pac, four ghosts, and the curated pickups materialize" {
     try requireLua();
     try expectScenarioPasses(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/01_spawn.zon");
 }
@@ -232,7 +234,22 @@ test "pacman scenario [ghost collision]: a non-frightened catch resets pac, not 
     try expectScenarioPasses(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/05_ghost_collision.zon");
 }
 
+test "pacman scenario [frightened catch]: eating a power pellet frightens every ghost, and a catch sends one home" {
+    try requireLua();
+    try expectScenarioPasses(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/06_frightened_catch.zon");
+}
+
+test "pacman scenario [mode flip]: the chase/scatter timer changes a ghost's target on both axes" {
+    try requireLua();
+    try expectScenarioPasses(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/07_mode_flip.zon");
+}
+
 test "pacman scenario: two independent replays of the eat staircase agree bit-for-bit" {
     try requireLua();
     try expectDeterministic(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/04_eat.zon");
+}
+
+test "pacman scenario: two independent replays of the mode-flip staircase agree bit-for-bit" {
+    try requireLua();
+    try expectDeterministic(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/07_mode_flip.zon");
 }

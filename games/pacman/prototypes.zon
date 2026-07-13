@@ -23,11 +23,13 @@
 //     collider radius is 0.4 (diameter 0.8), so `size = 0.7` reads as a solid disc-ish
 //     square filling most of its cell without abutting the wall/pickup quads next door.
 //
-// Three named ghost prototypes (rather than one), differing only in `appearance.color`,
-// so ghosts render as distinct pieces (the classic red/pink/cyan) even though every
-// ghost otherwise behaves identically — `rules.lua` picks a name per spawn index. A
-// per-instance appearance override at the `mana.spawn` call site is explicitly out of
-// scope (ADR 0016): a variant is a second named prototype.
+// Four named ghost prototypes (rather than one), differing in `appearance.color` AND,
+// since Refs #62, in the targeting rule `rules.lua`'s `retarget` applies by spawn index —
+// the classic Blinky(red)/Pinky(pink)/Inky(cyan)/Clyde(orange) chase behaviors. The
+// prototype itself carries no behavior (a ghost is still a plain `NavAgent` + collider +
+// data tag); only the color and the spawn-index-to-targeting-rule mapping (in Lua)
+// distinguish them. A per-instance appearance override at the `mana.spawn` call site is
+// explicitly out of scope (ADR 0016): a variant is a second named prototype.
 .{
     .prototypes = .{
         // The player. `score` is a data component so the engine (a debug overlay, a
@@ -83,6 +85,19 @@
             .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
             .nav_agent = .{ .speed = 5 },
             .appearance = .{ .color = .{ 0.3, 0.85, 0.9 }, .size = 0.7 },
+            .data = .{
+                .{ .name = "kind", .value = 2 },
+                .{ .name = "frightened", .value = 0 },
+                .{ .name = "nav_target_col", .value = 0 },
+                .{ .name = "nav_target_row", .value = 0 },
+            },
+        },
+        .{
+            .name = "ghost_orange",
+            .velocity = .{ .v = .{ .x = 0, .y = 0, .z = 0 } },
+            .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
+            .nav_agent = .{ .speed = 5 },
+            .appearance = .{ .color = .{ 0.95, 0.65, 0.2 }, .size = 0.7 },
             .data = .{
                 .{ .name = "kind", .value = 2 },
                 .{ .name = "frightened", .value = 0 },
