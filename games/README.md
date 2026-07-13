@@ -43,14 +43,42 @@ mise x -- zig build -Denable-lua run -- games/pacman --scenario games/pacman/sce
 mise x -- zig build -Denable-lua test
 ```
 
-**Playing (`--play`) prerequisites — per OS:**
-- **Windows:** install the SDL3 runtime (`SDL3.dll` on `PATH`, or via `vcpkg`/an SDL3
-  release) and a current GPU driver. Verified working on native Windows.
-- **Linux:** install SDL3 dev + runtime (`sudo dnf install SDL3-devel` on Fedora,
-  `libsdl3-dev` on Debian/Ubuntu) and a Vulkan ICD. Under WSL2 this uses **WSLg** for the
-  window + Vulkan surface — a recent WSL provides both; check with `vulkaninfo`.
-- The `--play` build compiles on both today; if your machine lacks SDL3/Vulkan at runtime,
-  fall back to headless (the hash-printing run above) or the no-GPU preview below.
+### Playing (`--play`) prerequisites
+
+SDL3 is **built from source** (the `castholm/SDL` Zig port) and statically linked — there
+is **no system SDL3 to install**. But `--play` is built with `-Denable-vulkan`, so the
+window is created with the Vulkan flag, and at runtime SDL `dlopen`s the OS window/input
+client libraries and needs a working Vulkan loader + driver. Those runtime libraries are
+what you install.
+
+- **Windows (native):** nothing extra beyond a current GPU driver (which ships a Vulkan
+  ICD). Run from PowerShell/cmd. Verified working.
+- **Linux / WSL2 (Fedora):**
+  ```sh
+  # Window + input client libs SDL dlopens (libxkbcommon is usually already present):
+  sudo dnf install -y libwayland-client libwayland-cursor libwayland-egl libdecor \
+                      libX11 libXext libXcursor libXi libXrandr libXfixes
+  # Vulkan loader + driver (the --play window needs a Vulkan ICD to be created):
+  sudo dnf install -y vulkan-loader mesa-vulkan-drivers vulkan-tools
+  ```
+  (Debian/Ubuntu: `libwayland-client0 libwayland-cursor0 libwayland-egl1 libdecor-0-0
+  libx11-6 libxext6 libxcursor1 libxi6 libxrandr2 libxfixes3 libxkbcommon0 libvulkan1
+  mesa-vulkan-drivers vulkan-tools`.)
+- **WSL2 specifics (important):**
+  - **Build/run from a Linux-native path** (e.g. `~/mana`), **not** a Windows-drive mount
+    (`/mnt/c/...`) — zig's build cache can't do atomic renames on DrvFs and fails with
+    `AccessDenied`.
+  - The display comes from **WSLg** (`echo $WAYLAND_DISPLAY $DISPLAY` are set; `/mnt/wslg`
+    exists). Let SDL auto-pick Wayland; don't force `SDL_VIDEODRIVER`.
+  - Vulkan reaches your Windows GPU through Mesa's **`dzn`** driver (Vulkan-on-D3D12).
+    Verify a device is visible: `vulkaninfo --summary`. If none appears, try
+    `DZN_ENABLE=1 ./zig-out/bin/mana games/pacman --play`.
+- **Troubleshooting the two failure points:**
+  - `error.SdlInit` → the Wayland/X11 **client libs** are missing (first `dnf` line above).
+  - `error.SdlCreateWindow` → the **Vulkan loader/ICD** is missing (second `dnf` line); the
+    window is requested with `SDL_WINDOW_VULKAN`, so it can't be created without one.
+- No GPU at all? Fall back to headless (the hash-printing run above) or the no-GPU preview
+  below.
 
 **Seeing a game without a GPU (CI / headless boxes):** a headless renderer can dump
 frames you open in a browser — a single static frame (`--render-svg <file>`) or a
