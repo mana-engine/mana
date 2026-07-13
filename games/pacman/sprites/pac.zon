@@ -1,0 +1,49 @@
+// pac — a sprite recipe for `tools/spritegen` (ADR 0031). This ZON file is the SOURCE
+// OF TRUTH (invariant #1); the sheet + preview it generates are DERIVED artifacts,
+// never committed (see `.gitignore`). Regenerate + view with:
+//
+//   mise run assets              # generates into games/pacman/sprites/generated/ (gitignored)
+//   <open> games/pacman/sprites/generated/pac_preview.png
+//
+// Genre lives HERE in content, never in the tool (invariant #6): `spritegen` knows only
+// generic primitives (disc, wedge, …). "pac" is this data file.
+//
+// A classic Pac-Man chomp: a yellow disc with a pie-wedge mouth (drawn with the erase
+// colour `clear`, which cuts a transparent hole) opening to the right. Four frames from
+// nearly-closed to wide-open; the `chomp` clip ping-pongs them so the mouth opens and
+// shuts. Mouth is symmetric about the +x axis (a0/a1 are the half-angles, in degrees).
+.{
+    .size = 32,
+    .palette = .{
+        .{ .name = "pac", .rgba = .{ 255, 221, 51, 255 } },
+        .{ .name = "clear", .rgba = .{ 0, 0, 0, 0 } },
+    },
+    // Transparent background so the sprite composites cleanly onto the maze.
+    .background = null,
+    .frames = .{
+        // Frame 0 — mouth almost shut.
+        .{ .name = "shut", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
+            .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = -3, .a1 = 3, .color = "clear" } },
+        } },
+        // Frame 1 — opening.
+        .{ .name = "ajar", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
+            .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = -18, .a1 = 18, .color = "clear" } },
+        } },
+        // Frame 2 — half open.
+        .{ .name = "half", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
+            .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = -34, .a1 = 34, .color = "clear" } },
+        } },
+        // Frame 3 — wide open.
+        .{ .name = "open", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
+            .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = -50, .a1 = 50, .color = "clear" } },
+        } },
+    },
+    .animations = .{
+        // Ping-pong the four frames so the mouth opens then shuts, ~12 fps.
+        .{ .name = "chomp", .fps = 12, .frames = .{ 0, 1, 2, 3, 2, 1 } },
+    },
+}

@@ -42,3 +42,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0028 | Acceptance / scenario tests: a behavioral oracle atop the deterministic sim | proposed |
 | 0029 | Headless SVG render output: a GPU-free way to see a level | proposed |
 | 0030 | Entity appearance as data: `.appearance` in the scene/prototype schema | accepted |
+| 0031 | Sprite rendering: cosmetic sprite/animation component, dependency-free sheet asset, gpu texture path | proposed |

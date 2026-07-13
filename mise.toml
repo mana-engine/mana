@@ -46,6 +46,20 @@ run = "zig build run --"
 description = "Cross-compile for x86_64-windows (portability gate)."
 run = "zig build -Dtarget=x86_64-windows"
 
+[tasks.spritegen]
+# The genre-neutral procedural sprite generator (ADR 0031). Reads a ZON sprite recipe,
+# writes a DERIVED `.msf` sheet + preview PNG into <out-dir> (never committed). Single
+# cross-platform `zig build` invocation — works identically on Linux and Windows.
+description = "Generate a sprite sheet from a recipe: mise run spritegen -- <recipe.zon> <out-dir>"
+run = "zig build spritegen --"
+
+[tasks.assets]
+# (Re)generate every committed sprite recipe into its gitignored generated/ dir. This
+# is how Lane B's engine/--play obtains sheets — a build-time generate from committed
+# recipes, not a committed binary. Add a line here per new recipe.
+description = "(Re)generate all sprite sheets from committed recipes into gitignored generated/ dirs."
+run = "zig build spritegen -- games/pacman/sprites/pac.zon games/pacman/sprites/generated"
+
 [tasks.shaders]
 description = "Recompile WGSL shaders to committed SPIR-V via mise-pinned naga."
 run = "mise x cargo:naga-cli@30.0.0 -- naga src/gpu/vulkan/shaders/scene.wgsl src/gpu/vulkan/shaders/scene.spv"

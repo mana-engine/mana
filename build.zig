@@ -221,6 +221,30 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the mana runtime (headless)");
     run_step.dependOn(&run_cmd.step);
 
+    // --- spritegen tool (ADR 0031, Lane A) ----------------------------------
+    // A standalone, genre-neutral procedural sprite generator (`tools/`): it reads a
+    // ZON sprite recipe and writes a DERIVED `.msf` sheet + preview PNG (never
+    // committed — the recipe is the source of truth, invariant #1). It imports `data`
+    // only (ZON parse + the in-repo PNG encoder); no engine, no gpu, no game knowledge.
+    const spritegen = b.addExecutable(.{
+        .name = "spritegen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/spritegen/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "data", .module = data },
+            },
+        }),
+    });
+    b.installArtifact(spritegen);
+
+    const spritegen_run = b.addRunArtifact(spritegen);
+    spritegen_run.step.dependOn(&spritegen.step);
+    if (b.args) |args| spritegen_run.addArgs(args);
+    const spritegen_step = b.step("spritegen", "Run spritegen: zig build spritegen -- <recipe.zon> <out-dir>");
+    spritegen_step.dependOn(&spritegen_run.step);
+
     // --- Tests --------------------------------------------------------------
     // Zig tests one module (compilation unit) at a time, so we add a test run
     // per module. Each module's root file pulls in its sibling files' tests.
@@ -232,6 +256,11 @@ pub fn build(b: *std.Build) void {
     }
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
+
+    // spritegen tool tests (ADR 0031): its `main.zig` `test` block pulls in the
+    // rasterizer/recipe/format/montage sibling tests (determinism, round-trip, …).
+    const spritegen_tests = b.addTest(.{ .root_module = spritegen.root_module });
+    test_step.dependOn(&b.addRunArtifact(spritegen_tests).step);
 
     // Lua backend tests (gated to `-Denable-lua`). `script.zig` imports `lua.zig`
     // only inside a comptime-false branch by default, and in test mode Zig does not
