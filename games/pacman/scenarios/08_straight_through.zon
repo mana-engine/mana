@@ -6,9 +6,16 @@
 // exactly this kind of crossing). Column 8's row-6 cell is a wall, so pac's next-cell
 // nav target becomes unwalkable there and pac stops dead — mid-cell, not at the row's
 // exact centre, because the 0.1s retarget cadence does not divide evenly into the time
-// pac takes to cross a cell; the stop is still fully deterministic. Checked at tick 40,
-// safely inside the long window (tick ~21 to ~60) where pac sits there undisturbed
-// before a ghost eventually finds it.
+// pac takes to cross a cell; the stop is still fully deterministic.
+//
+// Two ordered, single-fundamental checkpoints (ADR 0028 "one fundamental per
+// assertion"): the first isolates the *successful open turn* — at tick 10 pac is still
+// on column 8 (x still -1, so it did NOT continue its default leftward heading) but has
+// moved partway down it (y dropped from 4 to 3.6), which fails iff an open on_key press
+// does not change pac's heading (the isolated turn proof `03_turn.zon`'s blocked case
+// cannot give). The second isolates the #108 *stop at a wall, no auto-detour* — by tick
+// 40 pac has stopped dead at (-1, 2.4), still on column 8, inside the long window (tick
+// ~21 to ~60) where pac sits undisturbed before a ghost eventually finds it.
 .{
     .steps = 40,
     .input_trace = .{
@@ -17,7 +24,12 @@
     },
     .expect = .{
         .{
-            .label = "straight: pac turns down, crosses the row-7 intersection without detouring onto it, and stops dead at the row-6 wall",
+            .label = "straight (turn): an open on_key(down) turns pac onto column 8 heading down (still x=-1, y past its start row)",
+            .at_tick = 10,
+            .check = .{ .occupied = .{ .x = -1, .y = 3.6, .eps = 0.02 } },
+        },
+        .{
+            .label = "straight (stop): pac crosses the row-7 intersection without detouring onto it and stops dead at the row-6 wall",
             .at_tick = 40,
             .check = .{ .occupied = .{ .x = -1, .y = 2.4, .eps = 0.02 } },
         },

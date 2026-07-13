@@ -2,7 +2,7 @@
 // start cell (rules.lua `reset_actors`), via the same native `on_collision_begin` path
 // as the dot pickup (ADR 0025), classified by the `kind` data tag. With no input, pac
 // runs its default leftward path, eats the dot and the power pellet in its way
-// (score 60 by tick 55; see 04_eat.zon), parks at its clamped target cell, and Blinky
+// (score 60 by tick 80; see 06_frightened_catch.zon), parks at its clamped target cell, and Blinky
 // (index 1, direct chase in every mode — Refs #62's Pinky/Inky/Clyde diverge only in
 // their own targeting) reaches it — the first catch, deterministically, at tick 514,
 // unchanged by the other three ghosts' distinct rules. A reset teleports pac AND returns

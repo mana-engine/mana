@@ -1,0 +1,38 @@
+// Pac-Man staircase, step 9: a targeted regression guard for Pinky's ambush-offset
+// arithmetic (Refs #62/#102), NOT a new mechanic rung. Before #108 this quantitative
+// coverage lived in 07_mode_flip.zon (which tracked Pinky's PINKY_AHEAD target); the
+// #108 timing shift re-pointed 07 to Blinky's direct-chase target, so this scenario
+// restores the Pinky-offset check in isolation.
+//
+// Pure early chase: no input, no pickup eaten yet (the first dot is at tick ~43, the
+// power pellet — and thus the frightened window — at tick ~80), so `mode == "chase"`
+// and no ghost is frightened. Pac holds its default leftward heading (dc = -1, dr = 0)
+// along row 9. `retarget`'s Pinky branch selects the cell PINKY_AHEAD (= 4) cells ahead
+// of pac in that heading, clamped to the interior: (clampi(pac_col - 4, 1, 17), pac_row).
+//
+// At tick 18 pac is in column 7 on row 9 (world (-2.2, 4)) and the 0.1s selection pass
+// on that tick sets Pinky's nav target to (7 - 4, 9) = (3, 9): four cells left of pac
+// (the ambush offset), on pac's row. The check locates Pinky by its exact deterministic
+// world position at that tick — (-0.91667, 0), a full cell clear of every other ghost — and
+// reads both target components. It fails if PINKY_AHEAD changes (offset 2 -> col 5,
+// offset 8 -> col 1) or if the dr = 0 heading were mishandled on the row axis (row != 9)
+// — the precise arithmetic #102 introduced. It is deliberately *not* a chase-vs-scatter
+// or a movement check; those are 07 and 02/08.
+.{
+    .steps = 18,
+    .input_trace = .{
+        .{ .ticks = 18, .keys = .{} },
+    },
+    .expect = .{
+        .{
+            .label = "ambush: in chase mode Pinky targets PINKY_AHEAD (4) cells ahead of pac's heading — column 7-4=3",
+            .at_tick = 18,
+            .check = .{ .data_at = .{ .pos = .{ .x = -0.91667, .y = 0, .eps = 0.02 }, .name = "nav_target_col", .value = 3 } },
+        },
+        .{
+            .label = "ambush: (row half) — pac's heading is horizontal (dr=0), so the ambush cell stays on pac's row 9",
+            .at_tick = 18,
+            .check = .{ .data_at = .{ .pos = .{ .x = -0.91667, .y = 0, .eps = 0.02 }, .name = "nav_target_row", .value = 9 } },
+        },
+    },
+}
