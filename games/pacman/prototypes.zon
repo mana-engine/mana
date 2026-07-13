@@ -1,27 +1,55 @@
 // Entity prototypes (ADR 0016) mana.spawn instantiates. Genre lives here in content,
-// never in src/. Positions come from the spawn call; templates carry only non-spatial
-// component defaults — here, named scalar data components (ADR 0024) so per-entity
-// script state is engine-visible (a future HUD/render system could read them).
+// never in src/. Positions come from the spawn call; templates carry the non-spatial
+// component defaults: a collider (ADR 0025), a nav agent + its target cell (ADR 0027),
+// and named scalar data components (ADR 0024).
+//
+// Only pac and ghosts are script-spawned — they need a Lua handle so rules.lua can
+// select their nav targets and identify them in collisions. The maze walls come from
+// the scene's tilemap and the dots/pellets are scene entities (see scenes/maze.zon);
+// neither needs a handle, so neither is a prototype.
+//
+// Each mover carries:
+//   - `nav_agent` (ADR 0027): the native `nav` system steers it toward its target cell.
+//   - a zero `velocity`: nav writes into this existing column each tick, so steering
+//     stays allocation-free.
+//   - a `collider` (ADR 0025) on its own layer, masking only pac (1), so the collision
+//     events are exactly pac↔ghost / pac↔pickup (see the maze scene's layer notes).
+//   - `kind` (pac=1, ghost=2) so `on_collision_begin` can classify a contact by data,
+//     not coordinate math.
+//   - `nav_target_col`/`nav_target_row` (the ADR 0027 selection seam): a script sets
+//     these with `mana.set` to pick a target. They default to (0,0) — a wall cell — so
+//     a freshly spawned mover is stationary until rules.lua selects a real target.
 .{
     .prototypes = .{
-        // The player. `score` is published as a data component so the engine (a debug
-        // overlay, a future HUD) can read the running score without asking the script.
-        .{ .name = "pac", .data = .{.{ .name = "score", .value = 0 }} },
+        // The player. `score` is a data component so the engine (a debug overlay, a
+        // future HUD) can read the running score without asking the script.
+        .{
+            .name = "pac",
+            .velocity = .{ .v = .{ .x = 0, .y = 0, .z = 0 } },
+            .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 1, .mask = 14 } },
+            .nav_agent = .{ .speed = 8 },
+            .data = .{
+                .{ .name = "kind", .value = 1 },
+                .{ .name = "score", .value = 0 },
+                .{ .name = "nav_target_col", .value = 0 },
+                .{ .name = "nav_target_row", .value = 0 },
+            },
+        },
 
         // A ghost. `frightened` (0/1) is script-driven per-entity mode, mirrored to a
         // data component so a future render system could tint frightened ghosts blue
         // (today every entity draws as an identical quad — a GAP, see README).
-        .{ .name = "ghost", .data = .{.{ .name = "frightened", .value = 0 }} },
-
-        // A pip the player eats. Spawned once per maze cell, despawned on eat.
-        .{ .name = "dot" },
-
-        // A power pellet — eating it opens the frightened window (mana.after timer).
-        .{ .name = "pellet" },
-
-        // A static maze-wall cell. GAP: walls are spawned one entity per '#' from an
-        // in-script ASCII grid because there is no engine tile/level data model; see
-        // README and the filed maze-data gap issue.
-        .{ .name = "wall" },
+        .{
+            .name = "ghost",
+            .velocity = .{ .v = .{ .x = 0, .y = 0, .z = 0 } },
+            .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
+            .nav_agent = .{ .speed = 5 },
+            .data = .{
+                .{ .name = "kind", .value = 2 },
+                .{ .name = "frightened", .value = 0 },
+                .{ .name = "nav_target_col", .value = 0 },
+                .{ .name = "nav_target_row", .value = 0 },
+            },
+        },
     },
 }
