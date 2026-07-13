@@ -5,7 +5,6 @@
 //! a recycled entity. Deterministic: identical operations yield identical state.
 
 const std = @import("std");
-const core = @import("core");
 const ecs = @import("ecs");
 const components = @import("components.zig");
 const data_components = @import("data_components.zig");
@@ -17,6 +16,8 @@ const Collider = components.Collider;
 const Controller = components.Controller;
 const NavAgent = components.NavAgent;
 const Appearance = components.Appearance;
+const Sprite = components.Sprite;
+const AnimationState = components.AnimationState;
 const Entity = ecs.Entity;
 const Allocator = std.mem.Allocator;
 
@@ -39,6 +40,14 @@ pub const World = struct {
     /// Empty until a scene/prototype/tilemap-legend cell declares an `appearance`;
     /// excluded from `stateHash` (cosmetic, never read by sim systems).
     appearances: ecs.SparseSet(Appearance) = .{},
+    /// Sprite references (ADR 0031): the sheet + clip the textured renderer samples.
+    /// Empty until a scene/prototype/tilemap-legend cell declares a `sprite`; excluded
+    /// from `stateHash` (cosmetic, never read by sim systems).
+    sprites: ecs.SparseSet(Sprite) = .{},
+    /// Live animation cursors (ADR 0031), one per sprited entity — attached alongside a
+    /// `Sprite` by `setSprite` and advanced by the render-time animation system from
+    /// wall-clock time. Excluded from `stateHash` (cosmetic; a tick never touches it).
+    animations: ecs.SparseSet(AnimationState) = .{},
     /// Named scalar data components (ADR 0024): game-declared per-entity `f64`
     /// attributes `mana.get`/`mana.set` read and write. Empty until a scene/prototype
     /// declares a `data` component; part of the state hash (`stateHash`).
@@ -57,6 +66,8 @@ pub const World = struct {
         self.controllers.deinit(self.gpa);
         self.nav_agents.deinit(self.gpa);
         self.appearances.deinit(self.gpa);
+        self.sprites.deinit(self.gpa);
+        self.animations.deinit(self.gpa);
         self.data.deinit(self.gpa);
         self.entities.deinit(self.gpa);
         self.* = undefined;
@@ -77,6 +88,8 @@ pub const World = struct {
         self.controllers.remove(e.index);
         self.nav_agents.remove(e.index);
         self.appearances.remove(e.index);
+        self.sprites.remove(e.index);
+        self.animations.remove(e.index);
         self.data.removeEntity(e.index);
         try self.entities.free_entity(self.gpa, e);
     }
@@ -192,6 +205,42 @@ pub const World = struct {
         return self.appearances.get(e.index);
     }
 
+    /// Attach/overwrite `e`'s `Sprite` (ADR 0031) and ensure it has an `AnimationState`
+    /// cursor: a fresh default cursor is attached only if the entity has none, so
+    /// swapping the clip (re-`setSprite`) does not rewind an in-progress animation. The
+    /// cursor is cosmetic (advanced from wall-clock by the render-time system), so
+    /// neither column enters `stateHash`. Errors: `error.InvalidEntity` for a stale
+    /// handle, `error.OutOfMemory` on allocation failure.
+    pub fn setSprite(self: *World, e: Entity, s: Sprite) Error!void {
+        if (!self.entities.isValid(e)) return error.InvalidEntity;
+        try self.sprites.put(self.gpa, e.index, s);
+        if (self.animations.get(e.index) == null)
+            try self.animations.put(self.gpa, e.index, .{});
+    }
+
+    /// Mutable pointer to `e`'s `Sprite`, or null if absent/stale. Invalidated by
+    /// subsequent component adds/removes.
+    pub fn getSprite(self: *World, e: Entity) ?*Sprite {
+        if (!self.entities.isValid(e)) return null;
+        return self.sprites.get(e.index);
+    }
+
+    /// Attach/overwrite `e`'s `AnimationState` cursor directly (ADR 0031). Normally the
+    /// render-time animation system owns this column; exposed so that system (and tests)
+    /// can write a resolved cursor. Errors: `error.InvalidEntity` for a stale handle,
+    /// `error.OutOfMemory` on allocation failure.
+    pub fn setAnimationState(self: *World, e: Entity, a: AnimationState) Error!void {
+        if (!self.entities.isValid(e)) return error.InvalidEntity;
+        try self.animations.put(self.gpa, e.index, a);
+    }
+
+    /// Mutable pointer to `e`'s `AnimationState`, or null if absent/stale. Invalidated by
+    /// subsequent component adds/removes.
+    pub fn getAnimationState(self: *World, e: Entity) ?*AnimationState {
+        if (!self.entities.isValid(e)) return null;
+        return self.animations.get(e.index);
+    }
+
     /// The column id for the named data component `name` (ADR 0024), or `null` if no
     /// scene/prototype has declared it. `mana.get`/`mana.set` resolve a name to a
     /// column through this; an unknown name is the "undeclared" case.
@@ -238,6 +287,10 @@ pub const World = struct {
     /// components), so a scene with no nav agents hashes bit-identically.
     /// `Appearance` (ADR 0030) is excluded too: purely a render-time hint no sim
     /// system reads, so a scene with no declared appearances hashes bit-identically.
+    /// `Sprite` and `AnimationState` (ADR 0031) are excluded for the same reason and one
+    /// more: the animation cursor is advanced from WALL-CLOCK time by a render-time
+    /// system, never a sim tick, so folding it in would make the hash depend on real
+    /// elapsed time — the exact non-determinism the exclusion prevents.
     /// Named data components (ADR 0024) are authoritative sim state and are folded in
     /// last, in registration/dense order; an empty store adds zero bytes, so a scene
     /// with no data components hashes bit-identically to before the store existed.
@@ -252,215 +305,9 @@ pub const World = struct {
     }
 };
 
-const testing = std.testing;
-
-test "world: spawn, set, get, despawn" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-
-    const e = try w.spawn();
-    try w.setTransform(e, .{ .pos = .{ .x = 1, .y = 2, .z = 3 } });
-    try w.setVelocity(e, .{ .v = .{ .x = 1, .y = 0, .z = 0 } });
-    try testing.expect(w.getTransform(e).?.pos.approxEql(.{ .x = 1, .y = 2, .z = 3 }, 1e-6));
-    try testing.expectEqual(@as(usize, 1), w.count());
-
-    try w.despawn(e);
-    try testing.expect(!w.isValid(e));
-    try testing.expect(w.getTransform(e) == null);
-    try testing.expectEqual(@as(usize, 0), w.count());
-}
-
-test "world: health round-trips and is dropped on despawn" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-
-    const e = try w.spawn();
-    try w.setHealth(e, .{ .current = 30, .max = 100 });
-    try testing.expectEqual(@as(f32, 30), w.getHealth(e).?.current);
-    try testing.expectEqual(@as(f32, 100), w.getHealth(e).?.max);
-    try testing.expectEqual(@as(usize, 1), w.healths.count());
-
-    try w.despawn(e);
-    try testing.expect(w.getHealth(e) == null);
-    try testing.expectEqual(@as(usize, 0), w.healths.count());
-}
-
-test "world: controller round-trips and is dropped on despawn" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-
-    const e = try w.spawn();
-    try w.setController(e, .{ .velocity = .{ .x = 3, .y = 4 }, .skin = 0.02 });
-    try testing.expect(w.getController(e).?.velocity.approxEql(.{ .x = 3, .y = 4 }, 1e-6));
-    try testing.expectEqual(@as(f32, 0.02), w.getController(e).?.skin);
-    try testing.expectEqual(@as(usize, 1), w.controllers.count());
-
-    try w.despawn(e);
-    try testing.expect(w.getController(e) == null);
-    try testing.expectEqual(@as(usize, 0), w.controllers.count());
-}
-
-test "world: nav agent round-trips and is dropped on despawn" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-
-    const e = try w.spawn();
-    try w.setNavAgent(e, .{ .speed = 3.5 });
-    try testing.expectEqual(@as(f32, 3.5), w.getNavAgent(e).?.speed);
-    try testing.expectEqual(@as(usize, 1), w.nav_agents.count());
-
-    try w.despawn(e);
-    try testing.expect(w.getNavAgent(e) == null);
-    try testing.expectEqual(@as(usize, 0), w.nav_agents.count());
-}
-
-test "world: setNavAgent on a stale handle errors" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-    const e = try w.spawn();
-    try w.despawn(e);
-    try testing.expectError(error.InvalidEntity, w.setNavAgent(e, .{ .speed = 1 }));
-}
-
-test "world: appearance round-trips and is dropped on despawn" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-
-    const e = try w.spawn();
-    try w.setAppearance(e, .{ .color = .{ 1, 0.8, 0 }, .size = 0.5 });
-    try testing.expect(std.mem.eql(f32, &.{ 1, 0.8, 0 }, &w.getAppearance(e).?.color));
-    try testing.expectEqual(@as(f32, 0.5), w.getAppearance(e).?.size);
-    try testing.expectEqual(@as(usize, 1), w.appearances.count());
-
-    try w.despawn(e);
-    try testing.expect(w.getAppearance(e) == null);
-    try testing.expectEqual(@as(usize, 0), w.appearances.count());
-}
-
-test "world: setAppearance on a stale handle errors" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-    const e = try w.spawn();
-    try w.despawn(e);
-    try testing.expectError(error.InvalidEntity, w.setAppearance(e, .{ .color = .{ 1, 1, 1 } }));
-}
-
-test "world: an appearance does not perturb the state hash (cosmetic, excluded)" {
-    var with = World.init(testing.allocator);
-    defer with.deinit();
-    var without = World.init(testing.allocator);
-    defer without.deinit();
-
-    inline for (.{ &with, &without }) |wp| {
-        const e = try wp.spawn();
-        try wp.setTransform(e, .{ .pos = .{ .x = 1, .y = 2, .z = 3 } });
-    }
-    // Attaching an Appearance to one world must not change its hash — it is a
-    // render-time hint, not authoritative sim state. `shape` (ADR 0030 shape
-    // addendum) is part of the same struct and must stay excluded too.
-    try with.setAppearance(with.entityAt(0), .{ .color = .{ 0.2, 0.4, 0.9 }, .size = 2, .shape = .circle });
-    try testing.expectEqual(without.stateHash(), with.stateHash());
-}
-
-test "world: a nav agent does not perturb the state hash (steering intent, excluded)" {
-    var with = World.init(testing.allocator);
-    defer with.deinit();
-    var without = World.init(testing.allocator);
-    defer without.deinit();
-
-    inline for (.{ &with, &without }) |wp| {
-        const e = try wp.spawn();
-        try wp.setTransform(e, .{ .pos = .{ .x = 1, .y = 2, .z = 3 } });
-    }
-    // Attaching a NavAgent to one world must not change its hash — like Velocity and
-    // Controller, it is movement intent, not authoritative state.
-    try with.setNavAgent(with.entityAt(0), .{ .speed = 9 });
-    try testing.expectEqual(without.stateHash(), with.stateHash());
-}
-
-test "world: setTransform on a stale handle errors" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-    const e = try w.spawn();
-    try w.despawn(e);
-    try testing.expectError(error.InvalidEntity, w.setTransform(e, .{ .pos = core.Vec3.zero }));
-}
-
-test "world: setVelocity on a stale handle errors" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-    const e = try w.spawn();
-    try w.despawn(e);
-    try testing.expectError(error.InvalidEntity, w.setVelocity(e, .{ .v = core.Vec3.zero }));
-}
-
-test "world: setHealth on a stale handle errors" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-    const e = try w.spawn();
-    try w.despawn(e);
-    try testing.expectError(error.InvalidEntity, w.setHealth(e, .{ .current = 10, .max = 10 }));
-}
-
-test "world: setCollider on a stale handle errors" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-    const e = try w.spawn();
-    try w.despawn(e);
-    try testing.expectError(error.InvalidEntity, w.setCollider(e, .{ .shape = .{ .circle = .{ .radius = 1 } } }));
-}
-
-test "world: a named data component round-trips and is dropped on despawn" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-
-    const e = try w.spawn();
-    try w.setDataByName(e, "score", 42);
-    const col = w.dataColumn("score").?;
-    try testing.expectEqual(@as(?f64, 42), w.getData(e, col));
-
-    try w.despawn(e);
-    try testing.expect(!w.isValid(e));
-    // Column stays registered (append-only), but the entity's value is gone.
-    try testing.expectEqual(@as(?f64, null), w.getData(e, col));
-    try testing.expect(w.dataColumn("score") != null);
-}
-
-test "world: getData is null for an undeclared component and a stale handle" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-    const e = try w.spawn();
-    try testing.expect(w.dataColumn("energy") == null); // never declared
-
-    try w.setDataByName(e, "energy", 5);
-    const col = w.dataColumn("energy").?;
-    try w.despawn(e); // stale handle now
-    try testing.expectEqual(@as(?f64, null), w.getData(e, col));
-}
-
-test "world: a stale handle is rejected by the data writers" {
-    var w = World.init(testing.allocator);
-    defer w.deinit();
-    const e = try w.spawn();
-    try w.despawn(e);
-    try testing.expectError(error.InvalidEntity, w.setDataByName(e, "hp", 1));
-    // A stale set must not have registered a column as a side effect.
-    try testing.expect(w.dataColumn("hp") == null);
-}
-
-test "world: a data component enters the state hash" {
-    var with = World.init(testing.allocator);
-    defer with.deinit();
-    var without = World.init(testing.allocator);
-    defer without.deinit();
-
-    inline for (.{ &with, &without }) |wp| {
-        const e = try wp.spawn();
-        try wp.setTransform(e, .{ .pos = .{ .x = 1, .y = 2, .z = 3 } });
-    }
-    // Identical worlds hash equal; adding a data value to one diverges the hash,
-    // proving the store is inside the determinism fingerprint.
-    try testing.expectEqual(without.stateHash(), with.stateHash());
-    try with.setDataByName(with.entityAt(0), "score", 7);
-    try testing.expect(without.stateHash() != with.stateHash());
+test {
+    // `world_test.zig` holds this module's `test` blocks (kept out of this file to
+    // stay under the ~500-line soft limit); this reference is what pulls its tests
+    // into the compilation (see the module-root hard-won note in the root CLAUDE.md).
+    _ = @import("world_test.zig");
 }

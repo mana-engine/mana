@@ -16,7 +16,9 @@
 const std = @import("std");
 const data = @import("data");
 const recipe_mod = @import("recipe.zig");
-const format = @import("format.zig");
+// The MSF encoder now lives in `data` (the file layer) so the engine's loader decodes
+// the exact same format definition (ADR 0031 §2); this tool is one of its two clients.
+const format = data.msf;
 const montage = @import("montage.zig");
 
 const Io = std.Io;
@@ -109,6 +111,7 @@ test {
     // is not analyzed under `zig build test`, so reference them explicitly).
     _ = @import("raster.zig");
     _ = @import("recipe.zig");
-    _ = @import("format.zig");
     _ = @import("montage.zig");
+    // The MSF format tests now live with the codec in `data.msf` (run by the `data`
+    // module's test binary), so they are not re-pulled here.
 }

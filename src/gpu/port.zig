@@ -16,12 +16,18 @@
 pub const TextureFormat = enum { rgba8_unorm };
 
 /// How a `Texture` is used, so a backend can pick the right allocation/layout. The
-/// scene's colour target is a render target that is then copied to host memory.
+/// scene's colour target is a render target then copied to host memory; a sprite sheet
+/// (ADR 0031) is a `transfer_dst` (host→device upload) + `sampled` (read in a shader).
 pub const TextureUsage = packed struct {
     /// Rendered into as a colour attachment.
     color_attachment: bool = false,
     /// Copied from into a `Buffer` (readback).
     transfer_src: bool = false,
+    /// Copied into from host memory — the destination of `Device.uploadTexture`
+    /// (ADR 0031: a decoded sprite sheet reaches the GPU).
+    transfer_dst: bool = false,
+    /// Read (sampled) in a fragment shader — a sprite-sheet texture (ADR 0031).
+    sampled: bool = false,
 };
 
 /// How a `Buffer` is used. The renderer uses two: a host-written vertex buffer and

@@ -38,6 +38,10 @@ pub const EntityDef = struct {
     /// A render appearance (ADR 0030): the color/size the renderer draws this entity
     /// with. Absent ⇒ the renderer falls back to its palette-by-index default.
     appearance: ?components.Appearance = null,
+    /// A sprite reference (ADR 0031): the sheet + clip the textured renderer samples for
+    /// this entity. Loading one also attaches a default animation cursor (via
+    /// `World.setSprite`). Absent ⇒ the entity is not sprited.
+    sprite: ?components.Sprite = null,
 };
 
 /// A named collection of entity definitions — the unit a runtime loads.
@@ -75,6 +79,7 @@ pub fn load(scene: Scene, world: *World) World.Error!void {
         if (def.collider) |c| try world.setCollider(e, c);
         if (def.nav_agent) |na| try world.setNavAgent(e, na);
         if (def.appearance) |a| try world.setAppearance(e, a);
+        if (def.sprite) |s| try world.setSprite(e, s);
         for (def.data) |nv| try world.setDataByName(e, nv.name, nv.value);
     }
     if (scene.tilemap) |tm| try tilemap.materialize(tm, world);
@@ -277,6 +282,32 @@ test "scene: an appearance's shape parses from ZON and defaults to rect when omi
     defer free(testing.allocator, scene);
     try testing.expectEqual(components.Appearance{ .color = .{ 1, 1, 1 }, .shape = .circle }, scene.entities[0].appearance.?);
     try testing.expectEqual(components.Appearance{ .color = .{ 1, 1, 1 } }, scene.entities[1].appearance.?); // shape omitted -> .rect
+}
+
+test "scene: a sprite parses and, on load, attaches the Sprite plus a default cursor" {
+    const src =
+        \\.{
+        \\    .name = "arena",
+        \\    .entities = .{
+        \\        .{ .name = "pac", .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } }, .sprite = .{ .sheet = "sprites/pac.msf", .clip = "chomp", .loop = .ping_pong } },
+        \\        .{ .name = "prop", .transform = .{ .pos = .{ .x = 1, .y = 0, .z = 0 } } },
+        \\    },
+        \\}
+    ;
+    const scene = try parse(testing.allocator, src);
+    defer free(testing.allocator, scene);
+    try testing.expectEqualStrings("sprites/pac.msf", scene.entities[0].sprite.?.sheet);
+    try testing.expectEqual(components.LoopMode.ping_pong, scene.entities[0].sprite.?.loop);
+    try testing.expect(scene.entities[1].sprite == null);
+
+    var world = try toWorld(testing.allocator, scene);
+    defer world.deinit();
+    const pac: ecs.Entity = .{ .index = 0, .generation = 0 };
+    try testing.expectEqualStrings("chomp", world.getSprite(pac).?.clip);
+    try testing.expect(world.getAnimationState(pac) != null); // default cursor attached
+    const prop: ecs.Entity = .{ .index = 1, .generation = 0 };
+    try testing.expect(world.getSprite(prop) == null);
+    try testing.expect(world.getAnimationState(prop) == null);
 }
 
 test "scene: a tilemap parses and materializes wall colliders on load" {

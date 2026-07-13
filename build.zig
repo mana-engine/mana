@@ -258,7 +258,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
 
     // spritegen tool tests (ADR 0031): its `main.zig` `test` block pulls in the
-    // rasterizer/recipe/format/montage sibling tests (determinism, round-trip, …).
+    // rasterizer/recipe/montage sibling tests (determinism, …). The MSF codec's
+    // round-trip test lives with the format in `data.msf` (run by the `data` unit above).
     const spritegen_tests = b.addTest(.{ .root_module = spritegen.root_module });
     test_step.dependOn(&b.addRunArtifact(spritegen_tests).step);
 
