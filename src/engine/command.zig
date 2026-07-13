@@ -20,6 +20,9 @@ const Command = union(enum) {
     despawn: Entity,
     set_transform: struct { entity: Entity, value: Transform },
     set_velocity: struct { entity: Entity, value: Velocity },
+    /// Write a named data component (ADR 0024). `column` is a resolved data-component
+    /// column id (columns are append-only, so an id captured now is valid at flush).
+    set_data: struct { entity: Entity, column: usize, value: f64 },
 };
 
 pub const CommandBuffer = struct {
@@ -53,6 +56,13 @@ pub const CommandBuffer = struct {
 
     pub fn setVelocity(self: *CommandBuffer, gpa: Allocator, e: Entity, value: Velocity) Allocator.Error!void {
         try self.commands.append(gpa, .{ .set_velocity = .{ .entity = e, .value = value } });
+    }
+
+    /// Queue a deferred write of data-component column `column` on `e` to `value`
+    /// (ADR 0024 `mana.set`), applied at flush. `column` must be an already-resolved
+    /// id (the host resolves the name before queuing). A stale `e` is dropped at flush.
+    pub fn setData(self: *CommandBuffer, gpa: Allocator, e: Entity, column: usize, value: f64) Allocator.Error!void {
+        try self.commands.append(gpa, .{ .set_data = .{ .entity = e, .column = column, .value = value } });
     }
 
     /// Snapshot of the buffer's length, taken before a transactional invocation (a
@@ -95,9 +105,11 @@ pub const CommandBuffer = struct {
                 if (a.bundle.transform) |t| try ignoreInvalid(world.setTransform(a.entity, t));
                 if (a.bundle.velocity) |v| try ignoreInvalid(world.setVelocity(a.entity, v));
                 if (a.bundle.health) |h| try ignoreInvalid(world.setHealth(a.entity, h));
+                for (a.bundle.data) |nv| try ignoreInvalid(world.setDataByName(a.entity, nv.name, nv.value));
             },
             .set_transform => |s| try ignoreInvalid(world.setTransform(s.entity, s.value)),
             .set_velocity => |s| try ignoreInvalid(world.setVelocity(s.entity, s.value)),
+            .set_data => |s| try ignoreInvalid(world.setDataByColumn(s.entity, s.column, s.value)),
             .despawn => |e| {
                 if (world.isValid(e)) {
                     try world.despawn(e);
@@ -194,6 +206,41 @@ test "command buffer: a set on an entity despawned the same tick is dropped" {
     try cb.setTransform(testing.allocator, e, .{ .pos = .{ .x = 9, .y = 9, .z = 9 } });
     try cb.flush(testing.allocator, &world, &events); // despawn first, then set is dropped
     try testing.expect(!world.isValid(e));
+}
+
+test "command buffer: a deferred set_data applies to its column at flush" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    const e = try world.spawn();
+    // Declare the column up-front (as a scene/prototype would), then resolve its id.
+    try world.setDataByName(e, "score", 1);
+    const col = world.dataColumn("score").?;
+
+    var cb: CommandBuffer = .{};
+    defer cb.deinit(testing.allocator);
+    var events: event.Queue = .{};
+    defer events.deinit(testing.allocator);
+
+    try cb.setData(testing.allocator, e, col, 99);
+    try testing.expectEqual(@as(?f64, 1), world.getData(e, col)); // not yet applied
+    try cb.flush(testing.allocator, &world, &events);
+    try testing.expectEqual(@as(?f64, 99), world.getData(e, col)); // applied
+}
+
+test "command buffer: a spawn bundle registers and attaches named data components" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+
+    var cb: CommandBuffer = .{};
+    defer cb.deinit(testing.allocator);
+    var events: event.Queue = .{};
+    defer events.deinit(testing.allocator);
+
+    const vals = [_]components.NamedValue{.{ .name = "hp", .value = 5 }};
+    const e = try cb.spawn(testing.allocator, &world, .{ .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } }, .data = &vals });
+    try testing.expect(world.dataColumn("hp") == null); // column not registered until flush
+    try cb.flush(testing.allocator, &world, &events);
+    try testing.expectEqual(@as(?f64, 5), world.getData(e, world.dataColumn("hp").?));
 }
 
 test "command buffer: rollback discards only commands queued since the mark" {

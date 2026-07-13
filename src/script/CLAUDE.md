@@ -73,11 +73,14 @@ deferred (see the last bullet below).
   fn-pointer vtable) that `engine` fills for the duration of each dispatch
   (`script_runtime.zig` builds a `HostCtx` over the live world + tick-derived
   `now` + the sim's seeded `core.Rng` and calls `State.setHost` around dispatch;
-  the `mana` closures capture a pointer to the `State`'s `host` slot). **Wired so
-  far:** the reads `position`, `now`, `random`/`random_int` (ADR 0022, #47) and the
-  authoritative `is_valid` (host when a Sim is dispatching, `handle.Registry`
-  fallback otherwise); the deferred mutations `set_velocity`, `set_position`,
-  `spawn`, `despawn`; the timers `after`/`every`/`cancel` (ADR 0019). **Still
-  deferred** — add as additive vtable entries, do NOT stub: `set`/`get` (named
-  data components — needs a data-component store). An absent `mana` key remains
-  the honest signal that a member is not yet wired.
+  the `mana` closures capture a pointer to the `State`'s `host` slot). **Wired:**
+  the reads `position`, `now`, `get` (named data components, ADR 0024),
+  `random`/`random_int` (ADR 0022, #47) and the authoritative `is_valid` (host when
+  a Sim is dispatching, `handle.Registry` fallback otherwise); the deferred
+  mutations `set` (named data components, ADR 0024), `set_velocity`, `set_position`,
+  `spawn`, `despawn`; the timers `after`/`every`/`cancel` (ADR 0019). With `get`/
+  `set` the ADR 0003 §2 `mana` v1 surface is **complete** — nothing remains
+  deferred. Named data components live in the ECS/World layer
+  (`src/engine/data_components.zig`, a registered dense-column store, Option B),
+  never in `script`; `get`/`set` reach it through the host seam like every other
+  live-Sim accessor.

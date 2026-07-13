@@ -35,3 +35,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0021 | `on_key`: edge-driven keyboard input for scripts | accepted |
 | 0022 | `mana.random`/`mana.random_int`: seeded RNG on `Sim` | accepted |
 | 0023 | Tracy profiler behind `-Denable-tracy` (ztracy client, `core` shim) | proposed |
+| 0024 | `mana.get`/`mana.set`: named scalar data components | proposed |

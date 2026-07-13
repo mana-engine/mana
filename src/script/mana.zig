@@ -6,23 +6,22 @@
 //! The live-Sim members reach the world/clock/command-buffer/RNG through the ADR
 //! 0015 host seam (`host.zig`): the engine installs a `Host` on the owning `State`
 //! for the duration of each event dispatch, and these accessors call through it.
-//! Wired so far: the reads `is_valid`, `position`, `now`, `random`, `random_int`
-//! (ADR 0022, issue #47), and the deferred mutations `set_velocity`, `set_position`,
+//! Wired: the reads `is_valid`, `position`, `now`, `get` (named data components, ADR
+//! 0024), `random`, `random_int` (ADR 0022, issue #47), and the deferred mutations
+//! `set` (named data components, ADR 0024), `set_velocity`, `set_position`,
 //! `despawn`, `spawn` (queued on the buffer, applied at the next flush — never a
 //! mid-dispatch world mutation). `is_valid` prefers the host when present
 //! (authoritative live-world check) and falls back to this `State`'s own
 //! `handle.Registry` when no Sim is dispatching, so its pre-seam behavior and tests
 //! still hold; mutations with no host installed are dropped (`spawn` returns an
-//! invalid handle); `random`/`random_int` return `0` with no host installed (the
-//! same graceful-degradation each other live read uses). Timers `after`/`every`/
-//! `cancel` (ADR 0019) reference the Lua callback in the registry and schedule it
-//! on the engine's wheel through the host, firing host-live in the dispatch phase.
+//! invalid handle); reads (`get`/`position`/`now`/`random`/`random_int`) return
+//! nil/0/lo with no host installed (the same graceful degradation). Timers
+//! `after`/`every`/`cancel` (ADR 0019) reference the Lua callback in the registry and
+//! schedule it on the engine's wheel through the host, firing host-live in the
+//! dispatch phase.
 //!
-//! The remaining §2 members — `set`/`get` (need a data-component store) — land as
-//! additive host-vtable entries in follow-up slices. Do not add stub/fake behavior
-//! for them; an absent `mana` key is the honest, checkable signal that a member is
-//! not implemented yet, matching how a missing event-handler key means "no
-//! handler" elsewhere in ADR 0003.
+//! With `get`/`set` this table is the complete ADR 0003 §2 `mana` v1 surface — no
+//! member remains deferred.
 
 const std = @import("std");
 const zlua = @import("zlua");
@@ -106,6 +105,14 @@ pub fn pushManaTable(l: *Lua, entities: *const Registry, host: *const ?Host) voi
     l.pushLightUserdata(@ptrCast(host));
     l.pushClosure(zlua.wrap(manaRandomInt), 1);
     l.setField(-2, "random_int");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaGet), 1);
+    l.setField(-2, "get");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaSet), 1);
+    l.setField(-2, "set");
 }
 
 /// Read a `*const ?Host` back from closure upvalue `idx` (a light-userdata pointer
@@ -314,6 +321,40 @@ fn manaRandomInt(l: *Lua) !i32 {
     return 1;
 }
 
+/// `mana.get(h, name)` (ADR 0003 §2; ADR 0024): read entity `h`'s named scalar data
+/// component `name` — an immediate read through the host seam. Returns the number, or
+/// a single `nil` when no Sim is dispatching, the handle is stale, the entity has no
+/// value there, or `name` is not a declared data component (an undeclared name is
+/// `nil`, never a raised error, so a script can probe optimistically).
+fn manaGet(l: *Lua) !i32 {
+    const raw: u64 = @bitCast(try l.toInteger(1));
+    const name = l.checkString(2);
+    const h = hostSlot(l, Lua.upvalueIndex(1)).* orelse {
+        l.pushNil();
+        return 1;
+    };
+    const v = h.get(raw, name) orelse {
+        l.pushNil();
+        return 1;
+    };
+    l.pushNumber(v);
+    return 1;
+}
+
+/// `mana.set(h, name, value)` (ADR 0003 §2; ADR 0024): queue a write of entity `h`'s
+/// named scalar data component `name` to `value`, applied at the next flush —
+/// deferred, like `set_velocity`/`set_position`. A stale handle is dropped at flush;
+/// with no Sim dispatching, a no-op; an *undeclared* component name is dropped with an
+/// engine warning (declare it in scene/prototype ZON first — ADR 0024). `name` is
+/// borrowed for the call only (the host resolves it immediately). Returns nothing.
+fn manaSet(l: *Lua) !i32 {
+    const raw: u64 = @bitCast(try l.toInteger(1));
+    const name = l.checkString(2);
+    const value = l.checkNumber(3);
+    if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.set(raw, name, value);
+    return 0;
+}
+
 const testing = std.testing;
 
 test "mana: table shape exposes exactly the wired members (version..despawn); version == 1" {
@@ -334,12 +375,12 @@ test "mana: table shape exposes exactly the wired members (version..despawn); ve
         key_count += 1;
         l.pop(1); // drop value; keep key on the stack to advance `next`
     }
-    try testing.expectEqual(@as(usize, 14), key_count);
+    try testing.expectEqual(@as(usize, 16), key_count);
 
     try testing.expectEqual(zlua.LuaType.number, l.getField(t, "version"));
     try testing.expectEqual(@as(i64, 1), try l.toInteger(-1));
     l.pop(1);
-    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "set_position", "despawn", "spawn", "every", "after", "cancel", "random", "random_int" }) |name| {
+    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "set_position", "despawn", "spawn", "every", "after", "cancel", "random", "random_int", "get", "set" }) |name| {
         try testing.expectEqual(zlua.LuaType.function, l.getField(t, name));
         l.pop(1);
     }
@@ -427,4 +468,21 @@ test "mana.random/random_int: no Sim dispatching degrades to 0 / lo, never raise
     try testing.expectEqual(@as(f64, 0), try l.toNumber(-2));
     try testing.expectEqual(@as(i64, 5), try l.toInteger(-1));
     l.pop(2);
+}
+
+test "mana.get/set: no Sim dispatching returns nil and no-ops, never raises" {
+    var l = try Lua.init(testing.allocator);
+    defer l.deinit();
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+    var host: ?Host = null;
+
+    pushManaTable(l, &registry, &host);
+    l.setGlobal("mana");
+
+    // get degrades to nil; set is a harmless no-op that returns nothing.
+    try l.doString("return mana.get(1, 'score')");
+    try testing.expect(l.isNil(-1));
+    l.pop(1);
+    try l.doString("mana.set(1, 'score', 42)"); // must not raise with no host
 }

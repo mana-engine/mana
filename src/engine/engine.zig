@@ -26,6 +26,7 @@ pub const gpu = @import("gpu");
 pub const physics = @import("physics");
 
 pub const components = @import("components.zig");
+pub const data_components = @import("data_components.zig");
 pub const world = @import("world.zig");
 pub const systems = @import("systems.zig");
 pub const command = @import("command.zig");
@@ -65,6 +66,7 @@ pub const ready =
 test {
     std.testing.refAllDecls(@This());
     _ = components;
+    _ = data_components;
     _ = world;
     _ = systems;
     _ = command;
