@@ -76,6 +76,37 @@ pub fn main(init: std.process.Init) !void {
     return runOnce(out, io, gpa, pkg);
 }
 
+/// Register the engine's standard per-tick system set on `sim`, in the fixed order
+/// every package runs them — documented here (in one place) so the one-shot and the
+/// interactive loop stay identical and no genre concept leaks into the runner. The
+/// order is load-bearing:
+///
+///   nav → movement → collision → regen
+///
+/// - `nav` (ADR 0027) steers each `NavAgent` by writing its `Velocity` toward the next
+///   cell on its path; it runs *before* `movement` so that velocity is integrated the
+///   same tick.
+/// - `movement` integrates `Velocity` into `Transform`.
+/// - `collision` (ADR 0008/0025) runs *after* `movement` so the overlaps it finds — and
+///   the `on_collision_begin` events they raise — reflect this tick's post-move
+///   positions.
+/// - `regen` advances health toward max; it touches a disjoint column (healths), so its
+///   placement is order-independent — last by convention.
+///
+/// Registering nav/collision unconditionally is a genre-neutral no-op for a package
+/// that uses neither: `nav` no-ops without a `Sim.tilemap` + agents (ADR 0027), and
+/// `collision` raises no events when fewer than two entities carry a `Collider` — so a
+/// package with no tilemap/agents/colliders (snake, sandbox, chronicle) ticks
+/// bit-identically to before this set existed. Input translation (#30, interactive loop
+/// only) is registered by the caller *before* this call, so held keys reach
+/// `nav`/`movement` the same tick.
+fn registerStandardSystems(sim: *engine.Sim) Allocator.Error!void {
+    try sim.addSystem(engine.nav.navSystem);
+    try sim.addSystem(engine.systems.movementSystem);
+    try sim.addSystem(engine.collision.collisionSystem);
+    try sim.addSystem(engine.systems.regenSystem);
+}
+
 /// Load `<pkg>/game.zon`. Caller owns the result; free with `manifest_mod.free`.
 fn loadManifest(io: Io, gpa: Allocator, pkg: []const u8) !Manifest {
     const path = try std.fs.path.join(gpa, &.{ pkg, "game.zon" });
@@ -206,11 +237,13 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     defer sim.deinit();
     if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
     try engine.scene.load(parsed, &sim.world);
+    // Same tilemap borrow as the one-shot path (see runOnce): `parsed` outlives `sim`
+    // (LIFO defers), so nav can path over the scene's grid; null ⇒ nav no-ops.
+    if (parsed.tilemap) |*tm| sim.tilemap = tm;
     try loadPackageScript(io, gpa, pkg, manifest, &sim); // #51: package Lua handlers
     sim.enterScene(parsed.name); // #54/ADR 0017: fire on_scene_enter on the first tick
-    try sim.addSystem(engine.input.inputMoveSystem); // #30: held keys → velocity
-    try sim.addSystem(engine.systems.movementSystem);
-    try sim.addSystem(engine.systems.regenSystem);
+    try sim.addSystem(engine.input.inputMoveSystem); // #30: held keys → velocity (before nav)
+    try registerStandardSystems(&sim);
 
     // Window before device (ADR 0012 §8): SDL video must be initialised so the Vulkan
     // backend can query surface extensions and build the surface.
@@ -345,10 +378,14 @@ fn runOnce(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     defer sim.deinit();
     if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
     try engine.scene.load(parsed, &sim.world);
+    // Point the sim at the scene's grid level (ADR 0026/0027), if any, so `navSystem`
+    // can path over it. `parsed` outlives `sim` — its `defer scene.free` was registered
+    // before `sim`'s `defer deinit`, and defers run LIFO, so the sim is torn down first
+    // and this borrow never dangles. Null tilemap ⇒ nav no-ops (see registerStandardSystems).
+    if (parsed.tilemap) |*tm| sim.tilemap = tm;
     try loadPackageScript(io, gpa, pkg, manifest, &sim); // #51: package Lua handlers
     sim.enterScene(parsed.name); // #54/ADR 0017: fire on_scene_enter on the first tick
-    try sim.addSystem(engine.systems.movementSystem);
-    try sim.addSystem(engine.systems.regenSystem);
+    try registerStandardSystems(&sim);
     try sim.run(tick_steps);
 
     try out.print(

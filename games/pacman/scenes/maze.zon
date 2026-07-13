@@ -1,15 +1,71 @@
-// The Pac-Man maze's initial scene. Deliberately empty: the maze walls, dots, power
-// pellets, the player, and the ghosts are all spawned by rules.lua at on_scene_enter
-// (via mana.spawn), so the layout stays in one editable place and every piece goes
-// through the one spawn path. An empty entity list is a valid scene.
+// The Pac-Man maze, now authored as engine data instead of an ASCII grid inside Lua
+// (ADR 0026 tilemap + ADR 0025 content colliders close the old "tile/maze level data"
+// and "content-declarable colliders" gaps). Two pieces:
 //
-// GAP (tile/maze level data): the maze layout *wants* to be scene data both the engine
-// and content can read — a grid of walls the native collision system consumes and the
-// renderer draws as tiles. No such tile/level data model exists today (scene entities
-// are flat inline component lists, ADR 0004 §6; there is no grid/tilemap concept), so
-// the layout lives as an ASCII grid inside rules.lua instead. See the filed maze-data
-// gap issue and games/pacman/README.md.
+//   1. `.tilemap` — the maze *structure*: a legend + rows of glyphs the engine
+//      materializes on load. The legend maps ONLY '#' → a static `Collider`, so a wall
+//      cell becomes a native collider that (a) blocks the `nav` pathfinder (ADR 0027:
+//      a cell is non-walkable iff its glyph's bundle carries a collider) and (b) is the
+//      level geometry. The other glyphs — '.', 'o', 'P', 'g' — are unmapped, so they
+//      are walkable floor and materialize nothing. They stay in the rows only as a
+//      human-readable picture of the maze; the collidable pickups are the `entities`
+//      below and pac/ghosts are spawned by rules.lua at the 'P'/'g' cells.
+//
+//   2. `.entities` — the collidable pickups (dots, pellets) as ADR 0025 colliders with
+//      a `kind` data tag (ADR 0024). They are NOT tilemap cells on purpose: a tilemap
+//      cell with a collider would read as a nav *wall*, so a floor full of dots would
+//      wall the maze off. As plain entities their colliders drive pac-eats-dot through
+//      `on_collision_begin` (native collision), while nav still paths over the
+//      '#'-only tilemap freely.
+//
+// Grid frame: cell_size 1, origin (-9,-5,0) → a 19x11 grid centred on the world origin.
+// Cell (col,row) → world (col-9, row-5, 0). rules.lua uses the same frame to place pac/
+// ghosts and to convert positions back to cells for ghost target selection.
+//
+// Layers (physics.Layers, bidirectional mask): wall=16/mask 0 (collides with nothing —
+// nav does the blocking), pac=1, ghost=2, dot=4, pellet=8; pickups & ghosts mask pac
+// (1) only, so the sole collision events are pac↔dot, pac↔pellet, pac↔ghost.
 .{
     .name = "maze",
-    .entities = .{},
+    .tilemap = .{
+        .cell_size = 1,
+        .origin = .{ .x = -9, .y = -5, .z = 0 },
+        .legend = .{
+            // '#' → a static wall: a nav-blocking collider that never itself collides.
+            .{ .glyph = '#', .bundle = .{ .collider = .{ .shape = .{ .circle = .{ .radius = 0.5 } }, .layers = .{ .layer = 16, .mask = 0 }, .is_static = true } } },
+        },
+        .rows = .{
+            "###################",
+            "#........#........#",
+            "#.####.#.#.#.####.#",
+            "#.................#",
+            "#.##.###.#.###.##.#",
+            "#....#..ggg..#....#",
+            "#.##.#.#####.#.##.#",
+            "#........#........#",
+            "#.##.###.#.###.##.#",
+            "#o......P........o#",
+            "###################",
+        },
+    },
+    // Pickups. kind: dot=3, pellet=4 (pac=1, ghost=2 live on the prototypes). radius 0.4
+    // so two adjacent-cell colliders (centres 1 apart) never overlap — only a piece
+    // sharing a pickup's cell fires a collision.
+    .entities = .{
+        // Power pellets ('o' cells, row 9 cols 1 & 17).
+        .{ .name = "pellet", .transform = .{ .pos = .{ .x = -8, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 8, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 4 }} },
+        .{ .name = "pellet", .transform = .{ .pos = .{ .x = 8, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 8, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 4 }} },
+        // A curated set of dots on open floor cells (a scaffold subset, not every cell).
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = -7, .y = -4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = -3, .y = -4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = 3, .y = -4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = 7, .y = -4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = -5, .y = -2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = 0, .y = -2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = 5, .y = -2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = -7, .y = 2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = 7, .y = 2, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = -5, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
+        .{ .name = "dot", .transform = .{ .pos = .{ .x = 5, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 4, .mask = 1 } }, .data = .{.{ .name = "kind", .value = 3 }} },
+    },
 }

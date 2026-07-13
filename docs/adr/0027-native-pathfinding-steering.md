@@ -1,6 +1,6 @@
 # 0027. Native pathfinding + steering: Lua selects the target, the engine steers
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-13
 
 ## Context
@@ -77,13 +77,14 @@ step is null and the agent is stopped (zero velocity) — deterministically stay
 
 The sim reaches the grid through a new borrowed `Sim.tilemap: ?*const Tilemap`,
 surfaced to systems as `Context.tilemap` (null for every sim that never sets it — the
-system then no-ops, so existing sims are unaffected). This lane lands only the
-*capability*: the field, the `Context` plumbing, and the system, all exercised through
-`Sim` in tests. **Wiring the runner** (`src/runtime/main.zig`) to set `Sim.tilemap`
-from the loaded scene and register `navSystem` — so nav runs for real via `mise run
-run` — is a **deferred follow-up** (see "Explicitly not doing"), and migrating
-`games/pacman`'s ghosts onto it is a **separate content lane**, not this
-engine-capability lane.
+system then no-ops, so existing sims are unaffected). The capability lane landed only
+the field, the `Context` plumbing, and the system, all exercised through `Sim` in
+tests. **Wiring the runner** (`src/runtime/main.zig`) to set `Sim.tilemap` from the
+loaded scene and register `navSystem` — so nav runs for real via `mise run run` — has
+since **landed** (#62): both the one-shot and interactive loops borrow the scene's
+tilemap into the sim and register a fixed standard system set
+(`nav → movement → collision → regen`), a no-op for a package without a tilemap/agents.
+Migrating `games/pacman`'s ghosts onto it landed in the same content lane.
 
 **BFS shape.** Grid, 4-connected, uniform cost, fixed neighbour order **up, down,
 left, right**, keeping the first parent to reach each cell; the first step is
@@ -129,20 +130,20 @@ does not move.
 - **Committed to:** the target is expressed as two `f64` data components by convention
   name (`nav_target_col`/`nav_target_row`); steering is velocity-into-`movement`, not a
   bespoke mover.
+- **Follow-ups since landed:**
+  - **Runner wiring of `Sim.tilemap`** — **DONE** (#62): `src/runtime/main.zig` now sets
+    `Sim.tilemap` from the loaded scene and registers `navSystem`/`collisionSystem` in a
+    fixed standard order, so nav runs for real via `mise run run`. Split out of the
+    engine-capability lane so that one stayed free of runtime-orchestration churn.
+  - **Migrating `games/pacman`'s ghosts** onto `NavAgent` — **DONE** (#62): the content
+    package now selects target cells in Lua and lets the engine steer.
 - **Explicitly not doing (follow-ups):**
-  - **Runner wiring of `Sim.tilemap`** — this lane wires the capability through `Sim`
-    and tests only; `src/runtime/main.zig` does not yet set `Sim.tilemap` from the
-    loaded scene or register `navSystem`, so nav does not run via `mise run run` until
-    that (small) follow-up lands. Deliberately deferred so this PR stays an
-    engine-capability change with no runtime-orchestration churn.
   - **A\* / weighted costs / flow fields** — BFS on a uniform grid is deterministic and
     sufficient for Pac-Man; weighted terrain or a shared flow field is a later ADR.
   - **Non-grid nav graphs** — navmeshes, waypoint graphs, portals. Out of scope; the
     grid is the only topology.
   - **Flocking / local avoidance / separation** — agents do not avoid each other; two
     agents may share a cell. A steering-behaviours layer is a separate lane.
-  - **Migrating `games/pacman`'s ghosts** onto `NavAgent` — a content change in the
-    Pac-Man package, not this engine lane.
   - **A dedicated `mana` target-setter** (`mana.set_nav_target`) — deliberately avoided;
     reusing `mana.set` keeps the scripting surface unchanged. If a game ever needs it,
     that is its own ADR (a scripting-API change).
