@@ -6,8 +6,8 @@
 //! game; nothing here references `games/**`.
 //!
 //! Over the ~500-line soft limit by design: this is the single runner entry point,
-//! and each mode (`--watch`/`--play`/`--render`/`--render-svg`/`--filmstrip`/
-//! `--scenario`) shares the same small set of load-path helpers below
+//! and each mode (`--watch`/`--play`/`--render`/`--render-play-frame`/`--render-svg`/
+//! `--filmstrip`/`--scenario`) shares the same small set of load-path helpers below
 //! (`loadManifest`, `loadPrototypes`, `loadPackageScript`, `registerStandardSystems`)
 //! rather than duplicating them across files — splitting by mode would scatter that
 //! shared setup instead of removing it.
@@ -51,6 +51,8 @@ pub fn main(init: std.process.Init) !void {
 
     // First non-flag argument is the package dir; `--watch` enables hot reload;
     // `--render <out.png>` renders one offscreen frame to a PNG (needs -Denable-vulkan);
+    // `--render-play-frame <out.png> [--ticks N]` captures the `--play` textured-sprite
+    // composite headlessly (null backend, no GPU) after N fixed ticks (issue #122);
     // `--render-svg <out.svg>` renders one frame to SVG, no GPU needed (ADR 0029);
     // `--filmstrip <out-dir> [--ticks N]` runs N ticks, writing one SVG per tick
     // (ADR 0029); `--play` runs the live windowed loop (needs -Denable-sdl3 -Denable-vulkan).
@@ -59,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
     var watch = false;
     var play = false;
     var render_out: ?[]const u8 = null;
+    var render_play_out: ?[]const u8 = null;
     var render_svg_out: ?[]const u8 = null;
     var filmstrip_dir: ?[]const u8 = null;
     var filmstrip_ticks: u32 = filmstrip_default_ticks;
@@ -86,6 +89,14 @@ pub fn main(init: std.process.Init) !void {
                 return;
             }
             render_out = args[i];
+        } else if (std.mem.eql(u8, a, "--render-play-frame")) {
+            i += 1;
+            if (i >= args.len) {
+                try out.writeAll("usage: mana <pkg> --render-play-frame <out.png> [--ticks N]\n");
+                try out.flush();
+                return;
+            }
+            render_play_out = args[i];
         } else if (std.mem.eql(u8, a, "--render-svg")) {
             i += 1;
             if (i >= args.len) {
@@ -122,6 +133,7 @@ pub fn main(init: std.process.Init) !void {
     const pkg = pkg_path orelse {
         try out.writeAll(
             "usage: mana <game-package-dir> [--watch] [--play] [--render <out.png>] " ++
+                "[--render-play-frame <out.png> [--ticks N]] " ++
                 "[--render-svg <out.svg>] [--filmstrip <out-dir> [--ticks N]] " ++
                 "[--scenario <scenario.zon>]\n",
         );
@@ -129,6 +141,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
     if (render_out) |path| return runRender(out, io, gpa, pkg, path);
+    if (render_play_out) |path| return runRenderPlayFrame(out, io, gpa, pkg, path, filmstrip_ticks);
     if (render_svg_out) |path| return runRenderSvg(out, io, gpa, pkg, path);
     if (filmstrip_dir) |dir| return runFilmstrip(out, io, gpa, pkg, dir, filmstrip_ticks);
     if (scenario_path) |path| return runScenario(out, io, gpa, pkg, path);
@@ -244,6 +257,73 @@ fn runRender(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, path: []c
     } else {
         try out.writeAll("mana: rendering not compiled in — rebuild with -Denable-vulkan\n");
     }
+    try out.flush();
+}
+
+/// Capture the `--play` textured-sprite composite to a PNG, headlessly (issue #122). This
+/// is the deterministic, GPU-free analogue of `playLoop`'s render zone: it builds the same
+/// `Sim` as `runOnce`/`playLoop` (standard systems + the #30 input system, so the load path
+/// is identical), loads the scene's sheets and packs the atlas exactly like `--play`, then
+/// advances `ticks` FIXED steps — advancing the cosmetic animation cursor by the fixed sim
+/// dt each tick rather than wall-clock, so the captured Nth-tick frame is reproducible —
+/// and composites the flat quads + textured sprites through `engine.gpu.captureFrame` (the
+/// null backend's CPU textured rasterizer), writing the readback via the same PNG path as
+/// `--render`. Unlike `--render` this needs **no GPU** (the null backend samples the atlas
+/// on the CPU), so a broken sprite is caught in CI, not by a user playing `--play`. Like the
+/// other headless modes, a Lua-driven game needs `-Denable-lua` for its scene handler to
+/// spawn the sprited entities; without it the scene renders whatever entities exist up front.
+fn runRenderPlayFrame(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, path: []const u8, ticks: u32) !void {
+    const manifest = try loadManifest(io, gpa, pkg);
+    defer manifest_mod.free(gpa, manifest);
+    try checkScriptApi(out, manifest);
+
+    const scene_path = try std.fs.path.join(gpa, &.{ pkg, manifest.entry_scene });
+    defer gpa.free(scene_path);
+    const scene_src = try Io.Dir.cwd().readFileAllocOptions(io, scene_path, gpa, .unlimited, .of(u8), 0);
+    defer gpa.free(scene_src);
+    const parsed = try engine.scene.parse(gpa, scene_src);
+    defer engine.scene.free(gpa, parsed);
+
+    const proto_file = try loadPrototypes(io, gpa, pkg, manifest);
+    defer if (proto_file) |f| engine.prototype.free(gpa, f);
+
+    var sim = engine.Sim.init(gpa, core.time.default_dt);
+    defer sim.deinit();
+    if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
+    try engine.scene.load(parsed, &sim.world);
+    if (parsed.tilemap) |*tm| sim.tilemap = tm; // see runOnce: parsed outlives sim (LIFO defers)
+    try loadPackageScript(io, gpa, pkg, manifest, &sim);
+    sim.enterScene(parsed.name);
+    try sim.addSystem(engine.input.inputMoveSystem); // #30: same load path as --play
+    try registerStandardSystems(&sim);
+
+    // Sheets + atlas exactly as `--play` (ADR 0031 §4): union of live + prototype sprites.
+    var sheets = try engine.sprite.loadForScene(gpa, io, Io.Dir.cwd(), pkg, &sim.world, sim.prototypes);
+    defer sheets.deinit();
+    var atlas = try engine.sprite.buildAtlas(gpa, &sheets);
+    defer atlas.deinit();
+
+    var t: u32 = 0;
+    while (t < ticks) : (t += 1) {
+        try sim.tick();
+        engine.sprite.advance(&sim.world, &sheets, core.time.default_dt);
+    }
+
+    const view: engine.render.View = .{ .width = svg_view_size, .height = svg_view_size, .projection = manifest.projection };
+    const quads = try engine.render.project(gpa, &sim.world, view, &engine.render.default_palette);
+    defer gpa.free(quads);
+    const sprites = try engine.render.projectSprites(gpa, &sim.world, view, &sheets, &atlas);
+    defer gpa.free(sprites);
+    const clear = [4]f32{ 0.09, 0.10, 0.14, 1.0 };
+    const pixels = try engine.gpu.captureFrame(gpa, view.width, view.height, quads, sprites, atlas.pixels, atlas.width, atlas.height, clear);
+    defer gpa.free(pixels);
+    const bytes = try data.png.encode(gpa, view.width, view.height, pixels);
+    defer gpa.free(bytes);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+    try out.print(
+        "mana: captured '{s}' — {d} entities, {d} sprites, {d} ticks, {d}x{d} → {s}\n",
+        .{ manifest.name, sim.world.count(), sprites.len, ticks, view.width, view.height, path },
+    );
     try out.flush();
 }
 

@@ -81,10 +81,27 @@ what you install.
   below.
 
 **Seeing a game without a GPU (CI / headless boxes):** a headless renderer can dump
-frames you open in a browser — a single static frame (`--render-svg <file>`) or a
-filmstrip over N ticks (`--filmstrip <dir> --ticks <n>`). This is a regression/CI aid,
-not the intended way to judge how a game looks or feels — for that, `--play` it.
+frames you open in a browser — a single static frame (`--render-svg <file>`), a
+filmstrip over N ticks (`--filmstrip <dir> --ticks <n>`), or the **textured-sprite
+composite** as a PNG (`--render-play-frame <file.png> [--ticks N]`). This is a
+regression/CI aid, not the intended way to judge how a game looks or feels — for that,
+`--play` it.
 
 ```sh
 mise x -- zig build -Denable-lua run -- games/pacman --filmstrip ./out/pacman --ticks 30
+```
+
+`--render-play-frame` is the headless mirror of `--play`'s pixels: it loads the scene,
+packs the sprite atlas, advances **N deterministic ticks** (fixed dt, not wall-clock),
+then composites the flat quads **and** the textured, direction-facing sprites through the
+null backend's CPU rasterizer — which samples the atlas exactly as the Vulkan pipeline
+does — and writes the RGBA readback to PNG. So a sprite bug (wrong frame, wrong facing,
+flattened footprint) shows up in the PNG + CI, not only when a human plays a broken build.
+Needs **no GPU**; a Lua-driven game still needs `-Denable-lua` for its scene handler to
+spawn the sprited entities (as with the other headless modes). First run `mise run assets`
+so the derived `.msf` sheets exist.
+
+```sh
+mise run assets   # generate the gitignored sprite sheets the sprites reference
+mise x -- zig build -Denable-lua run -- games/pacman --render-play-frame ./out/pac.png --ticks 10
 ```

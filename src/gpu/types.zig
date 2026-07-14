@@ -31,9 +31,9 @@ pub const Quad = struct {
 /// A textured, tinted sprite quad in normalized device coordinates (ADR 0031 §4;
 /// issue #113 phase 2b): a quad that samples a sub-rect of the bound sprite atlas
 /// instead of drawing a flat colour. The engine builds these from `Sprite` entities
-/// (`render.projectSprites`); the Vulkan textured pipeline samples the atlas at the
-/// per-vertex UVs and multiplies by `tint`, while the null backend fills the quad's
-/// bounding box with `tint` (a real, testable no-op — it is not a texel sampler).
+/// (`render.projectSprites`); both backends sample the atlas at the per-vertex UVs and
+/// multiply by `tint` — the Vulkan textured pipeline on the GPU, the null backend via its
+/// CPU nearest-neighbour textured rasterizer (a real, headless test double).
 pub const SpriteQuad = struct {
     /// Centre in NDC.
     center: [2]f32,
