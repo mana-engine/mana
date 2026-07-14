@@ -42,6 +42,19 @@ run = "zig build test --error-style minimal"
 description = "Run all tests with the Lua scripting backend enabled — executes the pacman/snake acceptance staircase instead of skipping it."
 run = "zig build -Denable-lua test --error-style minimal"
 
+[tasks.test-vulkan]
+# The cross-backend orientation test in `src/gpu/gpu.zig` ("captureFrame: atlas top
+# row composites to the output top", added in PR #155 to guard issue #148's live
+# Vulkan Y-flip) `return error.SkipZigTest`s when no real Vulkan device is present —
+# so under the default `test` it only ever runs on the null backend. This pass
+# compiles the Vulkan backend in (`-Denable-vulkan`) so, given a Vulkan ICD in the
+# environment (Mesa lavapipe in CI — see `.github/workflows/ci.yml` — or a real GPU
+# locally), the orientation test actually EXECUTES against a live device instead of
+# skipping. Environment-only: the mise task carries the test logic, CI just provisions
+# the ICD. `--error-style minimal` for the same quiet-on-green reason as `test` above.
+description = "Run all tests with the Vulkan backend enabled — executes the live-path orientation test against a real Vulkan ICD (e.g. lavapipe) instead of skipping it."
+run = "zig build -Denable-vulkan test --error-style minimal"
+
 [tasks.fmt]
 # `--exclude zig-pkg`: fetched dependency sources (e.g. ziglua's vendored Lua
 # bindings) are not fmt-clean and are not ours to format. zig eagerly fetches even
