@@ -15,6 +15,7 @@ const std = @import("std");
 const data = @import("data");
 const animation = @import("animation.zig");
 const World = @import("world.zig").World;
+const prototype = @import("prototype.zig");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -31,15 +32,18 @@ pub const generated_subdir = "generated";
 /// A decoded sheet keyed by the `Sprite.sheet` reference it was loaded under. Owns its
 /// decoded `msf.Sheet` (frames + clip table), freed by the owning `SheetStore`.
 const Entry = struct {
-    /// The `Sprite.sheet` reference (e.g. `"sprites/pac.msf"`); borrowed from the world's
-    /// `Sprite` component, whose backing storage outlives the store.
+    /// The `Sprite.sheet` reference (e.g. `"sprites/pac.msf"`); borrowed from either a
+    /// live world's `Sprite` component or a `prototype.Registry` entry's `.sprite.sheet`
+    /// — whichever backing storage it came from, that storage must outlive the store.
     ref: []const u8,
     sheet: msf.Sheet,
 };
 
-/// Caches every distinct `.msf` sheet a world's `Sprite` components reference, decoded
-/// once at load and keyed by the reference string. The store owns the decoded sheets;
-/// reference keys are borrowed from the world (which must outlive the store).
+/// Caches every distinct `.msf` sheet a scene can reference, decoded once at load and
+/// keyed by the reference string. The store owns the decoded sheets; reference keys are
+/// borrowed from whichever source supplied them — a live world's `Sprite` component OR a
+/// `prototype.Registry` entry's `.sprite.sheet` (see `loadForScene`) — so every source
+/// whose ref is held must outlive the store.
 pub const SheetStore = struct {
     gpa: Allocator,
     entries: std.ArrayList(Entry) = .empty,
@@ -76,35 +80,61 @@ pub fn resolvePath(gpa: Allocator, pkg: []const u8, ref: []const u8) Allocator.E
     return std.fs.path.join(gpa, &.{ pkg, dir, generated_subdir, base });
 }
 
-/// Load and decode every distinct sheet referenced by `world`'s `Sprite` components into
-/// a fresh `SheetStore` (issue #113 phase 2, item 2). Each reference is resolved to its
-/// generated artifact (`resolvePath`) relative to `base` (the runtime passes
-/// `Io.Dir.cwd()`), read via `io`, and decoded with `data.msf`; distinct references are
+/// Load and decode every distinct sheet a scene could reference at load time into a
+/// fresh `SheetStore` (issue #113 phase 2, item 2; phase 2b lifecycle fix): the union of
+/// `world`'s live `Sprite` components AND every prototype in `prototypes` that declares
+/// a `.sprite.sheet`. The prototype half matters because `Sim.enterScene` only QUEUES
+/// `on_scene_enter` to fire on the first `sim.tick()` — a scene's Lua handler (e.g.
+/// `games/pacman/rules.lua` spawning `pac` and the ghosts via `mana.spawn`) runs AFTER
+/// this loader in `playLoop`, so `world.sprites` can still be EMPTY here even though the
+/// scene is about to spawn sprited entities. The prototype registry is static content
+/// known up front, so unioning it in guarantees those sheets are already decoded — and
+/// in the atlas `buildAtlas` assembles from this store — before the entities that need
+/// them exist. Each reference is resolved to its generated artifact (`resolvePath`)
+/// relative to `base` (the runtime passes `Io.Dir.cwd()`), read via `io`, and decoded
+/// with `data.msf`; distinct references (whether from a live entity or a prototype) are
 /// loaded once. A referenced sheet that does not exist on disk is skipped with a warning
 /// (its entities hold frame 0), so a package whose assets have not been generated still
 /// runs — `mise run assets` produces them. Mirrors `scene.loadWorldFromFile`'s
 /// `(gpa, io, base, …)` file-loading shape. Caller owns the store (`deinit`). Errors: file
 /// read errors other than not-found, `msf.DecodeError`, `error.OutOfMemory`.
-pub fn loadForWorld(gpa: Allocator, io: Io, base: Io.Dir, pkg: []const u8, world: *World) !SheetStore {
+pub fn loadForScene(
+    gpa: Allocator,
+    io: Io,
+    base: Io.Dir,
+    pkg: []const u8,
+    world: *World,
+    prototypes: prototype.Registry,
+) !SheetStore {
     var store: SheetStore = .{ .gpa = gpa };
     errdefer store.deinit();
-    for (world.sprites.slice()) |sprite| {
-        if (store.get(sprite.sheet) != null) continue;
-        const path = try resolvePath(gpa, pkg, sprite.sheet);
-        defer gpa.free(path);
-        const read = base.readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0);
-        const bytes = read catch |err| switch (err) {
-            error.FileNotFound => {
-                std.log.scoped(.sprite).warn("sheet not found: {s} (`mise run assets`)", .{path});
-                continue;
-            },
-            else => return err,
-        };
-        defer gpa.free(bytes);
-        const sheet = try msf.decode(gpa, bytes);
-        try store.entries.append(gpa, .{ .ref = sprite.sheet, .sheet = sheet });
+    for (world.sprites.slice()) |sprite| try loadOne(&store, gpa, io, base, pkg, sprite.sheet);
+    for (prototypes.prototypes) |proto| {
+        const sp = proto.sprite orelse continue;
+        try loadOne(&store, gpa, io, base, pkg, sp.sheet);
     }
     return store;
+}
+
+/// Decode `ref`'s generated artifact into `store`, unless already loaded or missing on
+/// disk (warn-and-skip; see `loadForScene`). Shared by both the live-entity and
+/// prototype passes so a sheet referenced by both is still loaded exactly once. Errors:
+/// file read errors other than not-found, `msf.DecodeError`, `error.OutOfMemory`.
+fn loadOne(store: *SheetStore, gpa: Allocator, io: Io, base: Io.Dir, pkg: []const u8, ref: []const u8) !void {
+    if (store.get(ref) != null) return;
+    const path = try resolvePath(gpa, pkg, ref);
+    defer gpa.free(path);
+    const read = base.readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0);
+    const bytes = read catch |err| switch (err) {
+        error.FileNotFound => {
+            std.log.scoped(.sprite).warn("sheet not found: {s} (`mise run assets`)", .{path});
+            return;
+        },
+        else => return err,
+    };
+    defer gpa.free(bytes);
+    const sheet = try msf.decode(gpa, bytes);
+    try store.entries.append(gpa, .{ .ref = ref, .sheet = sheet });
 }
 
 /// Advance every sprite entity's animation cursor by `dt_s` WALL-CLOCK seconds (issue
@@ -250,7 +280,7 @@ pub fn buildAtlas(gpa: Allocator, store: *const SheetStore) Allocator.Error!Atla
 const testing = std.testing;
 
 /// Build a `SheetStore` owning one decoded sheet under `ref` (encode→decode so the store
-/// owns freeable slices, matching `loadForWorld`). Caller `deinit`s the returned store.
+/// owns freeable slices, matching `loadForScene`). Caller `deinit`s the returned store.
 fn storeWith(gpa: Allocator, ref: []const u8, sheet: msf.Sheet) !SheetStore {
     const bytes = try msf.encode(gpa, sheet);
     defer gpa.free(bytes);
@@ -318,7 +348,7 @@ test "sprite: resolvePath maps a sheet ref to its generated artifact" {
     try testing.expectEqualStrings("games/pacman/sprites/generated/pac.msf", p);
 }
 
-test "sprite: loadForWorld reads generated sheets and skips missing ones" {
+test "sprite: loadForScene reads generated sheets and skips missing ones" {
     const gpa = testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -350,7 +380,7 @@ test "sprite: loadForWorld reads generated sheets and skips missing ones" {
     try w.setSprite(missing, .{ .sheet = "sprites/ghost.msf", .clip = "walk" });
 
     // pkg = "" ⇒ resolvePath yields "sprites/generated/<name>", relative to `base`.
-    var store = try loadForWorld(gpa, io, tmp.dir, "", &w);
+    var store = try loadForScene(gpa, io, tmp.dir, "", &w, .{});
     defer store.deinit();
 
     // The on-disk sheet loads exactly once; the absent one is skipped (not an error,
@@ -361,6 +391,88 @@ test "sprite: loadForWorld reads generated sheets and skips missing ones" {
     advance(&w, &store, 0.15); // 0.15 s at 8 fps → floor(1.2) = 1 → 1 % 2 = 1
     try testing.expectEqual(@as(u16, 1), w.getAnimationState(e).?.frame);
     try testing.expectEqual(@as(u16, 0), w.getAnimationState(missing).?.frame);
+}
+
+test "sprite: loadForScene includes a prototype-declared sheet even with an empty world" {
+    // Reproduces issue #113's load-order bug: `Sim.enterScene` only QUEUES
+    // `on_scene_enter` to fire on the first `sim.tick()`, and it is a scene's Lua
+    // handler that spawns sprited entities (e.g. `mana.spawn("pac", …)` in
+    // `games/pacman/rules.lua`) — so at load time (before that first tick)
+    // `world.sprites` is EMPTY even though the scene's prototype registry already
+    // knows `pac` needs `sprites/pac.msf`. The loader must pull that sheet in from
+    // `prototypes` alone, or the atlas built from an empty store stays zero-sized and
+    // the sprite never renders (a flat `Appearance` quad shows instead).
+    const gpa = testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const px = [_]u8{ 7, 7, 7, 7 };
+    const bytes = try msf.encode(gpa, .{
+        .width = 1,
+        .height = 1,
+        .frames = &.{&px},
+        .clips = &.{.{ .name = "chomp", .fps = 8, .frames = &.{ 0, 0 } }},
+    });
+    defer gpa.free(bytes);
+    try tmp.dir.createDirPath(io, "sprites/generated");
+    try tmp.dir.writeFile(io, .{ .sub_path = "sprites/generated/pac.msf", .data = bytes });
+
+    var w = World.init(gpa);
+    defer w.deinit();
+    // No entities spawned yet — `world.sprites` is empty, exactly like at load time.
+    try testing.expectEqual(@as(usize, 0), w.sprites.slice().len);
+
+    const protos = [_]prototype.Prototype{
+        .{ .name = "pac", .sprite = .{ .sheet = "sprites/pac.msf", .clip = "chomp" } },
+        .{ .name = "wall" }, // a prototype with no sprite at all must not error
+    };
+    const reg: prototype.Registry = .{ .prototypes = &protos };
+
+    var store = try loadForScene(gpa, io, tmp.dir, "", &w, reg);
+    defer store.deinit();
+
+    try testing.expectEqual(@as(usize, 1), store.count());
+    try testing.expect(store.get("sprites/pac.msf") != null);
+}
+
+test "sprite: loadForScene loads a sheet shared by a live entity and a prototype exactly once" {
+    // The same `ref` appears in BOTH sources (a spawned entity AND a prototype) — the
+    // common case for pacman, where the scene has already spawned pac by the time a
+    // later reload runs and the `pac` prototype still declares the same sheet. `loadOne`'s
+    // `store.get(ref)` guard must de-duplicate across the two passes, not decode twice.
+    const gpa = testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const px = [_]u8{ 7, 7, 7, 7 };
+    const bytes = try msf.encode(gpa, .{
+        .width = 1,
+        .height = 1,
+        .frames = &.{&px},
+        .clips = &.{.{ .name = "chomp", .fps = 8, .frames = &.{ 0, 0 } }},
+    });
+    defer gpa.free(bytes);
+    try tmp.dir.createDirPath(io, "sprites/generated");
+    try tmp.dir.writeFile(io, .{ .sub_path = "sprites/generated/pac.msf", .data = bytes });
+
+    var w = World.init(gpa);
+    defer w.deinit();
+    const e = try w.spawn();
+    try w.setSprite(e, .{ .sheet = "sprites/pac.msf", .clip = "chomp" });
+
+    const protos = [_]prototype.Prototype{
+        .{ .name = "pac", .sprite = .{ .sheet = "sprites/pac.msf", .clip = "chomp" } },
+    };
+    const reg: prototype.Registry = .{ .prototypes = &protos };
+
+    var store = try loadForScene(gpa, io, tmp.dir, "", &w, reg);
+    defer store.deinit();
+
+    // One shared ref across both sources ⇒ one decoded entry, not two.
+    try testing.expectEqual(@as(usize, 1), store.count());
+    try testing.expect(store.get("sprites/pac.msf") != null);
 }
 
 test "sprite: advance resolves the frame cursor from wall-clock time" {

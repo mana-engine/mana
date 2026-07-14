@@ -442,11 +442,17 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     try sim.addSystem(engine.input.inputMoveSystem); // #30: held keys → velocity (before nav)
     try registerStandardSystems(&sim);
 
-    // Load the sprite sheets this scene references (issue #113 phase 2; ADR 0031 §2):
-    // the DERIVED `.msf` artifacts under `<pkg>/.../generated/` (built by `mise run
-    // assets`). Decoded once here; each frame the animation cursor is advanced from
-    // wall-clock time below. GPU upload + textured sampling is phase 2b.
-    var sheets = try engine.sprite.loadForWorld(gpa, io, Io.Dir.cwd(), pkg, &sim.world);
+    // Load the sprite sheets this scene could reference (issue #113 phase 2; ADR 0031
+    // §2; phase 2b lifecycle fix): the DERIVED `.msf` artifacts under
+    // `<pkg>/.../generated/` (built by `mise run assets`) for BOTH `sim.world`'s live
+    // `Sprite` components AND `sim.prototypes`. The latter matters here — `enterScene`
+    // above only QUEUES `on_scene_enter` to fire on the first `sim.tick()` in the loop
+    // below, and it's that scene's Lua handler that spawns sprited entities (e.g. pac
+    // and the ghosts via `mana.spawn` in `games/pacman/rules.lua`), so `sim.world` is
+    // still empty right here. Without the prototype half, the atlas built below would
+    // be zero-sized and no sprite would ever render (ADR 0031 §4). Decoded once here;
+    // each frame the animation cursor is advanced from wall-clock time below.
+    var sheets = try engine.sprite.loadForScene(gpa, io, Io.Dir.cwd(), pkg, &sim.world, sim.prototypes);
     defer sheets.deinit();
 
     // Window before device (ADR 0012 §8): SDL video must be initialised so the Vulkan
