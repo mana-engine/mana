@@ -2,12 +2,12 @@
 // heading (rules.lua `pac_dir` default, native `nav` continuous steering — ADR 0027 —
 // not a grid teleport like Snake). Position at tick 20 is the deterministic float
 // this content + seed always reaches (verified by two independent runs agreeing
-// bit-for-bit; see tests/acceptance_scenarios.zig). Since #126 the `nav` steering is
-// axis-aligned and grid-locked (pac holds its lane centre exactly and stops flush at a
-// wall, never a diagonal slide) — on this fully open row pac still travels straight
-// left along row 9 (y stays exactly 4), only the exact float it has reached by tick 20
-// shifted (the retarget cadence lands its per-cell micro-pauses at slightly different
-// ticks), hence the value below.
+// bit-for-bit; see tests/acceptance_scenarios.zig). Since #139 pac targets the farthest
+// walkable cell in its heading, so on this fully open row it travels straight left along
+// row 9 (y stays exactly 4) at a CONSTANT speed — 0.1333 world units/tick (= speed 8 x
+// dt 1/60), no per-cell stall — reaching world x = -2.733 by tick 20 (motion begins at
+// tick 8, once pac's components register and the first 0.1s retarget fires). That
+// constant per-tick displacement is exactly the #139 stutter fix.
 .{
     .steps = 20,
     .input_trace = .{

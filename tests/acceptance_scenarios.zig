@@ -208,19 +208,26 @@ test "snake scenario: two independent replays of the eat staircase agree bit-for
 // for, per what the native tilemap/nav/collision sim supports today (continuous
 // steering, not a grid teleport; a ghost catch is a reset, not a kill). Steps 6/7 (Refs
 // #62) exercise the fourth ghost and the four distinct classic targeting rules
-// `rules.lua`'s `retarget` now applies by spawn index. Step 8 (#108) is the fix this
-// file's own numbers elsewhere already reflect: pac's nav target is the NEXT cell in
-// its heading, not a far one, so pac holds a straight line through an intersection and
-// stops dead at a wall instead of auto-turning around it. That single content change
-// (rules.lua `retarget`) also nudged every timing-sensitive checkpoint below: pac
-// covers ground very slightly slower now (the 0.1s retarget cadence occasionally
-// catches it mid-cell), so `at_tick` on steps 2-7 moved a little later; the *positions*
-// pac and the pickups occupy did not move at all. Steps 3 and 8 split the two turn
-// fundamentals cleanly (ADR 0028 one-fundamental-per-assertion): 3 is a *blocked* turn
-// holding pac in place (no auto-detour), 8's first checkpoint is an isolated *open* turn
-// changing pac's heading. Step 9 (Refs #102) is a targeted regression guard, not a
-// mechanic rung: it re-pins Pinky's quantitative ambush-offset arithmetic, which used to
-// ride on step 7 before #108's timing shift re-pointed 7 to Blinky's chase target. -----
+// `rules.lua`'s `retarget` now applies by spawn index. Step 8 keeps pac holding a
+// straight line through an intersection and stopping dead at a wall (no auto-corner):
+// since #139 pac's nav target is the FARTHEST walkable cell along its heading (not the
+// single next cell #108 used), a pure-axis target whose BFS shortest path is the straight
+// line, so pac still cannot corner-cut — but it now moves at CONSTANT speed with no
+// per-cell stall (the #139 stutter fix; the 1-cell-ahead target let pac reach its target
+// between 0.1s retargets and stall flush on each cell centre). Rebased onto #128's
+// tint/blink cues (fruit pickup added to maze.zon), the combined effect moved two
+// checkpoints: step 4's dot-eat now checks at tick 37 (was 43) so it lands BEFORE pac —
+// flowing continuously — reaches #128's fruit at world (-6,4) and eats it (score would
+// jump to 110); pac sits on the dot cell (-5,4) there, so the locator value is unchanged.
+// Step 6's score read is now 160 (dot 10 + fruit 100 + pellet 50) and its locator moved
+// to (-8,4) (was -7.4), because #139 pac parks flush on the pellet cell by tick 65. Every
+// other checkpoint — pac's parked cell, the ghost choreography, counts, ticks — is unchanged.
+// Steps 3 and 8 split the two turn fundamentals cleanly (ADR 0028 one-fundamental-per-
+// assertion): 3 is a *blocked* turn holding pac in place (no auto-detour), 8's first
+// checkpoint is an isolated *open* turn changing pac's heading. Step 9 (Refs #102) is a
+// targeted regression guard, not a mechanic rung: it re-pins Pinky's quantitative
+// ambush-offset arithmetic, which used to ride on step 7 before #108 re-pointed 7 to
+// Blinky's chase target. -----
 
 test "pacman scenario [spawn]: pac, four ghosts, and the curated pickups materialize" {
     try requireLua();

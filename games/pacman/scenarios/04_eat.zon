@@ -1,27 +1,29 @@
 // Pac-Man staircase, step 4/5: pac's default leftward path crosses a dot cell and
 // eats it via native collision (ADR 0025) + rules.lua's `on_collision_begin` — the
 // dot count drops by one and pac's score data component gains 10, the semantic
-// outcome a state hash cannot express. Since #108, pac's nav target is the next cell
-// in its heading rather than a far one; the dot sits on the same open row either way,
-// so pac reaches the identical spot, just a few ticks later (the 0.1s retarget
-// cadence occasionally catches pac mid-cell) — hence `at_tick` moved from 32 to 43.
-// Since #126 nav is axis-aligned/grid-locked; pac still eats the row-9 dot (world
-// (-5,4)) on its leftward march, and by tick 43 it sits on that now-empty cell centre
-// (world x = -5, lane-centred at y = 4), where the score reads back.
+// outcome a state hash cannot express. Since #139 pac's nav target is the FARTHEST
+// walkable cell in its heading, so it holds a straight lane at constant speed with no
+// per-cell stall — it eats the row-9 dot (world (-5,4)) at tick 32 on its leftward march.
+// The checkpoint isolates that dot-eat (ADR 0028 one-fundamental-per-assertion): #128's
+// fruit now sits one cell further left (world (-6,4)) and pac — flowing continuously —
+// reaches and eats it at tick 40 (score jumps 10 -> 110). So the checkpoint reads at tick
+// 37, where pac sits exactly on the now-empty dot cell centre (world (-5,4), lane-centred
+// at y = 4) with score 10 and the fruit still uneaten ahead. (The frightened staircase,
+// 06_frightened_catch.zon, covers the fruit+pellet score onward.)
 .{
-    .steps = 43,
+    .steps = 37,
     .input_trace = .{
-        .{ .ticks = 43, .keys = .{} },
+        .{ .ticks = 37, .keys = .{} },
     },
     .expect = .{
         .{
             .label = "eat: one dot is gone from the curated set (11 -> 10)",
-            .at_tick = 43,
+            .at_tick = 37,
             .check = .{ .data_count = .{ .name = "kind", .value = 3, .bound = .{ .min = 10, .max = 10 } } },
         },
         .{
             .label = "eat: eating a dot adds 10 to pac's score",
-            .at_tick = 43,
+            .at_tick = 37,
             .check = .{ .data_at = .{ .pos = .{ .x = -5.0, .y = 4, .eps = 0.02 }, .name = "score", .value = 10 } },
         },
     },

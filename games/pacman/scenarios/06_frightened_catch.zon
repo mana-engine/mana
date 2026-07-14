@@ -10,11 +10,14 @@
 // at tick 155: pac does NOT despawn the ghost (a catch is `send_home`, not a kill,
 // mirroring the non-frightened catch in 05_ghost_collision.zon) — Inky teleports to its
 // pen cell (10,5) -> world (1,0) and its own `frightened` flag clears, while the other
-// three ghosts are still within their 6s frightened window. Since #126 nav is axis-
-// aligned/grid-locked; the dot and pellet sit on the same open row either way, so pac
-// eats them at the identical positions, only re-timed (pac now parks flush at (-8,4),
-// and every actor's per-cell pacing shifted) — the pellet/score-60 checkpoint moved to
-// tick 65 and the downstream frightened catch to tick 155.
+// three ghosts are still within their 6s frightened window. Since #139 pac targets the
+// farthest walkable cell in its heading, so it holds a straight lane at constant speed
+// (no per-cell stall) and reaches its leftmost cell sooner: by tick 65 pac has flowed all
+// the way to col 1 and parks flush ON the power-pellet cell (world (-8,4)), where the
+// score-160 checkpoint reads (the pre-#139 per-cell stall left pac mid-corridor at
+// (-7.4,4) at this tick). The dot/fruit/pellet positions, the score value (160), and the
+// tick-155 frightened-catch snapshot are all unchanged by #139 (the catch is governed by
+// the fleeing ghost's own path, which #139 does not touch — pac is already parked).
 .{
     .steps = 155,
     .input_trace = .{
@@ -29,7 +32,7 @@
         .{
             .label = "frightened: the dot + fruit + power pellet raise pac's score to 160",
             .at_tick = 65,
-            .check = .{ .data_at = .{ .pos = .{ .x = -7.4, .y = 4, .eps = 0.02 }, .name = "score", .value = 160 } },
+            .check = .{ .data_at = .{ .pos = .{ .x = -8.0, .y = 4, .eps = 0.02 }, .name = "score", .value = 160 } },
         },
         .{
             .label = "frightened catch: pac reaching a frightened ghost sends it home, not a kill (120 entities, none despawned)",
