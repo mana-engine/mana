@@ -84,6 +84,15 @@ feature or entity co-locate its own Lua + data + assets (§3). The manifest shri
 identity + entry points + cross-cutting settings; bulk content is discovered by
 convention. Concretely:
 
+> **Standing steer (user, 2026-07-15): layout is the game developer's call.** This ADR
+> only *suggests* a convention; it must never *mandate* one. The load-bearing job of the
+> engine here is to make the recommended shape **efficient and zero-ceremony** (sorted
+> globbing that merges whatever conventional directories/feature folders a package
+> chooses to use) — not to police a package's internal structure. Where a rule below
+> reads as prescriptive it is a *guideline + the efficient path the loader supports*, and
+> the concrete mechanics (§3) are deliberately left to the implementation and the game
+> author's judgement.
+
 ### 1. Lua: a `scripts/` directory, one entry, modules via a VFS-scoped `require`
 
 - The canonical home is **`scripts/`** (reconciling the divergence in favour of the
