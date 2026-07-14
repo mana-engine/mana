@@ -113,9 +113,14 @@ runtime (exe) + tools → engine
   --mise`).
 - **All commands are mise tasks** (CLAUDE.md, hk, CI, humans call the same):
   - `mise run build` — compile engine + runner (native).
-  - `mise run test` — all unit + integration tests.
+  - `mise run test` — all unit + integration tests (Lua backend compiled out, so
+    the pacman/snake acceptance staircase in `tests/acceptance_scenarios.zig`
+    compiles but skips — see `test-lua`).
+  - `mise run test-lua` — same suite with `-Denable-lua`: the pass that actually
+    *executes* the acceptance staircase instead of skipping it.
   - `mise run fmt` / `fmt-check` — format in place / verify (no write).
-  - `mise run check` — fmt-check + build + test (the canonical green gate).
+  - `mise run check` — fmt-check + build + test + test-lua (the canonical green
+    gate; the staircase must run, not just compile, for a merge to be clean).
   - `mise run run -- games/sandbox` — headless runner.
   - `mise run cross-win` — `-Dtarget=x86_64-windows` portability gate.
 - **Quiet on success, loud on failure** — tasks print a summary line on pass, full

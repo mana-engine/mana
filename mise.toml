@@ -23,6 +23,17 @@ run = "zig build"
 description = "Run all unit + integration tests."
 run = "zig build test"
 
+[tasks.test-lua]
+# Without `-Denable-lua`, `script_api_version == 0` and every test in
+# `tests/acceptance_scenarios.zig` (the pacman/snake acceptance staircase, ADR 0028
+# layer 2) hits `requireLua()`'s early `error.SkipZigTest` — the plain `test` task
+# above only compiles the staircase, it never actually executes a single step
+# (issue #163). This pass turns those skips into real runs: same test suite, Lua
+# backend compiled in, so the staircase (and the Lua-gated `script`/`lua.zig`
+# backend tests) genuinely execute instead of silently no-opping behind a green gate.
+description = "Run all tests with the Lua scripting backend enabled — executes the pacman/snake acceptance staircase instead of skipping it."
+run = "zig build -Denable-lua test"
+
 [tasks.fmt]
 # `--exclude zig-pkg`: fetched dependency sources (e.g. ziglua's vendored Lua
 # bindings) are not fmt-clean and are not ours to format. zig eagerly fetches even
@@ -35,8 +46,13 @@ description = "Verify formatting without writing (fails loudly on drift)."
 run = "zig fmt --check --exclude zig-pkg ."
 
 [tasks.check]
-description = "Full gate: fmt-check + build + test. The canonical green check."
-depends = ["fmt-check", "build", "test"]
+# Runs both test passes: plain `test` (Lua compiled out, ~everything else) and
+# `test-lua` (`-Denable-lua`) — the latter is what actually executes the pacman/snake
+# acceptance staircase in `tests/acceptance_scenarios.zig` instead of skipping it
+# (issue #163). Both are part of the canonical green gate; a merge is not clean
+# unless the staircase genuinely ran and passed.
+description = "Full gate: fmt-check + build + test + test-lua. The canonical green check."
+depends = ["fmt-check", "build", "test", "test-lua"]
 
 [tasks.run]
 description = "Run the runner headless: mise run run -- games/sandbox"
