@@ -480,6 +480,30 @@ test "renderFrame: composites a flat quad, then a textured sprite over it" {
     }
 }
 
+test "captureFrame: atlas top row composites to the output top (V orientation, both backends)" {
+    // The one orientation invariant that must hold IDENTICALLY across backends, so a
+    // future Vulkan-side flip is caught headlessly instead of by a user (issue #148): a
+    // sprite's atlas TOP row (v=0) must land in the TOP rows of the captured image. A 1x2
+    // atlas — opaque white top texel, fully transparent bottom texel — drawn as a full-
+    // frame quad over an opaque-black clear: the top half must be white, the bottom half
+    // must stay black. The null CPU rasterizer verifies this now; under `-Denable-vulkan`
+    // on a real device it verifies the negative-height viewport cancels naga's clip-space
+    // Y-flip. Without a GPU, `Device.init` (inside `captureFrame`) fails — skip there, since
+    // the null path is the one this build can actually run.
+    const atlas = [_]u8{ 255, 255, 255, 255, 0, 0, 0, 0 }; // row0 opaque white, row1 transparent
+    const sprites = [_]SpriteQuad{.{ .center = .{ 0, 0 }, .half = .{ 1, 1 }, .uv_min = .{ 0, 0 }, .uv_max = .{ 1, 1 }, .tint = .{ 1, 1, 1 } }};
+    const pixels = captureFrame(std.testing.allocator, 4, 4, &.{}, &sprites, &atlas, 1, 2, .{ 0, 0, 0, 1 }) catch |e| {
+        if (backend != .null_backend) return error.SkipZigTest; // no Vulkan device in this env
+        return e;
+    };
+    defer std.testing.allocator.free(pixels);
+    // Row 0 (top) samples the atlas top row → opaque white.
+    try std.testing.expectEqual(@as(u8, 255), pixels[0]); // R at (0,0)
+    // Row 3 (bottom) samples the atlas bottom row (transparent) → the black clear shows.
+    const bottom = (3 * 4 + 0) * 4;
+    try std.testing.expectEqual(@as(u8, 0), pixels[bottom]); // R at (0,3)
+}
+
 test {
     _ = port;
     if (backend == .null_backend) _ = impl;
