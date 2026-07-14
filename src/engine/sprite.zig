@@ -39,9 +39,11 @@ const Entry = struct {
     sheet: msf.Sheet,
 };
 
-/// Caches every distinct `.msf` sheet a world's `Sprite` components reference, decoded
-/// once at load and keyed by the reference string. The store owns the decoded sheets;
-/// reference keys are borrowed from the world (which must outlive the store).
+/// Caches every distinct `.msf` sheet a scene can reference, decoded once at load and
+/// keyed by the reference string. The store owns the decoded sheets; reference keys are
+/// borrowed from whichever source supplied them — a live world's `Sprite` component OR a
+/// `prototype.Registry` entry's `.sprite.sheet` (see `loadForScene`) — so every source
+/// whose ref is held must outlive the store.
 pub const SheetStore = struct {
     gpa: Allocator,
     entries: std.ArrayList(Entry) = .empty,
@@ -430,6 +432,45 @@ test "sprite: loadForScene includes a prototype-declared sheet even with an empt
     var store = try loadForScene(gpa, io, tmp.dir, "", &w, reg);
     defer store.deinit();
 
+    try testing.expectEqual(@as(usize, 1), store.count());
+    try testing.expect(store.get("sprites/pac.msf") != null);
+}
+
+test "sprite: loadForScene loads a sheet shared by a live entity and a prototype exactly once" {
+    // The same `ref` appears in BOTH sources (a spawned entity AND a prototype) — the
+    // common case for pacman, where the scene has already spawned pac by the time a
+    // later reload runs and the `pac` prototype still declares the same sheet. `loadOne`'s
+    // `store.get(ref)` guard must de-duplicate across the two passes, not decode twice.
+    const gpa = testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const px = [_]u8{ 7, 7, 7, 7 };
+    const bytes = try msf.encode(gpa, .{
+        .width = 1,
+        .height = 1,
+        .frames = &.{&px},
+        .clips = &.{.{ .name = "chomp", .fps = 8, .frames = &.{ 0, 0 } }},
+    });
+    defer gpa.free(bytes);
+    try tmp.dir.createDirPath(io, "sprites/generated");
+    try tmp.dir.writeFile(io, .{ .sub_path = "sprites/generated/pac.msf", .data = bytes });
+
+    var w = World.init(gpa);
+    defer w.deinit();
+    const e = try w.spawn();
+    try w.setSprite(e, .{ .sheet = "sprites/pac.msf", .clip = "chomp" });
+
+    const protos = [_]prototype.Prototype{
+        .{ .name = "pac", .sprite = .{ .sheet = "sprites/pac.msf", .clip = "chomp" } },
+    };
+    const reg: prototype.Registry = .{ .prototypes = &protos };
+
+    var store = try loadForScene(gpa, io, tmp.dir, "", &w, reg);
+    defer store.deinit();
+
+    // One shared ref across both sources ⇒ one decoded entry, not two.
     try testing.expectEqual(@as(usize, 1), store.count());
     try testing.expect(store.get("sprites/pac.msf") != null);
 }
