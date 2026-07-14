@@ -1,0 +1,49 @@
+// Pac-Man staircase, step 10: issue #164 — every existing scenario presses only
+// "up" (dr=-1); nothing pins the opposite key, so a regression that broke "down"
+// specifically (the inverse of the #159/#161 orientation fix this staircase already
+// guards) could land undetected. This is `08_straight_through.zon`'s trip in
+// reverse: press "up" the SAME way 08 does (reaching column 8's row-7 centre, world
+// (-1,2), flush against the row-6 wall — see that file for why), then press "down"
+// and ride the same column back — proving `on_key("down")` sets dr=+1 (increasing
+// world-y, downward on screen post-#155's flip) and that a fresh nav retarget picks
+// it up correctly, not just that "up" still works.
+//
+// Column 8 is NOT symmetric top-to-bottom (row 6's ghost-pen antechamber walls have
+// no top-side mirror), but the row 9 <-> row 7 <-> row 9 round trip through row 8's
+// gap is exactly the same corridor 08 already walks, so this is a real regression
+// probe, not a synthetic one: "down" from (8,7) has row 8 (open) then row 9 (open,
+// pac's own home row) then row 10 (the solid bottom border, same wall
+// `03_turn.zon`/`08_straight_through.zon`'s comments note sits one cell below pac's
+// start row) — so `farthest_open` stops pac flush back at world (-1,4), its own
+// start cell.
+//
+// Ticks (measured by direct replay, not guessed): holding "up" from tick 2 reaches
+// the row-7 flush stop by tick 22 and holds there (identical to 08's own trace).
+// Switching to "down" at tick 41, the next 0.1s retarget (RETARGET) picks up the new
+// heading a few ticks later and pac starts descending at tick 45, at the SAME
+// constant 0.1333 world-units/tick (speed 8 x dt 1/60) 08 measures — reaching y =
+// 2.8 by tick 50 (the "open turn" checkpoint, mirroring 08's tick-10 checkpoint: pac
+// has clearly left row 7 but not yet reached row 9) and flush at y = 4.0 by tick 59,
+// holding there through tick 90 (this scenario's end) well before any ghost finds
+// pac parked at its own start cell (a direct replay shows the first catch at tick
+// 99, only once `on_key` stops being exercised here).
+.{
+    .steps = 90,
+    .input_trace = .{
+        .{ .ticks = 1, .keys = .{} },
+        .{ .ticks = 39, .keys = .{"up"} },
+        .{ .ticks = 50, .keys = .{"down"} },
+    },
+    .expect = .{
+        .{
+            .label = "down (open turn): pressing down after reaching row 7 turns pac's heading downward — y past row 7, still on column 8 (x=-1)",
+            .at_tick = 50,
+            .check = .{ .occupied = .{ .x = -1.0, .y = 2.8, .eps = 0.02 } },
+        },
+        .{
+            .label = "down (stop): pac rides column 8 back down through row 8's gap and stops flush at its own start row, blocked by the bottom border (dr=+1, increasing world-y, confirmed all the way home)",
+            .at_tick = 90,
+            .check = .{ .occupied = .{ .x = -1.0, .y = 4.0, .eps = 0.02 } },
+        },
+    },
+}

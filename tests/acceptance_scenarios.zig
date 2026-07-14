@@ -230,7 +230,11 @@ test "snake scenario: two independent replays of the eat staircase agree bit-for
 // checkpoint is an isolated *open* turn changing pac's heading. Step 9 (Refs #102) is a
 // targeted regression guard, not a mechanic rung: it re-pins Pinky's quantitative
 // ambush-offset arithmetic, which used to ride on step 7 before #108 re-pointed 7 to
-// Blinky's chase target. -----
+// Blinky's chase target. Step 10 (issue #164) is another targeted regression guard: every
+// prior vertical-movement check pressed only "up" (dr=-1), so it rides step 8's exact
+// up trip and then presses "down", proving dr=+1 (increasing world-y, downward on
+// screen) works too — the direction #159/#161's orientation fix could regress without
+// any other step noticing. -----
 
 test "pacman scenario [spawn]: pac, four ghosts, and the curated pickups materialize" {
     try requireLua();
@@ -285,4 +289,9 @@ test "pacman scenario: two independent replays of the eat staircase agree bit-fo
 test "pacman scenario: two independent replays of the mode-flip staircase agree bit-for-bit" {
     try requireLua();
     try expectDeterministic(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/07_mode_flip.zon");
+}
+
+test "pacman scenario [down]: pressing down after reaching row 7 rides column 8 back down to pac's start row (dr=+1, issue #164 — no scenario had ever pressed 'down')" {
+    try requireLua();
+    try expectScenarioPasses(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/10_down_through.zon");
 }
