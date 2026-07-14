@@ -1,0 +1,38 @@
+// food — a sprite recipe for `tools/spritegen` (ADR 0031), the snake's pickup
+// (issue #107). This ZON file is the SOURCE OF TRUTH (invariant #1); the sheet + preview
+// it generates are DERIVED artifacts, never committed (see `.gitignore`). Regenerate +
+// view with:
+//
+//   mise run assets              # generates into games/snake/sprites/generated/ (gitignored)
+//   <open> games/snake/sprites/generated/food_preview.png
+//
+// Genre lives HERE in content, never in the tool (invariant #6): `spritegen` knows only
+// generic primitives (disc, rect). "food" is this data file.
+//
+// A small red apple: a disc body, a stem, and a highlight — pulsing gently between two
+// sizes so it reads as a "grab me" pickup, not a flat dot. Non-directional (no facing):
+// food never moves, unlike `head.zon`.
+.{
+    .size = 32,
+    .palette = .{
+        .{ .name = "apple", .rgba = .{ 215, 55, 55, 255 } },
+        .{ .name = "leaf", .rgba = .{ 70, 165, 80, 255 } },
+        .{ .name = "shine", .rgba = .{ 255, 205, 205, 255 } },
+    },
+    .background = null,
+    .frames = .{
+        .{ .name = "small", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.55, .r = 0.32, .color = "apple" } },
+            .{ .rect = .{ .x = 0.47, .y = 0.14, .w = 0.06, .h = 0.16, .color = "leaf" } },
+            .{ .disc = .{ .cx = 0.40, .cy = 0.44, .r = 0.055, .color = "shine" } },
+        } },
+        .{ .name = "big", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.55, .r = 0.36, .color = "apple" } },
+            .{ .rect = .{ .x = 0.47, .y = 0.12, .w = 0.06, .h = 0.16, .color = "leaf" } },
+            .{ .disc = .{ .cx = 0.40, .cy = 0.46, .r = 0.065, .color = "shine" } },
+        } },
+    },
+    .animations = .{
+        .{ .name = "idle", .fps = 2, .frames = .{ 0, 1, 0 } },
+    },
+}

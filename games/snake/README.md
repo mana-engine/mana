@@ -31,3 +31,18 @@ zig build -Denable-lua run -- games/snake --scenario games/snake/scenarios/04_ea
 
 or the whole suite via `zig build -Denable-lua test` (`tests/acceptance_scenarios.zig`
 drives every file in this directory against `engine.scenario`, the generic referee).
+
+## Sprites (issue #107)
+
+`sprites/head.zon`, `sprites/segment.zon`, `sprites/food.zon` are `tools/spritegen`
+recipes (ADR 0031) — the same genre-neutral generator and sprite/animation component
+`games/pacman` uses, proving they are not Pac-Man-specific. `head.zon` is DIRECTIONAL
+(ADR 0033: right/up/down authored, left mirrored) so the head faces its travel
+direction; `segment.zon`/`food.zon` are non-directional idle animations. `mise run
+assets` regenerates all three into `sprites/generated/` (gitignored); `prototypes.zon`
+wires them onto the `head`/`segment`/`food` prototypes `rules.lua` spawns. Because
+Snake teleports via `mana.set_position` rather than moving by velocity integration,
+`rules.lua`'s `face` helper gives the head a magnitude-negligible `Velocity` purely to
+drive the engine's directional-facing latch — see its doc comment for why the
+magnitude cannot perturb the grid-snapped position (or the acceptance staircase
+above, which pins the exact grid cells).

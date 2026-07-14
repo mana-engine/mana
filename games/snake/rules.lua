@@ -16,6 +16,24 @@ local body = {}                  -- ordered cells, head first: { {x,y,handle}, .
 local food = { x = 0, y = 0, handle = nil }
 local rng = 1 -- content-side deterministic PRNG for food, until #47 wires a seeded Sim RNG
 
+-- The head's sprite is DIRECTIONAL (ADR 0033, issue #107: `sprites/head.zon`, right/up/
+-- down authored, left mirrored). The engine picks a facing from the entity's latched
+-- `AnimationState.heading`, which `sprite.advance` writes from `Velocity` whenever it is
+-- non-zero (ADR 0033 §3) — but Snake never moves by velocity integration, it teleports
+-- via `mana.set_position` on each grid step (`step` below). Giving the head a
+-- FULL-magnitude `Velocity` would double-move it: the native `movement` system
+-- (`Transform.pos += Velocity.v * dt`) runs every sim tick, not just on a grid step, so
+-- it would drift the head between steps and could shift it clear of the exact grid cell
+-- the acceptance scenarios check (`scenario.Position.eps = 0.01`). `FACING_EPS` is
+-- non-zero only to satisfy the latch's `!= 0` test; at this magnitude the worst-case
+-- drift between two grid snaps (9 ticks at 60 Hz, `STEP`/`dt`) is
+-- `FACING_EPS * STEP` ≈ 1.5e-5 world units — ≈2.8 orders of magnitude under that
+-- 0.01 tolerance, so it never perturbs a check.
+local FACING_EPS = 0.0001
+local function face(handle, dx, dy)
+    mana.set_velocity(handle, dx * FACING_EPS, dy * FACING_EPS, 0)
+end
+
 -- LCG → an integer in [0, n). Deterministic: math.random is removed from the sandbox
 -- (ADR 0003 §7), so content that wants variety rolls its own until mana.random lands.
 local function rand(n)
@@ -51,9 +69,10 @@ local function place_food()
     end
 end
 
--- Append a body segment at (x, y).
-local function grow_at(x, y)
-    table.insert(body, { x = x, y = y, handle = mana.spawn("segment", x, y, 0) })
+-- Append a body segment at (x, y). `proto` defaults to a plain body "segment"; `reset`
+-- passes "head" for the lead cell so only it carries the directional sprite.
+local function grow_at(x, y, proto)
+    table.insert(body, { x = x, y = y, handle = mana.spawn(proto or "segment", x, y, 0) })
 end
 
 -- The static wall ring one cell outside the play field — the boundary the snake dies
@@ -71,15 +90,17 @@ end
 local function reset()
     for _, seg in ipairs(body) do mana.despawn(seg.handle) end
     body = {}
-    grow_at(0, 0) -- head is body[1], at the world origin (screen centre)
     dir = { x = 1, y = 0 }
     pending = { x = 1, y = 0 }
+    grow_at(0, 0, "head") -- head is body[1], at the world origin (screen centre)
+    face(body[1].handle, dir.x, dir.y)
     place_food()
 end
 
 -- One grid step: advance the head, drag the body, eat/grow, restart on collision.
 local function step()
     dir = pending
+    face(body[1].handle, dir.x, dir.y)
     local hx, hy = body[1].x + dir.x, body[1].y + dir.y
     local eating = (hx == food.x and hy == food.y)
 

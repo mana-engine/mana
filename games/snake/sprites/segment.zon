@@ -1,0 +1,34 @@
+// segment — a sprite recipe for `tools/spritegen` (ADR 0031), the snake's body cell
+// (issue #107). This ZON file is the SOURCE OF TRUTH (invariant #1); the sheet + preview
+// it generates are DERIVED artifacts, never committed (see `.gitignore`). Regenerate +
+// view with:
+//
+//   mise run assets              # generates into games/snake/sprites/generated/ (gitignored)
+//   <open> games/snake/sprites/generated/segment_preview.png
+//
+// Genre lives HERE in content, never in the tool (invariant #6): `spritegen` knows only
+// the generic `rounded_rect` primitive. "segment" is this data file.
+//
+// A rounded green scale plate with a lighter highlight that fades in and out — a subtle
+// "idle" shimmer so a stationary chain of segments still reads as alive. Non-directional
+// (no facing): a body segment does not need to face anywhere, unlike `head.zon`.
+.{
+    .size = 32,
+    .palette = .{
+        .{ .name = "body", .rgba = .{ 55, 175, 95, 255 } },
+        .{ .name = "shine", .rgba = .{ 170, 230, 180, 255 } },
+    },
+    .background = null,
+    .frames = .{
+        .{ .name = "plain", .ops = .{
+            .{ .rounded_rect = .{ .x = 0.10, .y = 0.10, .w = 0.80, .h = 0.80, .radius = 0.30, .color = "body" } },
+        } },
+        .{ .name = "shine", .ops = .{
+            .{ .rounded_rect = .{ .x = 0.10, .y = 0.10, .w = 0.80, .h = 0.80, .radius = 0.30, .color = "body" } },
+            .{ .rounded_rect = .{ .x = 0.16, .y = 0.16, .w = 0.30, .h = 0.18, .radius = 0.08, .color = "shine" } },
+        } },
+    },
+    .animations = .{
+        .{ .name = "idle", .fps = 2, .frames = .{ 0, 1, 0 } },
+    },
+}
