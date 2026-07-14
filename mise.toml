@@ -64,7 +64,10 @@ run = "zig build spritegen --"
 # is how Lane B's engine/--play obtains sheets — a build-time generate from committed
 # recipes, not a committed binary. Add a line here per new recipe.
 description = "(Re)generate all sprite sheets from committed recipes into gitignored generated/ dirs."
-run = "zig build spritegen -- games/pacman/sprites/pac.zon games/pacman/sprites/generated"
+run = [
+    "zig build spritegen -- games/pacman/sprites/pac.zon games/pacman/sprites/generated",
+    "zig build spritegen -- games/pacman/sprites/ghost.zon games/pacman/sprites/generated",
+]
 
 [tasks.msfpreview]
 # Headless animated previewer (issue #129, phase 1): given a generated `.msf`, renders
