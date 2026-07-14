@@ -12,6 +12,9 @@
 //!
 //! Gated on `-Denable-lua`: both packages are pure Lua content (`rules.lua`), so
 //! without the scripting backend every test here skips (`script_api_version == 0`).
+//! Plain `mise run test`/`build` never passes that flag, so this file only ever
+//! *compiled* there — `mise run test-lua` (wired into `mise run check`, issue #163)
+//! is what actually executes the staircase.
 
 const std = @import("std");
 const core = @import("core");

@@ -32,7 +32,8 @@ hooks {
     }
     ["pre-push"] {
         steps {
-            // Full gate: fmt-check + build + test (determinism runs in the suite).
+            // Full gate: fmt-check + build + test + test-lua (determinism and the
+            // Lua-gated pacman/snake acceptance staircase both run in the suite).
             ["check"] {
                 check = "mise run check"
             }
