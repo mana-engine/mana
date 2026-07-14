@@ -25,13 +25,13 @@ const Vec2 = core.Vec2;
 
 /// Frame system: detect collider overlaps this tick and enqueue a `collision_begin`
 /// event per overlapping pair. Scratch state (positioned bodies, the spatial hash,
-/// the candidate-pair list) is allocated in a per-tick arena over `ctx.gpa` and
-/// freed before returning — a per-frame arena, nothing retained. Static–static pairs
-/// are skipped; layer masks filter the remainder before the narrow-phase test.
+/// the candidate-pair list) is allocated from `ctx.scratch` (issue #153: `Sim`'s
+/// reusable per-tick arena, reset — capacity retained — before this system runs;
+/// never `init`/`deinit`ed here) and never read after this call returns. Static–
+/// static pairs are skipped; layer masks filter the remainder before the
+/// narrow-phase test.
 pub fn collisionSystem(ctx: *Context) SystemError!void {
-    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    const arena = ctx.scratch;
 
     const world = ctx.world;
     const indices = world.colliders.entities(); // []const u32, collider-insertion order
