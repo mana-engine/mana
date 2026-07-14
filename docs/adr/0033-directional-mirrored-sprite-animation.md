@@ -1,6 +1,6 @@
 # 0033. Directional + mirrored sprite animation: facing-selected clips replace wedge rotation
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-14
 
 ## Context

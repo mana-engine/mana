@@ -1,6 +1,6 @@
 # 0032. Animated-sprite interchange: no existing format fits — evolve MSF, don't replace it
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-14
 
 ## Context
