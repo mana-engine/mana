@@ -1,0 +1,81 @@
+// ghost — a sprite recipe for `tools/spritegen` (ADR 0031, ADR 0033, issue #106). This
+// ZON file is the SOURCE OF TRUTH (invariant #1); the sheet + preview it generates are
+// DERIVED artifacts, never committed (see `.gitignore`). Regenerate + view with:
+//
+//   mise run assets              # generates into games/pacman/sprites/generated/ (gitignored)
+//   <open> games/pacman/sprites/generated/ghost_preview.png
+//
+// Genre lives HERE in content, never in the tool (invariant #6): `spritegen` knows only
+// generic primitives (dome, eyes, …). "ghost" is this data file.
+//
+// ONE shared recipe for all four Pac-Man ghosts (Blinky/Pinky/Inky/Clyde), not four —
+// the body is painted in near-WHITE ("body"/"eye" palette entries) on purpose, because
+// `render.projectSprites` already multiplies the sampled texel by the entity's resolved
+// tint (`TintCue` cursor color when active, else `Appearance.color`; ADR 0031 §1, issue
+// #128) — the EXACT SAME precedence the flat-quad path uses. Painting white and letting
+// each `games/pacman/prototypes.zon` ghost prototype's own `appearance.color` (red/pink/
+// cyan/orange) tint it is what recolors this one sheet per ghost, and it is *also* what
+// makes the ghosts' existing `frightened` tint_cue (0/1/2 -> blue solid/blinking, wired
+// in #128, ADR 0033 phase 2) paint the SAME sheet frightened-blue with zero new engine
+// surface and zero extra art: a white body times a blue tint is blue, times red is red.
+// A colour-per-ghost recipe would instead need the frightened tint to multiply an
+// already-red body by blue, which lands on a muddy purple, not "frightened blue" — so
+// painting white is the only design that makes the existing tint machinery correct.
+//
+// A dome + scalloped skirt body (the `dome` primitive already models this — ADR 0031
+// §6) with a pair of eyes whose pupils look toward the travel direction (ADR 0033):
+// two skirt-wave phases (a gentle bob, the classic ghost "flowing skirt") for each of
+// right, up, and down. LEFT is omitted on purpose: the engine mirrors it from `right` by
+// X-flipping the UVs ("absence is the signal", ADR 0033 §2) — which also flips the
+// pupils' look direction along with the body, so the mirrored ghost looks left with no
+// extra authored frames.
+.{
+    .size = 32,
+    .palette = .{
+        .{ .name = "body", .rgba = .{ 255, 255, 255, 255 } },
+        .{ .name = "eye", .rgba = .{ 255, 255, 255, 255 } },
+        .{ .name = "pupil", .rgba = .{ 15, 15, 60, 255 } },
+    },
+    // Transparent background so the sprite composites cleanly onto the maze.
+    .background = null,
+    .frames = .{
+        // --- Right-facing (pupils look toward +x), frames 0..1 (skirt bob) ---
+        .{ .name = "right_a", .ops = .{
+            .{ .dome = .{ .cx = 0.5, .cy = 0.42, .r = 0.40, .height = 0.32, .bumps = 4, .skirt = 0.08, .color = "body" } },
+            .{ .eyes = .{ .cx = 0.5, .cy = 0.40, .spacing = 0.32, .r = 0.13, .pupil_r = 0.065, .look_x = 0.05, .look_y = 0, .white = "eye", .pupil = "pupil" } },
+        } },
+        .{ .name = "right_b", .ops = .{
+            .{ .dome = .{ .cx = 0.5, .cy = 0.42, .r = 0.40, .height = 0.32, .bumps = 4, .skirt = 0.15, .color = "body" } },
+            .{ .eyes = .{ .cx = 0.5, .cy = 0.40, .spacing = 0.32, .r = 0.13, .pupil_r = 0.065, .look_x = 0.05, .look_y = 0, .white = "eye", .pupil = "pupil" } },
+        } },
+        // --- Down-facing (pupils look toward +y / screen bottom), frames 2..3 ---
+        .{ .name = "down_a", .ops = .{
+            .{ .dome = .{ .cx = 0.5, .cy = 0.42, .r = 0.40, .height = 0.32, .bumps = 4, .skirt = 0.08, .color = "body" } },
+            .{ .eyes = .{ .cx = 0.5, .cy = 0.40, .spacing = 0.32, .r = 0.13, .pupil_r = 0.065, .look_x = 0, .look_y = 0.06, .white = "eye", .pupil = "pupil" } },
+        } },
+        .{ .name = "down_b", .ops = .{
+            .{ .dome = .{ .cx = 0.5, .cy = 0.42, .r = 0.40, .height = 0.32, .bumps = 4, .skirt = 0.15, .color = "body" } },
+            .{ .eyes = .{ .cx = 0.5, .cy = 0.40, .spacing = 0.32, .r = 0.13, .pupil_r = 0.065, .look_x = 0, .look_y = 0.06, .white = "eye", .pupil = "pupil" } },
+        } },
+        // --- Up-facing (pupils look toward -y / screen top), frames 4..5 ---
+        .{ .name = "up_a", .ops = .{
+            .{ .dome = .{ .cx = 0.5, .cy = 0.42, .r = 0.40, .height = 0.32, .bumps = 4, .skirt = 0.08, .color = "body" } },
+            .{ .eyes = .{ .cx = 0.5, .cy = 0.40, .spacing = 0.32, .r = 0.13, .pupil_r = 0.065, .look_x = 0, .look_y = -0.06, .white = "eye", .pupil = "pupil" } },
+        } },
+        .{ .name = "up_b", .ops = .{
+            .{ .dome = .{ .cx = 0.5, .cy = 0.42, .r = 0.40, .height = 0.32, .bumps = 4, .skirt = 0.15, .color = "body" } },
+            .{ .eyes = .{ .cx = 0.5, .cy = 0.40, .spacing = 0.32, .r = 0.13, .pupil_r = 0.065, .look_x = 0, .look_y = -0.06, .white = "eye", .pupil = "pupil" } },
+        } },
+    },
+    .animations = .{
+        // A gentle skirt-wave bob at ~4 fps, per facing. `left` is omitted — the engine
+        // renders it by X-flipping `right` (ADR 0033 §2), pupils included.
+        .{
+            .name = "walk",
+            .fps = 4,
+            .right = .{ 0, 1 },
+            .down = .{ 2, 3 },
+            .up = .{ 4, 5 },
+        },
+    },
+}

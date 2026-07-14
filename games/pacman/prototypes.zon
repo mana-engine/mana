@@ -35,9 +35,13 @@
 // distinguish them. A per-instance appearance override at the `mana.spawn` call site is
 // explicitly out of scope (ADR 0016): a variant is a second named prototype.
 //
-// -- TODO(#101 follow-up): a ghost's classic dome-plus-skirt silhouette needs a
-// `polygon` shape (a vertex list), which `gpu.Shape` deliberately does not have yet
-// (no concrete second use, ADR 0030 addendum). Ghosts render as `.circle` for now.
+// Ghosts additionally carry a `.sprite` (issue #106, ADR 0031/0033): a shared
+// `sprites/ghost.msf` sheet (one recipe, `games/pacman/sprites/ghost.zon`, painted
+// white on purpose — see that file's header) whose per-ghost colour AND
+// frightened-blue both fall out of the SAME `appearance.color`/`tint_cue` the flat
+// `.circle` fallback already used (no new engine surface). `appearance` stays as the
+// flat-quad fallback (headless SVG, and the GPU path until Vulkan's textured
+// pipeline lands) and supplies the untinted quad colour/size/shape.
 .{
     .prototypes = .{
         // The player. `score` is a data component so the engine (a debug overlay, a
@@ -88,13 +92,16 @@
         // both `retarget`'s scatter-while-frightened logic and the `tint_cue` below, so
         // no new per-entity state and no new `mana` API: a native render-time system
         // (`tint.advance`) reads the value a script already writes and re-tints the
-        // ghost through its existing `Appearance.color` fallback.
+        // ghost through its `Appearance.color` fallback AND, since #106, the SAME
+        // resolved tint multiplies the `sprite.ghost.msf` texel (`render.projectSprites`,
+        // ADR 0031 §1) — one mechanism, two render paths.
         .{
             .name = "ghost_red",
             .velocity = .{ .v = .{ .x = 0, .y = 0, .z = 0 } },
             .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
             .nav_agent = .{ .speed = 5 },
             .appearance = .{ .color = .{ 0.9, 0.2, 0.2 }, .size = 0.7, .shape = .circle },
+            .sprite = .{ .sheet = "sprites/ghost.msf", .clip = "walk", .loop = .loop },
             .tint_cue = .{
                 .selector = "frightened",
                 .states = .{
@@ -115,6 +122,7 @@
             .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
             .nav_agent = .{ .speed = 5 },
             .appearance = .{ .color = .{ 0.95, 0.6, 0.8 }, .size = 0.7, .shape = .circle },
+            .sprite = .{ .sheet = "sprites/ghost.msf", .clip = "walk", .loop = .loop },
             .tint_cue = .{
                 .selector = "frightened",
                 .states = .{
@@ -135,6 +143,7 @@
             .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
             .nav_agent = .{ .speed = 5 },
             .appearance = .{ .color = .{ 0.3, 0.85, 0.9 }, .size = 0.7, .shape = .circle },
+            .sprite = .{ .sheet = "sprites/ghost.msf", .clip = "walk", .loop = .loop },
             .tint_cue = .{
                 .selector = "frightened",
                 .states = .{
@@ -155,6 +164,7 @@
             .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
             .nav_agent = .{ .speed = 5 },
             .appearance = .{ .color = .{ 0.95, 0.65, 0.2 }, .size = 0.7, .shape = .circle },
+            .sprite = .{ .sheet = "sprites/ghost.msf", .clip = "walk", .loop = .loop },
             .tint_cue = .{
                 .selector = "frightened",
                 .states = .{
