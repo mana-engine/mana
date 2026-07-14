@@ -30,41 +30,20 @@ local function clampi(v, lo, hi)
     if v < lo then return lo elseif v > hi then return hi else return v end
 end
 
--- The maze wall picture, mirrored from scenes/maze.zon's tilemap `.rows` in the SAME
--- (col,row) frame (`WALLS[row+1]:sub(col+1,col+1)`; row 0 is the first string, matching
--- `Tilemap.cellToWorld`'s row→+Y). The ADR 0003 scripting API exposes no tilemap-
--- walkability query, and pac's target selection (below) needs to know how far a straight
--- corridor runs before a wall, so the picture lives here as package content — no new
--- `mana` API (ADR 0027 §3: Lua selects, native nav steers). MUST stay in sync with
--- maze.zon; the pac scenarios (`08_straight_through`, `03_turn`) are the guard.
-local WALLS = {
-    "###################",
-    "#........#........#",
-    "#.####.#.#.#.####.#",
-    "#.................#",
-    "#.##.###.#.###.##.#",
-    "#....#..gggg.#....#",
-    "#.##.#.#####.#.##.#",
-    "#........#........#",
-    "#.##.###.#.###.##.#",
-    "#o......P........o#",
-    "###################",
-}
-local function is_wall(col, row)
-    if col < 0 or col >= W or row < 0 or row >= H then return true end
-    return string.sub(WALLS[row + 1], col + 1, col + 1) == "#"
-end
-
 -- The farthest still-walkable cell reached by stepping (dc,dr) from (col,row) until the
--- cell before the first wall — pac's straight-run nav target. A pure-axis target (same
--- row for a horizontal heading, same col for a vertical one) has a *unique* shortest
--- path — the straight line — because any deviation adds perpendicular steps, so the
--- native BFS (ADR 0027) never shortcuts a corner even across an open room; pac holds one
--- lane until it hits a wall or the player turns. If the next cell is already a wall this
--- returns (col,row) itself, so pac's target is its own cell and nav stops it flush.
+-- cell before the first wall — pac's straight-run nav target. Walkability is a live
+-- read of the engine's maze grid (`mana.is_walkable`, ADR 0035, issue #143) — the SAME
+-- tilemap `nav`'s native BFS (ADR 0027) paths over — never a Lua-side copy of
+-- scenes/maze.zon, so there is nothing here that can drift out of sync with the maze.
+-- A pure-axis target (same row for a horizontal heading, same col for a vertical one)
+-- has a *unique* shortest path — the straight line — because any deviation adds
+-- perpendicular steps, so the native BFS never shortcuts a corner even across an open
+-- room; pac holds one lane until it hits a wall or the player turns. If the next cell is
+-- already a wall this returns (col,row) itself, so pac's target is its own cell and nav
+-- stops it flush.
 local function farthest_open(col, row, dc, dr)
     local c, r = col, row
-    while not is_wall(c + dc, r + dr) do
+    while mana.is_walkable(c + dc, r + dr) do
         c, r = c + dc, r + dr
     end
     return c, r

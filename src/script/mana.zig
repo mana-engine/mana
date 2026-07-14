@@ -2,30 +2,37 @@
 //! script `_ENV` receives (`lua.zig`'s `State.pushSandboxEnv` installs it).
 //! Compiled only under `-Denable-lua`.
 //!
+//! Over the ~500-line soft limit by design: this file IS the whole ADR 0003 §2
+//! surface — one small `zlua.wrap` shim per `mana.*` member, registered in one
+//! `pushManaTable`, with each member's behavior test beside it. Splitting the table
+//! across files would scatter the single versioned API and its shape test for no
+//! gain; it grows only when an ADR adds a member (this one added `is_walkable`).
+//!
 //! Members that need no live Sim — `version`, `log` — are implemented directly.
 //! The live-Sim members reach the world/clock/command-buffer/RNG through the ADR
 //! 0015 host seam (`host.zig`): the engine installs a `Host` on the owning `State`
 //! for the duration of each event dispatch, and these accessors call through it.
 //! Wired: the reads `is_valid`, `position`, `now`, `get` (named data components, ADR
-//! 0024), `random`, `random_int` (ADR 0022, issue #47), and the deferred mutations
-//! `set` (named data components, ADR 0024), `set_velocity`, `set_position`,
-//! `despawn`, `spawn` (queued on the buffer, applied at the next flush — never a
-//! mid-dispatch world mutation). `is_valid` prefers the host when present
-//! (authoritative live-world check) and falls back to this `State`'s own
-//! `handle.Registry` when no Sim is dispatching, so its pre-seam behavior and tests
-//! still hold; mutations with no host installed are dropped (`spawn` returns an
-//! invalid handle); reads (`get`/`position`/`now`/`random`/`random_int`) return
-//! nil/0/lo with no host installed (the same graceful degradation). Timers
-//! `after`/`every`/`cancel` (ADR 0019) reference the Lua callback in the registry and
-//! schedule it on the engine's wheel through the host, firing host-live in the
-//! dispatch phase.
+//! 0024), `random`, `random_int` (ADR 0022, issue #47), `is_walkable` (the scene
+//! tilemap's walkability grid, ADR 0035), and the deferred mutations `set` (named
+//! data components, ADR 0024), `set_velocity`, `set_position`, `despawn`, `spawn`
+//! (queued on the buffer, applied at the next flush — never a mid-dispatch world
+//! mutation). `is_valid` prefers the host when present (authoritative live-world
+//! check) and falls back to this `State`'s own `handle.Registry` when no Sim is
+//! dispatching, so its pre-seam behavior and tests still hold; mutations with no host
+//! installed are dropped (`spawn` returns an invalid handle); reads (`get`/`position`/
+//! `now`/`random`/`random_int`/`is_walkable`) return nil/0/lo/false with no host
+//! installed (the same graceful degradation). Timers `after`/`every`/`cancel` (ADR
+//! 0019) reference the Lua callback in the registry and schedule it on the engine's
+//! wheel through the host, firing host-live in the dispatch phase.
 //!
-//! With `get`/`set` this table is the complete ADR 0003 §2 `mana` v1 surface — no
-//! member remains deferred.
+//! With `get`/`set`/`is_walkable` this table is the complete ADR 0003 §2 (as amended
+//! by ADR 0035) `mana` v1 surface — no member remains deferred.
 
 const std = @import("std");
 const zlua = @import("zlua");
 const Lua = zlua.Lua;
+const core_mod = @import("core");
 const handle = @import("handle.zig");
 const host_mod = @import("host.zig");
 
@@ -113,6 +120,10 @@ pub fn pushManaTable(l: *Lua, entities: *const Registry, host: *const ?Host) voi
     l.pushLightUserdata(@ptrCast(host));
     l.pushClosure(zlua.wrap(manaSet), 1);
     l.setField(-2, "set");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaIsWalkable), 1);
+    l.setField(-2, "is_walkable");
 }
 
 /// Read a `*const ?Host` back from closure upvalue `idx` (a light-userdata pointer
@@ -355,6 +366,33 @@ fn manaSet(l: *Lua) !i32 {
     return 0;
 }
 
+/// `mana.is_walkable(col, row)` (ADR 0035): read-only query over the scene tilemap's
+/// walkability grid — the same grid the native `nav` pathfinder (ADR 0027) paths over
+/// (`src/engine/tilemap.zig`'s `Tilemap.isWalkable`), never a parallel/mirrored copy.
+/// `col`/`row` are integer grid coordinates in the tilemap's frame. Returns `false`
+/// for a wall cell, a cell outside the grid, or when no Sim is dispatching (no
+/// tilemap to query) — the same graceful degradation `mana.get`'s `nil` and
+/// `mana.random`'s `0` use, so a script can call this unconditionally.
+///
+/// Lua integers are `i64`; a coordinate outside `i32` range narrows to `false` via
+/// `std.math.cast` rather than a checked `@intCast` (which would panic → abort the
+/// engine on a content bug, violating ADR 0003 §9). Any out-of-`i32` value is off any
+/// real grid anyway, so `false` is the correct answer, not an error.
+fn manaIsWalkable(l: *Lua) !i32 {
+    const col = std.math.cast(i32, l.checkInteger(1)) orelse return pushFalse(l);
+    const row = std.math.cast(i32, l.checkInteger(2)) orelse return pushFalse(l);
+    const walkable = if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.isWalkable(col, row) else false;
+    l.pushBoolean(walkable);
+    return 1;
+}
+
+/// Push a Lua `false` and report one return value — the `mana.is_walkable` degraded
+/// answer for an out-of-`i32`-range coordinate (see `manaIsWalkable`).
+fn pushFalse(l: *Lua) i32 {
+    l.pushBoolean(false);
+    return 1;
+}
+
 const testing = std.testing;
 
 test "mana: table shape exposes exactly the wired members (version..despawn); version == 1" {
@@ -375,12 +413,12 @@ test "mana: table shape exposes exactly the wired members (version..despawn); ve
         key_count += 1;
         l.pop(1); // drop value; keep key on the stack to advance `next`
     }
-    try testing.expectEqual(@as(usize, 16), key_count);
+    try testing.expectEqual(@as(usize, 17), key_count);
 
     try testing.expectEqual(zlua.LuaType.number, l.getField(t, "version"));
     try testing.expectEqual(@as(i64, 1), try l.toInteger(-1));
     l.pop(1);
-    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "set_position", "despawn", "spawn", "every", "after", "cancel", "random", "random_int", "get", "set" }) |name| {
+    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "set_position", "despawn", "spawn", "every", "after", "cancel", "random", "random_int", "get", "set", "is_walkable" }) |name| {
         try testing.expectEqual(zlua.LuaType.function, l.getField(t, name));
         l.pop(1);
     }
@@ -485,4 +523,150 @@ test "mana.get/set: no Sim dispatching returns nil and no-ops, never raises" {
     try testing.expect(l.isNil(-1));
     l.pop(1);
     try l.doString("mana.set(1, 'score', 42)"); // must not raise with no host
+}
+
+test "mana.is_walkable: no Sim dispatching returns false, never raises" {
+    var l = try Lua.init(testing.allocator);
+    defer l.deinit();
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+    var host: ?Host = null;
+
+    pushManaTable(l, &registry, &host);
+    l.setGlobal("mana");
+
+    try l.doString("return mana.is_walkable(0, 0)");
+    try testing.expect(!l.toBoolean(-1));
+    l.pop(1);
+}
+
+/// A fake host whose `is_walkable` mimics `Tilemap.isWalkable` over a tiny 2x2
+/// walkable square with a wall at (1,1) — enough to exercise `mana.is_walkable`'s
+/// wiring (arg marshaling, host dispatch, return value) without `script` importing
+/// `engine`'s real `Tilemap` (DAG: `script → core` only; the tilemap's own
+/// walkability rules are `src/engine/tilemap.zig`'s tests). Every other accessor is
+/// an `unreachable` stub — proof no test below exercises anything but `is_walkable`.
+const FakeGridHost = struct {
+    fn isWalkable(ctx: *anyopaque, col: i32, row: i32) bool {
+        _ = ctx;
+        if (col < 0 or row < 0 or col > 1 or row > 1) return false; // out of grid
+        if (col == 1 and row == 1) return false; // the one wall cell
+        return true;
+    }
+    fn isValid(ctx: *anyopaque, h: u64) bool {
+        _ = ctx;
+        _ = h;
+        unreachable;
+    }
+    fn position(ctx: *anyopaque, h: u64) ?core_mod.Vec3 {
+        _ = ctx;
+        _ = h;
+        unreachable;
+    }
+    fn now(ctx: *anyopaque) f64 {
+        _ = ctx;
+        unreachable;
+    }
+    fn get(ctx: *anyopaque, h: u64, name: []const u8) ?f64 {
+        _ = .{ ctx, h, name };
+        unreachable;
+    }
+    fn set(ctx: *anyopaque, h: u64, name: []const u8, value: f64) void {
+        _ = .{ ctx, h, name, value };
+        unreachable;
+    }
+    fn setVelocity(ctx: *anyopaque, h: u64, v: core_mod.Vec3) void {
+        _ = .{ ctx, h, v };
+        unreachable;
+    }
+    fn setPosition(ctx: *anyopaque, h: u64, pos: core_mod.Vec3) void {
+        _ = .{ ctx, h, pos };
+        unreachable;
+    }
+    fn despawn(ctx: *anyopaque, h: u64) void {
+        _ = .{ ctx, h };
+        unreachable;
+    }
+    fn spawn(ctx: *anyopaque, name: []const u8, pos: core_mod.Vec3) u64 {
+        _ = .{ ctx, name, pos };
+        unreachable;
+    }
+    fn timerAfter(ctx: *anyopaque, ref: i32, delay: f32) u64 {
+        _ = .{ ctx, ref, delay };
+        unreachable;
+    }
+    fn timerEvery(ctx: *anyopaque, ref: i32, interval: f32) u64 {
+        _ = .{ ctx, ref, interval };
+        unreachable;
+    }
+    fn timerCancel(ctx: *anyopaque, h: u64) void {
+        _ = .{ ctx, h };
+        unreachable;
+    }
+    fn random(ctx: *anyopaque) f32 {
+        _ = ctx;
+        unreachable;
+    }
+    fn randomInt(ctx: *anyopaque, lo: i64, hi: i64) i64 {
+        _ = .{ ctx, lo, hi };
+        unreachable;
+    }
+    const vtable: Host.VTable = .{
+        .is_valid = isValid,
+        .position = position,
+        .now = now,
+        .get = get,
+        .set = set,
+        .set_velocity = setVelocity,
+        .set_position = setPosition,
+        .despawn = despawn,
+        .spawn = spawn,
+        .timer_after = timerAfter,
+        .timer_every = timerEvery,
+        .timer_cancel = timerCancel,
+        .random = random,
+        .random_int = randomInt,
+        .is_walkable = isWalkable,
+    };
+};
+
+test "mana.is_walkable: true for a walkable cell, false for a wall cell, false out of bounds" {
+    var l = try Lua.init(testing.allocator);
+    defer l.deinit();
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+    var fake_ctx: u8 = 0; // unused by isWalkable; a valid non-null ctx pointer
+    var host: ?Host = .{ .ctx = &fake_ctx, .vtable = &FakeGridHost.vtable };
+
+    pushManaTable(l, &registry, &host);
+    l.setGlobal("mana");
+
+    try l.doString("return mana.is_walkable(0, 0), mana.is_walkable(1, 1), mana.is_walkable(-1, 0)");
+    try testing.expect(l.toBoolean(-3)); // (0,0): open floor
+    try testing.expect(!l.toBoolean(-2)); // (1,1): the wall
+    try testing.expect(!l.toBoolean(-1)); // (-1,0): off-grid
+    l.pop(3);
+}
+
+test "mana.is_walkable: an out-of-i32-range coordinate returns false, never a panic" {
+    // A Lua integer (i64) past i32's range must NOT reach a checked @intCast — that
+    // would abort the engine on a content bug (ADR 0003 §9). It narrows to false: any
+    // such coordinate is off any real grid. (99999999999 is outside FakeGridHost's 2x2
+    // walkable square anyway, so the answer is false whether or not the guard fires;
+    // the point of this test is that reaching that answer never panics.)
+    var l = try Lua.init(testing.allocator);
+    defer l.deinit();
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+    var fake_ctx: u8 = 0;
+    var host: ?Host = .{ .ctx = &fake_ctx, .vtable = &FakeGridHost.vtable };
+
+    pushManaTable(l, &registry, &host);
+    l.setGlobal("mana");
+
+    // 99999999999 (the reviewer's value) and i32-min-minus-one, on either coordinate.
+    try l.doString("return mana.is_walkable(99999999999, 0), mana.is_walkable(0, -2147483649)");
+    try testing.expect(!l.toBoolean(-2));
+    try testing.expect(!l.toBoolean(-1));
+    l.pop(2);
 }

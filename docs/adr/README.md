@@ -45,3 +45,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0031 | Sprite rendering: cosmetic sprite/animation component, dependency-free sheet asset, gpu texture path | proposed |
 | 0032 | Animated-sprite interchange: no existing format fits — evolve MSF, don't replace it | proposed |
 | 0033 | Directional + mirrored sprite animation: facing-selected clips replace wedge rotation | proposed |
+| 0035 | `mana.is_walkable`: a read-only tilemap-walkability query | accepted |

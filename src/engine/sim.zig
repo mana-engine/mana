@@ -249,6 +249,7 @@ pub const Sim = struct {
             .prototypes = self.prototypes,
             .timers = &self.timers,
             .rng = &self.rng,
+            .tilemap = self.tilemap,
         };
         // The dispatch phase is bounded by one Tracy zone: this is the ADR 0003 §6
         // per-frame script-dispatch budget site (the fine per-handler `script.*`
