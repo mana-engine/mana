@@ -77,10 +77,12 @@ convention** — this ADR gets to define both cleanly.
 
 ## Decision
 
-A game package is organised **by kind**: a small set of conventional directories, one
-per artifact kind, each holding several grouped files the loader globs and merges. The
-manifest shrinks to identity + entry points + cross-cutting settings; bulk content is
-discovered by convention. Concretely:
+A game package is organised as a **flexible hybrid**: a **by-kind baseline** — a small
+set of conventional directories, one per artifact kind, each holding several grouped
+files the loader globs and merges — **plus optional feature folders** that let a heavy
+feature or entity co-locate its own Lua + data + assets (§3). The manifest shrinks to
+identity + entry points + cross-cutting settings; bulk content is discovered by
+convention. Concretely:
 
 ### 1. Lua: a `scripts/` directory, one entry, modules via a VFS-scoped `require`
 
@@ -123,7 +125,10 @@ discovered by convention. Concretely:
 - `prototypes.zon` (one blob) becomes **`prototypes/`**, a directory of grouped files
   each in the *unchanged* `.{ .prototypes = .{ … } }` shape (ADR 0016). The loader
   globs `prototypes/*.zon`, parses each, and **concatenates their `.prototypes` lists**
-  into the one `PrototypeRegistry` it already builds.
+  into the one `PrototypeRegistry` it already builds. (Under the hybrid of §3, a
+  prototype file co-located inside a heavy feature's folder — e.g. `player/player.zon`
+  — merges into the same registry under these same rules; a prototype is a prototype
+  wherever it lives.)
 - **Ordering:** files are loaded in **byte-lexicographic order of their package-
   relative path**, and within a file in declared order — a total, OS-independent order
   the loader imposes explicitly (the determinism constraint above). Registration order
@@ -139,36 +144,59 @@ discovered by convention. Concretely:
   an un-referenced sheet. **HUD** stays a single named `hud.zon` (one screen today);
   it earns a `hud/` directory only when a game has several screens (add-when-needed).
 
-### 3. Grouping axis — **by-kind**, not by-feature (the core fork)
+### 3. Grouping axis — **a flexible hybrid** (the core fork)
 
-Two ways to cut a package:
+Three ways to cut a package:
 
-- **By-kind** (recommended): `scripts/`, `prototypes/`, `scenes/`, `sprites/` — group
-  by *artifact type*, split *within* a kind by feature (`prototypes/ghosts.zon`,
+- **By-kind only:** `scripts/`, `prototypes/`, `scenes/` — group strictly by *artifact
+  type*; a feature is split *within* each kind (`prototypes/ghosts.zon`,
   `scripts/ghosts.lua`).
-- **By-feature**: a `ghosts/` folder bundles `ghosts.lua` + `ghosts.zon` + the ghost
-  sheets together; the loader walks the tree and merges by extension/kind.
+- **By-feature only:** every folder is a feature (`ghosts/` holds `ghosts.lua` +
+  `ghosts.zon` + sheets); there are no kind-directories.
+- **Hybrid (recommended):** by-kind is the **baseline**, and a *heavy* feature or
+  entity may **opt into its own folder** that co-locates its Lua + data + assets.
 
-**We choose by-kind**, because it is the only one that fits every invariant *today*
-without new machinery:
+**We recommend the hybrid.** The forces genuinely pull both ways, so a single rigid
+axis is the wrong commitment:
 
-- It **matches the loader and the manifest**, which are already kind-shaped
-  (`scenes`/`prototypes`/`script`/`hud` fields, one registry per kind) and matches the
-  `scripts/`/`assets/` scaffold two packages already ship — one convention, minimal
-  churn, no cross-cutting walk.
-- The engine **stays genre-agnostic**: it knows a fixed set of *kinds* and a glob
-  convention, never a game's feature vocabulary. By-feature would tempt the loader to
-  reason about feature folders — a genre concept leaking toward `src/` (invariant #6).
-- **Hot-reload granularity is identical** either way (both reload per file), so
-  by-feature buys nothing there.
-- Its one real cost — **review-diff locality**: a feature touches several kind-dirs at
-  once — is not felt at current scale (a Pac-Man ghost change is `scripts/ghosts.lua` +
-  maybe `prototypes/ghosts.zon`, two files), and by-feature is **speculative
-  flexibility** (CLAUDE.md) until a game is big enough to feel the pain.
+- **Small stuff wants by-kind.** Most content is light — Pac-Man's HUD flash, Snake's
+  food rule — and a kind-directory (`scripts/`, `prototypes/`) is the least-ceremony
+  home for it. This baseline matches the already-kind-shaped loader/manifest
+  (`scenes`/`prototypes`/`script`/`hud` fields, one registry per kind) and the
+  `scripts/`/`assets/` scaffold two packages already ship.
+- **Heavy features want locality.** A `player/` accretes a lot — its script, its
+  prototype(s), its sprites, later its abilities and UI — and so does a `boss/`. For
+  those, scattering the pieces across four kind-directories hurts review-diff locality
+  and comprehension; a self-contained `player/` folder that holds `player.lua` next to
+  the player's prototypes is the maintainable shape. The hybrid lets a package reach
+  for that folder **exactly when the weight justifies it**, without forcing every
+  trivial rule into a folder of its own.
+- **The loader treats both uniformly**, so the flexibility costs almost nothing: it
+  globs the kind-directories **and** any feature folders, and merges everything under
+  the *same* rules already fixed in §1–§2 — deterministic byte-lexicographic sort over
+  package-relative paths, `.{ .prototypes = .{…} }` lists concatenated into the one
+  registry, a duplicate prototype **name** a hard load error regardless of which folder
+  it came from, and `require` resolving a co-located `player/ai.lua` the same VFS way.
+  A prototype is a prototype and a script is a script wherever it sits; the engine still
+  knows only *kinds* and a glob convention — never a feature name — so invariant #6
+  holds (a `player/` folder is content the loader globs, not a concept `src/` learns).
 
-If a future large game *demonstrates* that pain, by-feature (or a hybrid) is revisited
-**by ADR with that game as the evidence** — the "second concrete impl planned, or
-don't abstract" rule. This ADR does not preclude it; it declines to build for it now.
+**Neither rigid axis is right:** by-kind-only makes a heavy entity's content
+permanently non-local (the cost the user flagged: "a player might need a folder since
+it will have tons of stuff, boss as well"); by-feature-only forces even one-line rules
+into folders and throws away the kind-baseline the loader already fits. The hybrid
+takes the good half of each.
+
+**The specifics are the implementation's to decide** (the user's steer: "might be worth
+letting the implementation decide"). This ADR fixes only the *principle* — a by-kind
+baseline plus optional feature-folder co-location for heavy features, all merged under
+the §1–§2 rules. It deliberately does **not** pin: how deeply feature folders may nest;
+the exact glob/merge precedence between a kind-directory and a feature folder; whether a
+feature folder may also carry its own `scenes`/HUD or only scripts+prototypes+assets;
+or the naming convention that marks a directory as a feature folder vs a kind-directory.
+Those are decided when the loader is built, against the first game that actually grows a
+heavy feature, and **recorded as an amendment to this ADR** — keeping the direction
+principle-based and letting real content, not speculation, settle the mechanics.
 
 ### 4. Manifest role: convention over configuration for bulk, explicit for entry points
 
@@ -178,9 +206,10 @@ don't abstract" rule. This ADR does not preclude it; it declines to build for it
   that apply to the whole package.
 - It **stops enumerating bulk content**: the redundant `scenes: []const []const u8`
   list and the single-file `.prototypes`/`.hud` paths give way to **globbing the
-  conventional `prototypes/`, `scripts/`, `scenes/` directories**. Adding a prototype
-  file or a script module needs no manifest edit — the file's presence *is* the
-  declaration (files-are-truth).
+  conventional kind-directories (`prototypes/`, `scripts/`, `scenes/`) and any feature
+  folders** (§3). Adding a prototype file or a script module needs no manifest edit —
+  the file's presence *is* the declaration (files-are-truth). The exact rule for how the
+  loader recognises a feature folder is left to the implementation (§3).
 - Because `data.parseLenient` ignores unknown fields, an older runner still parses a
   new-style `game.zon`; the loader change (globbing) is what gates the new layout, not
   the manifest schema.
@@ -213,44 +242,58 @@ don't abstract" rule. This ADR does not preclude it; it declines to build for it
   packages exist yet, so there is no third-party contract to deprecate on a timeline;
   if one ever does, that is a versioning decision for its own ADR.)
 
-### Illustrative final tree (`games/snake`)
+### Illustrative final tree (`games/pacman`, hybrid)
 
-*Illustrative only — this ADR moves no files.*
+*Illustrative only — this ADR moves no files, and the exact feature-folder rules are
+the implementation's to settle (§3).* The small, light content stays in
+kind-directories; the ghosts — a heavy feature (four AIs, their prototypes, their
+sheets) — opt into a co-located `ghosts/` folder.
 
 ```
-games/snake/
+games/pacman/
   game.zon              # name, version, entry_scene, .script="scripts/rules.lua",
                         #   script_api, projection — no bulk file lists
-  scripts/
+  scripts/              # kind-directory — the light, cross-cutting rules
     rules.lua           # entry: returns the one handler table; requires the modules
-    movement.lua        # require("movement") — grid step + turn/reverse-reject
-    food.lua            # require("food")     — spawn / eat / grow
-  prototypes/
-    snake.zon           # head + segment templates  (.{ .prototypes = .{…} })
-    pickups.zon         # food template
-    walls.zon           # wall template
+    input.lua           # require("input")  — on_key → pac heading
+    modes.lua           # require("modes")  — scatter/chase/frightened timing
+  prototypes/           # kind-directory — the light templates
+    pac.zon             # the player template  (.{ .prototypes = .{…} })
+    walls.zon           # static wall template
+  ghosts/               # FEATURE FOLDER — a heavy entity co-locating its own stuff
+    ghosts.lua          # require("ghosts.ghosts") — Blinky/Pinky/Inky/Clyde targeting
+    ghosts.zon          # the four ghost prototypes  (.{ .prototypes = .{…} })
+    generated/          # ghost sheets (gitignored, mise run assets)
   scenes/
-    board.zon           # entry scene
+    maze.zon            # entry scene
   sprites/
-    head.zon
-    segment.zon
-    food.zon
+    pac.zon
     generated/          # gitignored derived .msf/.png (mise run assets)
   assets/
 ```
+
+A leaner package (Snake today) needs no feature folder at all — `scripts/` +
+`prototypes/` + `scenes/` is the whole story. The hybrid is *opt-in weight*, not a
+mandate.
 
 ## Alternatives considered
 
 - **Keep the monolith (do nothing).** Rejected: the problem — a 300-line `rules.lua`
   and a 188-line `prototypes.zon` colliding in one file and one diff — is present now
   and grows with every game; "one blob per kind" has no path to scale.
-- **By-feature grouping** (a `ghosts/` folder bundling lua + data + sheets). Its
-  strength is review-diff locality (one feature = one folder) and a mod that adds a
-  feature drops in one directory. Rejected for now because it needs a tree-walking,
-  extension-classifying loader (more machinery), tempts the engine toward feature-aware
-  reasoning (genre leak, invariant #6), and buys nothing on hot-reload granularity —
-  all to solve a locality cost not yet felt at our scale. Reconsidered by ADR when a
-  concrete large game is the evidence.
+- **By-kind only** (rigid — no feature folders ever). Its strength is uniformity and
+  the least machinery. Rejected as the *sole* rule because it makes a heavy entity's
+  content permanently non-local: a `player` or a `boss` that accretes a script, several
+  prototypes, sprites, and later abilities/UI ends up smeared across four kind-
+  directories with no home — the exact cost the recommendation's hybrid fixes by letting
+  such a feature opt into its own folder. By-kind survives as the hybrid's *baseline*,
+  not its ceiling.
+- **By-feature only** (rigid — every folder is a feature, no kind-directories). Its
+  strength is maximal locality. Rejected as the *sole* rule because it forces even a
+  one-line rule or a single shared template into a folder of its own, throws away the
+  kind-baseline the loader/manifest already fit, and needs the loader to treat all
+  directories as features. The hybrid keeps by-feature available *where the weight earns
+  it* without imposing it everywhere.
 - **Manifest enumerates every file explicitly** (extend today's model — a `scripts:
   []` list beside `scenes: []`). Rejected: it makes the manifest a second, hand-
   maintained index of the filesystem that silently rots when a file is added and
@@ -272,29 +315,37 @@ games/snake/
 
 ## Consequences
 
-- **Easier:** a package scales by adding grouped files, not by growing blobs; a feature
-  change is a small, local diff (`scripts/ghosts.lua`, not a 300-line file); prototypes
-  hot-reload and review per group; adding content needs no manifest bookkeeping (drop
-  the file in the conventional dir). The engine gains exactly one new content-loading
-  idea — *sorted-glob a conventional directory* — reused across kinds.
+- **Easier:** a package scales by adding grouped files, not by growing blobs; light
+  content stays a small kind-directory diff and a heavy feature co-locates into one
+  folder (`ghosts/`, `player/`) instead of smearing across four; prototypes hot-reload
+  and review per group; adding content needs no manifest bookkeeping (drop the file in
+  a conventional dir). The engine gains one new content-loading idea — *sorted-glob the
+  kind-directories and any feature folders, merge under uniform rules* — reused across
+  kinds.
 - **Harder / accepted:** the loader must impose a deterministic sort on every glob (the
-  determinism-critical detail); a VFS-scoped `require` is a new sandbox-`_ENV` builtin
-  the script layer must implement and keep closed; the four in-repo games and their
-  goldens migrate in one reviewed slice; by-kind's review-locality cost is accepted now
-  and revisited only with a real large game as evidence.
-- **Committed to (once accepted):** by-kind grouping; `scripts/` with one manifest-
-  named entry + engine-owned VFS-scoped `require`; `prototypes/` globbed, sorted,
-  merged, duplicate-name = error; convention-over-configuration globbing of the bulk
-  directories with the manifest reduced to identity + entry points + cross-cutting
-  settings; a hard cutover off the monolithic form.
+  determinism-critical detail) and merge kind-directories and feature folders uniformly;
+  a VFS-scoped `require` is a new sandbox-`_ENV` builtin the script layer must implement
+  and keep closed; the four in-repo games and their goldens migrate in one reviewed
+  slice; the precise feature-folder mechanics stay open until the implementation settles
+  them against a real heavy feature.
+- **Committed to (once accepted):** the **hybrid** — a by-kind baseline
+  (`scripts/`/`prototypes/`/`scenes/`) plus optional feature-folder co-location for
+  heavy features; `scripts/` with one manifest-named entry + engine-owned VFS-scoped
+  `require`; ZON globbed, byte-lexicographically sorted, merged, duplicate prototype
+  name = error, applied uniformly to kind-directories and feature folders;
+  convention-over-configuration globbing with the manifest reduced to identity + entry
+  points + cross-cutting settings; a hard cutover off the monolithic form.
 - **Explicitly NOT done here (follow-up, phased, gated on this ADR's acceptance —
   issue #178):** no loader implementation (the glob/sort/merge path, the `require`
   builtin, the manifest slimming) — this ADR is phase 1, the *direction*; no game
   migration (moving `pacman`/`snake` files, updating goldens); no concrete manifest
   field-list edit or `Manifest` struct change; no `sprites/`-globbing or multi-screen
-  `hud/` (add-when-needed); no by-feature layout (deferred to its own ADR + a game that
-  needs it). This ADR fixes the *convention and constraints* those follow-ups must fit,
-  not their code.
+  `hud/` (add-when-needed); and — per the user's steer — **no over-specified
+  feature-folder mechanics**: how folders nest, the kind-dir↔feature-folder glob/merge
+  precedence, whether a feature folder may carry scenes/HUD, and the folder-vs-kind
+  naming rule are left to the implementation and **recorded as an amendment to this
+  ADR** against the first game that grows a heavy feature. This ADR fixes the
+  *principle and constraints* those follow-ups must fit, not their code.
 
 Cross-references: #178 (this decision, phase 1); builds on ADR 0003 (Lua scripting
 API / sandbox — this ADR realises its §Deferred "VFS-scoped `require`"), ADR 0004
