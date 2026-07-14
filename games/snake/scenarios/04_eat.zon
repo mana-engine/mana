@@ -1,12 +1,17 @@
 // Snake staircase, step 4/6: steering the head onto the food cell reaches it. A 180°
 // reversal of the *committed* heading is rejected (rules.lua `try_turn`), so this
-// steers DOWN first (committing before the first grid step at tick 8), then LEFT once
+// steers UP first (committing before the first grid step at tick 8), then LEFT once
 // that heading has committed (tick 12, between grid steps 1 and 2). Path: (0,0) ->
 // (0,-1) -> (-1,-1) -> (-2,-1) = the deterministic first food cell.
+//
+// Issue #175: this scenario presses UP, not DOWN. Post-fix, up -> dy=-1 and down ->
+// dy=+1 (see rules.lua's `on_key`); this scenario was always pinning the dy=-1 leg of
+// the path above, previously reached (pre-fix) by the wrongly-labeled "down" key. The
+// expected numbers are unchanged, only the key and descriptive text change.
 .{
     .steps = 30,
     .input_trace = .{
-        .{ .ticks = 12, .keys = .{"down"} },
+        .{ .ticks = 12, .keys = .{"up"} },
         .{ .ticks = 18, .keys = .{"left"} },
     },
     .expect = .{

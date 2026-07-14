@@ -142,11 +142,14 @@ return {
         mana.every(STEP, step) -- the move loop (ADR 0019)
     end,
 
-    -- Directional input (ADR 0021): on a key press, turn. +y is up on screen.
+    -- Directional input (ADR 0021): on a key press, turn. Issue #175: post-#155 (the
+    -- live Vulkan vertical-flip fix) higher world/grid y renders LOWER on screen, so
+    -- up is dy=-1 and down is dy=+1 — not the other way around (the same convention
+    -- pacman's #159/#161 fixed; left/right are axis-symmetric so unaffected).
     on_key = function(ev)
         if not ev.pressed then return end
-        if ev.key == "up" then try_turn(0, 1) end
-        if ev.key == "down" then try_turn(0, -1) end
+        if ev.key == "up" then try_turn(0, -1) end
+        if ev.key == "down" then try_turn(0, 1) end
         if ev.key == "left" then try_turn(-1, 0) end
         if ev.key == "right" then try_turn(1, 0) end
     end,

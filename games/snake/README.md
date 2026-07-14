@@ -22,8 +22,12 @@ scope for the headless gate).
 
 `scenarios/*.zon` is the executable acceptance definition the paragraph above
 gestures at: an ordered, single-mechanic staircase — spawn → advance → turn → eat →
-grow → death — each file isolating one mechanic so a red result names exactly which
-one broke. Run one with the headless CLI:
+grow → death → down → reverse rejected → turn after reject — each file isolating one
+mechanic so a red result names exactly which one broke. The last three (issues #175,
+#176) close a gap the first six left open: every earlier turn scenario pressed only
+"up"/"down" as a single input, so nothing pinned the opposite key (`07_down.zon`,
+mirroring pacman's #164/#168 down-key scenario) or the illegal-180°-reversal guard
+(`08_reverse_rejected.zon`, `09_turn_after_reject.zon`). Run one with the headless CLI:
 
 ```
 zig build -Denable-lua run -- games/snake --scenario games/snake/scenarios/04_eat.zon
