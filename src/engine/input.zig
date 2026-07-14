@@ -118,9 +118,10 @@ test "inputMoveSystem: a nav-controlled entity's velocity is left for nav, not c
     try sim.world.setVelocity(plain, .{ .v = .{ .x = 9, .y = 0, .z = 0 } });
 
     try sim.addSystem(inputMoveSystem);
-    // Stand in for navSystem: write a heading into the nav agent's velocity each tick,
-    // AFTER input, so the flush order (input command → nav direct write → flush) matches
-    // the real stack. If input clobbered it, this value would not survive the tick.
+    // Stand in for navSystem: like the real `navSystem`, it writes the heading DIRECTLY
+    // into the velocity column (not via a deferred command), and runs AFTER input, so the
+    // flush order (input command → nav direct write → end-of-tick flush) matches the real
+    // stack. If input queued a competing write, the flush would clobber this value.
     const NavStub = struct {
         fn sys(ctx: *Context) SystemError!void {
             for (ctx.world.velocities.entities()) |ei| {

@@ -245,7 +245,7 @@ fn runRender(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, path: []c
         defer world.deinit();
 
         const view: engine.render.View = .{ .width = 512, .height = 512, .projection = manifest.projection };
-        const quads = try engine.render.project(gpa, &world, view, &engine.render.default_palette);
+        const quads = try engine.render.project(gpa, &world, view, &engine.render.default_palette, null);
         defer gpa.free(quads);
 
         const pixels = try engine.gpu.renderScene(gpa, view.width, view.height, quads, .{ 0.09, 0.10, 0.14, 1.0 });
@@ -310,7 +310,7 @@ fn runRenderPlayFrame(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, 
     }
 
     const view: engine.render.View = .{ .width = svg_view_size, .height = svg_view_size, .projection = manifest.projection };
-    const quads = try engine.render.project(gpa, &sim.world, view, &engine.render.default_palette);
+    const quads = try engine.render.project(gpa, &sim.world, view, &engine.render.default_palette, &sheets);
     defer gpa.free(quads);
     const sprites = try engine.render.projectSprites(gpa, &sim.world, view, &sheets, &atlas);
     defer gpa.free(sprites);
@@ -342,7 +342,7 @@ fn runRenderSvg(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, path: 
     defer world.deinit();
 
     const view: engine.render.View = .{ .width = svg_view_size, .height = svg_view_size, .projection = manifest.projection };
-    const quads = try engine.render.project(gpa, &world, view, &engine.render.default_palette);
+    const quads = try engine.render.project(gpa, &world, view, &engine.render.default_palette, null);
     defer gpa.free(quads);
     const svg = try engine.render_svg.toSvg(gpa, quads, view, engine.render_svg.default_background);
     defer gpa.free(svg);
@@ -390,7 +390,7 @@ fn runFilmstrip(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, dir: [
     var t: u32 = 0;
     while (t < ticks) : (t += 1) {
         try sim.tick();
-        const quads = try engine.render.project(gpa, &sim.world, view, &engine.render.default_palette);
+        const quads = try engine.render.project(gpa, &sim.world, view, &engine.render.default_palette, null);
         defer gpa.free(quads);
         const svg = try engine.render_svg.toSvg(gpa, quads, view, engine.render_svg.default_background);
         defer gpa.free(svg);
@@ -640,7 +640,7 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
             const fa = frame_arena.allocator();
             const size = window.size();
             const view: engine.render.View = .{ .width = size[0], .height = size[1], .projection = manifest.projection };
-            const quads = try engine.render.project(fa, &sim.world, view, &engine.render.default_palette);
+            const quads = try engine.render.project(fa, &sim.world, view, &engine.render.default_palette, &sheets);
             // Textured sprite quads (ADR 0031 §4): the current animation frame's atlas
             // sub-rect, tinted and rotated to face travel; drawn over the flat quads.
             const sprite_quads = try engine.render.projectSprites(fa, &sim.world, view, &sheets, &atlas);
