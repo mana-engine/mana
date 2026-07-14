@@ -121,7 +121,10 @@ fn lessThanDepth(_: void, a: DepthEntry, b: DepthEntry) bool {
 /// wall on a one-unit grid cell fills its cell and a dot stays small and round,
 /// regardless of the projection's pixel scale. An entity with no `Appearance` keeps
 /// the legacy fallback: `palette[entity_index % palette.len]`, the fixed
-/// `view.quad_half_px`, and `.rect`. Caller owns the returned slice. Pure/deterministic.
+/// `view.quad_half_px`, and `.rect`. An entity that carries a `Sprite` is skipped here
+/// entirely — it is drawn by `projectSprites` as a textured quad, and emitting its flat
+/// `Appearance` quad too would mask the sprite's transparent regions behind a solid box
+/// (issue #121). Caller owns the returned slice. Pure/deterministic.
 pub fn project(gpa: Allocator, world: *World, view: View, palette: []const [3]f32) Allocator.Error![]gpu.Quad {
     const half_w = @as(f32, @floatFromInt(view.width)) / 2;
     const half_h = @as(f32, @floatFromInt(view.height)) / 2;
@@ -130,6 +133,12 @@ pub fn project(gpa: Allocator, world: *World, view: View, palette: []const [3]f3
     var entries: std.ArrayList(DepthEntry) = .empty;
     defer entries.deinit(gpa);
     for (world.transforms.entities(), world.transforms.slice()) |entity_index, t| {
+        // An entity that carries a `Sprite` is drawn by `projectSprites` as a textured
+        // quad, so it must NOT also emit this flat `Appearance` quad (issue #121): the
+        // opaque flat quad would fill the sprite's transparent regions (Pac's mouth
+        // wedge), masking the animation behind a solid box. The sprite's tint/size still
+        // come from the `Appearance`; only the flat draw is suppressed.
+        if (world.sprites.get(entity_index) != null) continue;
         const p = projectPoint(view.projection, t.pos, origin);
         const appearance = world.appearances.get(entity_index);
         const color = if (appearance) |a| a.color else palette[entity_index % palette.len];
@@ -178,9 +187,11 @@ fn lessThanSpriteDepth(_: void, a: SpriteDepthEntry, b: SpriteDepthEntry) bool {
 /// sprite (Pac's wedge) turns to face where it moves; a stationary entity keeps `angle`
 /// 0 (its default/right-facing pose). Results are painter-sorted far-to-near like
 /// `project`. An entity whose sheet is unloaded, or whose current frame is not in the
-/// atlas, is skipped (it falls back to its flat `Appearance` quad from `project`). Pure
-/// and deterministic; reads only cosmetic columns, never sim state. Caller owns the
-/// returned slice. Errors: `error.OutOfMemory`.
+/// atlas, is skipped and — since `project` suppresses the flat quad for any sprited
+/// entity (issue #121) — draws nothing that frame rather than a masking box; a missing
+/// sheet is a build error (`mise run assets`), not a runtime fallback. Pure and
+/// deterministic; reads only cosmetic columns, never sim state. Caller owns the returned
+/// slice. Errors: `error.OutOfMemory`.
 pub fn projectSprites(
     gpa: Allocator,
     world: *World,
@@ -392,6 +403,29 @@ test "projectSprites: a stationary entity keeps angle 0; an unloaded sheet is sk
     // Only the loaded, stationary entity yields a quad, at angle 0.
     try testing.expectEqual(@as(usize, 1), quads.len);
     try testing.expectApproxEqAbs(@as(f32, 0), quads[0].angle, 1e-6);
+}
+
+test "project: an entity with a Sprite emits no flat quad (issue #121 — the box is suppressed)" {
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    // A sprited entity (like pac): it carries an Appearance for tint/size AND a Sprite.
+    // Only `projectSprites` should draw it; `project` must not add a flat masking quad.
+    const sprited = try world.spawn();
+    try world.setTransform(sprited, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try world.setAppearance(sprited, .{ .color = .{ 1, 0.9, 0.2 }, .size = 0.7, .shape = .circle });
+    try world.setSprite(sprited, .{ .sheet = "sprites/pac.msf", .clip = "chomp" });
+    // A plain entity alongside it still gets its flat quad, proving suppression is scoped.
+    const plain = try world.spawn();
+    try world.setTransform(plain, .{ .pos = .{ .x = 1, .y = 0, .z = 0 } });
+    try world.setAppearance(plain, .{ .color = .{ 0.2, 0.2, 0.2 }, .size = 1 });
+
+    const view: View = .{ .width = 256, .height = 256, .projection = .{ .orthographic = .{ .scale = 32 } } };
+    const quads = try project(testing.allocator, &world, view, &default_palette);
+    defer testing.allocator.free(quads);
+
+    // Exactly one flat quad — the plain entity's; the sprited entity was skipped.
+    try testing.expectEqual(@as(usize, 1), quads.len);
+    try testing.expect(std.mem.eql(f32, &.{ 0.2, 0.2, 0.2 }, &quads[0].color));
 }
 
 test "project: isometric — an entity at the origin maps to the NDC centre" {
