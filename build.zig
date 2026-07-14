@@ -245,6 +245,46 @@ pub fn build(b: *std.Build) void {
     const spritegen_step = b.step("spritegen", "Run spritegen: zig build spritegen -- <recipe.zon> <out-dir>");
     spritegen_step.dependOn(&spritegen_run.step);
 
+    // --- msfpreview tool (issue #129, phase 1) ------------------------------
+    // A tiny standalone module wrapping `tools/spritegen/montage.zig`'s checkerboard
+    // compositing helpers (ADR 0031 §3) so `tools/msfpreview` (a separate module) can reuse
+    // them: Zig 0.16 forbids a relative import reaching outside a module's own root, so this
+    // wraps the SAME source file spritegen's own `main.zig` already imports directly (as a
+    // sibling file within its own module) as a second, independent module root — no new
+    // dependency, no logic fork, just a second compile of the same file.
+    const montage_mod = b.createModule(.{
+        .root_source_file = b.path("tools/spritegen/montage.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // A headless animated previewer (`tools/`): given a generated `.msf`, renders every
+    // clip's authored + mirror-inferred facings into one filmstrip PNG. Unlike spritegen it
+    // imports `engine` (needs `engine.sprite`'s facing/mirror resolution and
+    // `engine.gpu.captureFrame`'s CPU atlas-sampling rasterizer, so the preview matches
+    // runtime exactly rather than reimplementing that logic) — the "tools + runtime →
+    // engine" edge of the DAG; no Vulkan type crosses it.
+    const msfpreview = b.addExecutable(.{
+        .name = "msfpreview",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/msfpreview/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "data", .module = data },
+                .{ .name = "engine", .module = engine },
+                .{ .name = "montage", .module = montage_mod },
+            },
+        }),
+    });
+    b.installArtifact(msfpreview);
+
+    const msfpreview_run = b.addRunArtifact(msfpreview);
+    msfpreview_run.step.dependOn(&msfpreview.step);
+    if (b.args) |args| msfpreview_run.addArgs(args);
+    const msfpreview_step = b.step("msfpreview", "Preview an .msf's clips/facings: zig build msfpreview -- <sheet.msf> <out-dir>");
+    msfpreview_step.dependOn(&msfpreview_run.step);
+
     // --- Tests --------------------------------------------------------------
     // Zig tests one module (compilation unit) at a time, so we add a test run
     // per module. Each module's root file pulls in its sibling files' tests.
@@ -262,6 +302,11 @@ pub fn build(b: *std.Build) void {
     // round-trip test lives with the format in `data.msf` (run by the `data` unit above).
     const spritegen_tests = b.addTest(.{ .root_module = spritegen.root_module });
     test_step.dependOn(&b.addRunArtifact(spritegen_tests).step);
+
+    // msfpreview tool tests (issue #129 phase 1): its `main.zig` `test` block pulls in
+    // `layout.zig`'s sibling tests.
+    const msfpreview_tests = b.addTest(.{ .root_module = msfpreview.root_module });
+    test_step.dependOn(&b.addRunArtifact(msfpreview_tests).step);
 
     // Lua backend tests (gated to `-Denable-lua`). `script.zig` imports `lua.zig`
     // only inside a comptime-false branch by default, and in test mode Zig does not

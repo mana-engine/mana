@@ -66,6 +66,15 @@ run = "zig build spritegen --"
 description = "(Re)generate all sprite sheets from committed recipes into gitignored generated/ dirs."
 run = "zig build spritegen -- games/pacman/sprites/pac.zon games/pacman/sprites/generated"
 
+[tasks.msfpreview]
+# Headless animated previewer (issue #129, phase 1): given a generated `.msf`, renders
+# every clip's authored + mirror-inferred facings/frames into one filmstrip PNG, reusing
+# the real engine sprite pipeline (facing/mirror resolution + the CPU atlas-sampling
+# rasterizer) — no GUI, no new dependency. Run `mise run assets` first so the `.msf`
+# exists. Single cross-platform `zig build` invocation.
+description = "Preview an .msf's clips/facings as a filmstrip PNG: mise run msfpreview -- <sheet.msf> <out-dir>"
+run = "zig build msfpreview --"
+
 [tasks.shaders]
 description = "Recompile WGSL shaders to committed SPIR-V via mise-pinned naga."
 run = [

@@ -31,20 +31,7 @@ pub fn build(gpa: Allocator, size: u32, frames: []const []const u8) Allocator.Er
     const width = gutter + n * (size + gutter);
     const height = 2 * gutter + size;
     var rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
-
-    // Fill the whole image with the checkerboard first.
-    var y: u32 = 0;
-    while (y < height) : (y += 1) {
-        var x: u32 = 0;
-        while (x < width) : (x += 1) {
-            const idx = (@as(usize, y) * width + x) * 4;
-            const shade: u8 = if (((x / check) + (y / check)) % 2 == 0) 0x50 else 0x38;
-            rgba[idx + 0] = shade;
-            rgba[idx + 1] = shade;
-            rgba[idx + 2] = shade;
-            rgba[idx + 3] = 0xff;
-        }
-    }
+    fillCheckerboard(rgba, width, height);
 
     // Composite each frame (straight-alpha over) at its slot.
     for (frames, 0..) |frame, i| {
@@ -67,6 +54,63 @@ pub fn build(gpa: Allocator, size: u32, frames: []const []const u8) Allocator.Er
         }
     }
     return .{ .width = width, .height = height, .rgba = rgba };
+}
+
+/// Fill `rgba` (`width`×`height` RGBA8) with the opaque checkerboard pattern `build` uses
+/// as its transparency-reading backdrop. Shared with `compositeOverCheckerboard` so both
+/// callers get the identical board.
+fn fillCheckerboard(rgba: []u8, width: u32, height: u32) void {
+    var y: u32 = 0;
+    while (y < height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < width) : (x += 1) {
+            const idx = (@as(usize, y) * width + x) * 4;
+            const shade: u8 = if (((x / check) + (y / check)) % 2 == 0) 0x50 else 0x38;
+            rgba[idx + 0] = shade;
+            rgba[idx + 1] = shade;
+            rgba[idx + 2] = shade;
+            rgba[idx + 3] = 0xff;
+        }
+    }
+}
+
+/// Composite an already-rendered straight-alpha-over-transparent RGBA8 image (as
+/// `gpu.captureFrame` returns when called with a fully transparent `clear`) over a fresh
+/// checkerboard backdrop, so its transparency reads (ADR 0031 §3's montage idea, extended
+/// for issue #129's headless MSF previewer: a `captureFrame` render composited for human
+/// viewing, not just `build`'s raw per-frame montage). `rgba` is `width`×`height`; a fully
+/// transparent source pixel (`a == 0`) leaves the checkerboard showing through unchanged.
+/// Because `captureFrame`'s "over" blend onto a transparent (all-zero) clear leaves the
+/// colour channels alpha-weighted (`straight * a`, not divided back out), a partially
+/// transparent source pixel is un-premultiplied (`unpremultiply`) before the same `over`
+/// blend `build` uses — otherwise an anti-aliased edge would be double-darkened. Caller
+/// owns the returned image; free with `Image.deinit`.
+pub fn compositeOverCheckerboard(gpa: Allocator, width: u32, height: u32, rgba: []const u8) Allocator.Error!Image {
+    std.debug.assert(rgba.len == @as(usize, width) * height * 4);
+    var out = try gpa.alloc(u8, rgba.len);
+    fillCheckerboard(out, width, height);
+
+    var i: usize = 0;
+    while (i < out.len) : (i += 4) {
+        const a: u32 = rgba[i + 3];
+        if (a == 0) continue; // fully transparent: checkerboard shows through unchanged
+        const sr = unpremultiply(rgba[i + 0], a);
+        const sg = unpremultiply(rgba[i + 1], a);
+        const sb = unpremultiply(rgba[i + 2], a);
+        out[i + 0] = over(sr, out[i + 0], a);
+        out[i + 1] = over(sg, out[i + 1], a);
+        out[i + 2] = over(sb, out[i + 2], a);
+        // out[i+3] stays 255 — the checkerboard is the opaque base, matching `build`.
+    }
+    return .{ .width = width, .height = height, .rgba = out };
+}
+
+/// Recover a straight-alpha 8-bit channel from `premul` (`straight * a / 255`, the form
+/// `gpu.captureFrame`'s "over" blend leaves when composited onto a transparent clear) given
+/// alpha `a` (1..255; `a == 0` is never called, see `compositeOverCheckerboard`).
+fn unpremultiply(premul: u8, a: u32) u8 {
+    const v = (@as(u32, premul) * 255 + a / 2) / a;
+    return @intCast(@min(v, 255));
 }
 
 /// Straight-alpha source-over of an 8-bit `src` with alpha `a` (0..255) onto opaque
@@ -104,4 +148,35 @@ test "montage: lays frames in a row with gutters, opaque output" {
     const cy = gutter + 1;
     const idx = (cy * img.width + cx) * 4;
     try testing.expectEqual(@as(u8, 255), img.rgba[idx]);
+}
+
+test "montage: compositeOverCheckerboard passes an opaque pixel through unchanged" {
+    // A 1x1 fully-opaque red "capture" (as if `gpu.captureFrame` drew one opaque texel).
+    const rgba = [_]u8{ 255, 0, 0, 255 };
+    var img = try compositeOverCheckerboard(testing.allocator, 1, 1, &rgba);
+    defer img.deinit(testing.allocator);
+    // Opaque source ⇒ un-premultiply is a no-op and `over` yields the source exactly,
+    // regardless of which checkerboard cell underlies it.
+    try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, img.rgba);
+}
+
+test "montage: compositeOverCheckerboard leaves a fully transparent pixel as the checkerboard" {
+    const rgba = [_]u8{ 0, 0, 0, 0 };
+    var img = try compositeOverCheckerboard(testing.allocator, 1, 1, &rgba);
+    defer img.deinit(testing.allocator);
+    // (0,0) is checkerboard cell (0,0) ⇒ the first `shade` (0x50), opaque.
+    try testing.expectEqualSlices(u8, &.{ 0x50, 0x50, 0x50, 0xff }, img.rgba);
+}
+
+test "montage: compositeOverCheckerboard un-premultiplies a partially transparent pixel before blending" {
+    // A 50%-alpha red source, premultiplied as `gpu.captureFrame` would leave it over a
+    // transparent clear: straight red (255,0,0) * alpha(128/255) ≈ (128,0,0,128).
+    const rgba = [_]u8{ 128, 0, 0, 128 };
+    var img = try compositeOverCheckerboard(testing.allocator, 1, 1, &rgba);
+    defer img.deinit(testing.allocator);
+    // Expected: un-premultiply back to ~straight red, then blend 50% over checkerboard
+    // shade 0x50 (80): (255*128 + 80*127 + 127)/255 ≈ 168 for R, ~40 for G/B.
+    const expected_r = over(255, 0x50, 128);
+    try testing.expectEqual(expected_r, img.rgba[0]);
+    try testing.expectEqual(@as(u8, 255), img.rgba[3]);
 }
