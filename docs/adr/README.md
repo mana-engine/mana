@@ -47,3 +47,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0033 | Directional + mirrored sprite animation: facing-selected clips replace wedge rotation | accepted |
 | 0034 | Data-driven game-UI subsystem: direction | proposed |
 | 0035 | `mana.is_walkable`: a read-only tilemap-walkability query | accepted |
+| 0036 | Text rendering: an embedded bitmap font + layout through the sprite atlas/batcher | proposed |

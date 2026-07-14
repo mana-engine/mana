@@ -40,6 +40,7 @@ pub const render = @import("render.zig");
 pub const render_svg = @import("render_svg.zig");
 pub const animation = @import("animation.zig");
 pub const sprite = @import("sprite.zig");
+pub const text = @import("text.zig");
 pub const tint = @import("tint.zig");
 pub const collision = @import("collision.zig");
 pub const controller = @import("controller.zig");
@@ -91,6 +92,8 @@ test {
     _ = render;
     _ = render_svg;
     _ = animation;
+    _ = sprite;
+    _ = text;
     _ = collision;
     _ = controller;
     _ = nav;
