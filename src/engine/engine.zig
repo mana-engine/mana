@@ -43,6 +43,7 @@ pub const tilemap = @import("tilemap.zig");
 pub const prototype = @import("prototype.zig");
 pub const render = @import("render.zig");
 pub const render_svg = @import("render_svg.zig");
+pub const render_ui = @import("render_ui.zig");
 pub const animation = @import("animation.zig");
 pub const sprite = @import("sprite.zig");
 pub const text = @import("text.zig");
@@ -96,6 +97,7 @@ test {
     _ = tilemap;
     _ = render;
     _ = render_svg;
+    _ = render_ui;
     _ = animation;
     _ = sprite;
     _ = text;

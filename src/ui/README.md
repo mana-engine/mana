@@ -28,8 +28,17 @@ names **no Vulkan type**. It reaches live gameplay state only through the `Host`
 - `Host` + `boundValue` — one-way data binding: a widget's `bind` name is read through
   the host (sim/ECS state → widget); the UI never writes gameplay state through it.
 
+## Rendering (engine-side bridge)
+
+The tree → GPU draw-list + text glyph emission (ADR 0034 §8, #133) lives in
+`engine/render_ui.zig`, not here: it walks a laid-out `Screen`, emits flat `gpu.Quad`
+panels and `gpu.SpriteQuad` label glyphs (via `engine/text.zig` + the embedded font
+atlas from #131), and composites through `gpu.captureFrame`. It sits in `engine` because
+the glyph atlas/text layout are engine-tier, keeping `ui` a font-free interpreter — the
+same split `render.zig` uses. A label's text is sized to fit its rect height.
+
 ## Deferred (later phased slices, ADR 0034 §8)
 
-GPU draw-list emission + text/glyph metrics (#131/#133), input focus + event routing to
-Lua (#134), styling/theming. Widget sizing here is explicit-or-flex; text does not yet
-drive intrinsic label size (needs the font metrics from #131).
+Input focus + event routing to Lua (#134), styling/theming, `image` widget resolution,
+and intrinsic (text-driven) label sizing (today a label's rect drives its text scale, not
+the reverse).
