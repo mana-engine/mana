@@ -200,6 +200,21 @@ test "snake scenario [death]: running into the wall resets the run to the origin
     try expectScenarioPasses(std.testing.allocator, std.testing.io, snake_paths, "games/snake/scenarios/06_death.zon");
 }
 
+test "snake scenario [down]: on_key(down) turns the head downward (dy=+1, issue #175 — no scenario had ever pressed 'down')" {
+    try requireLua();
+    try expectScenarioPasses(std.testing.allocator, std.testing.io, snake_paths, "games/snake/scenarios/07_down.zon");
+}
+
+test "snake scenario [reverse rejected]: a 180 reversal of the committed heading is rejected outright (issue #176)" {
+    try requireLua();
+    try expectScenarioPasses(std.testing.allocator, std.testing.io, snake_paths, "games/snake/scenarios/08_reverse_rejected.zon");
+}
+
+test "snake scenario [turn after reject]: a legal 90 turn still applies after an earlier illegal reversal was rejected (issue #176, guards over-rejection)" {
+    try requireLua();
+    try expectScenarioPasses(std.testing.allocator, std.testing.io, snake_paths, "games/snake/scenarios/09_turn_after_reject.zon");
+}
+
 test "snake scenario: two independent replays of the eat staircase agree bit-for-bit" {
     try requireLua();
     try expectDeterministic(std.testing.allocator, std.testing.io, snake_paths, "games/snake/scenarios/04_eat.zon");

@@ -1,0 +1,26 @@
+// Snake staircase, step 8 (issue #176): a 180° reversal of the *committed* heading is
+// rejected outright (rules.lua `try_turn` compares against `dir`, not `pending`) — the
+// head must never be able to double back onto the cell it just left. Holding LEFT
+// from tick 0, while the head's committed heading is still its default rightward
+// `dir = {1,0}`, is exactly `nx=-1,ny=0 == -dir.x,-dir.y`: `try_turn` returns without
+// touching `pending`, so the first grid step (tick 8, settling by tick 9) advances the
+// head along its unchanged rightward heading, precisely as if "left" had never been
+// pressed (compare `02_advance.zon`'s undirected first step, same expected cell).
+.{
+    .steps = 10,
+    .input_trace = .{
+        .{ .ticks = 10, .keys = .{"left"} },
+    },
+    .expect = .{
+        .{
+            .label = "reverse rejected: the head keeps its default rightward heading, unaffected by the illegal reversal",
+            .at_tick = 10,
+            .check = .{ .occupied = .{ .x = 1, .y = 0 } },
+        },
+        .{
+            .label = "reverse rejected: the head never enters the cell behind it (no 180 turn ever applied)",
+            .at_tick = 10,
+            .check = .{ .vacant = .{ .x = -1, .y = 0 } },
+        },
+    },
+}

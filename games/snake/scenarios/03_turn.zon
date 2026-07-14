@@ -1,15 +1,22 @@
 // Snake staircase, step 3/6: an `on_key` press turns the head off its default
-// rightward heading. Holding DOWN from tick 0 sets the pending heading before the
+// rightward heading. Holding UP from tick 0 sets the pending heading before the
 // first grid step (tick 8), whose deferred `set_position` lands at the next flush
 // (tick 9); checking at tick 10 observes it settled.
+//
+// Issue #175: this scenario presses UP, not DOWN. Post-fix, `on_key` maps up -> dy=-1
+// and down -> dy=+1 (higher world/grid y renders LOWER on screen, post-#155's Vulkan
+// vertical flip — the same convention pacman's #159/#161 established). This scenario
+// was always pinning the dy=-1 trajectory, previously reached (pre-fix) by the
+// wrongly-labeled "down" key; the expected numbers are unchanged, only the key and
+// the descriptive text change.
 .{
     .steps = 10,
     .input_trace = .{
-        .{ .ticks = 10, .keys = .{"down"} },
+        .{ .ticks = 10, .keys = .{"up"} },
     },
     .expect = .{
         .{
-            .label = "turn: on_key(down) turns the head downward, off its default heading",
+            .label = "turn: on_key(up) turns the head upward (dy=-1), off its default heading",
             .at_tick = 10,
             .check = .{ .occupied = .{ .x = 0, .y = -1 } },
         },

@@ -1,0 +1,29 @@
+// Snake staircase, step 9 (issue #176): a rejected reversal must not poison — or get
+// "stuck" blocking — a later legal turn (over-rejection would be as wrong as under-
+// rejection). Holding LEFT for the first 4 ticks is the same illegal-reversal attempt
+// `08_reverse_rejected.zon` pins (rejected against the still-default `dir = {1,0}`,
+// `pending` left untouched); switching to DOWN for the remaining ticks, well before
+// the first grid step fires (tick 8), sets `pending = {0,1}` — a legal 90 degree turn
+// off the *current* committed heading, nothing to do with the earlier rejected key.
+// The first grid step (tick 8, settling by tick 9) commits that heading: the head
+// lands on (0,1) exactly as `07_down.zon`'s plain down-turn does, proving the prior
+// rejection left `try_turn` free to accept the next legal turn.
+.{
+    .steps = 10,
+    .input_trace = .{
+        .{ .ticks = 4, .keys = .{"left"} },
+        .{ .ticks = 6, .keys = .{"down"} },
+    },
+    .expect = .{
+        .{
+            .label = "turn after reject: the legal down turn still applies after an earlier illegal reversal was rejected",
+            .at_tick = 10,
+            .check = .{ .occupied = .{ .x = 0, .y = 1 } },
+        },
+        .{
+            .label = "turn after reject: the head did not keep its default rightward heading",
+            .at_tick = 10,
+            .check = .{ .vacant = .{ .x = 1, .y = 0 } },
+        },
+    },
+}
