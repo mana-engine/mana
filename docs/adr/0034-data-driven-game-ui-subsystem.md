@@ -91,27 +91,59 @@ state, animation/transition timers, and hover state never enter the hash. What *
 simulated and hashed is the **gameplay state the UI displays** — score, lives,
 inventory contents, health — which already lives in sim/ECS data (ADR 0024's named
 data components, or dedicated components) exactly as it would if no UI existed. The
-UI subsystem **binds** to that data one-way (sim/ECS state → displayed widget); it
-never becomes a second source of truth for it, and nothing in the UI layer writes
-gameplay state directly — a click that should affect gameplay goes through the same
-`mana` API and command buffer any other script mutation does (§3, ADR 0003 §2).
+UI subsystem reads those values through a narrow, **engine-filled host seam** (the
+ADR 0015 pattern, §5 below), not by reaching into `World` itself; the binding is
+one-way (sim/ECS state → displayed widget). UI never becomes a second source of
+truth for that state, and nothing in the UI layer writes gameplay state directly — a
+click that should affect gameplay goes through the same `mana` API and command buffer
+any other script mutation does (§3, ADR 0003 §2).
 
-### 5. A new `ui` module, at the port tier
-
-`ui` joins the module DAG alongside the other ports, not above `engine`:
+### 5. A new `ui` module: `core + gpu + platform`, bound to the sim through an engine-filled host seam
 
 ```
-ui → core + data + ecs + gpu + platform
+ui → core + gpu + platform
 engine → core + data + ecs + gpu + physics + platform + script + ui
 ```
 
-`ui` depends on `ecs`/`data` directly (to read the bound sim state) and on `gpu`/
-`platform` (to draw and receive input) — the same tier `script` already occupies, for
-the same reason: it is a capability `engine` orchestrates on every tick, not a
-consumer of `engine`. `engine` gains one new import (`ui`) to its existing list; `ui`
-never imports `engine`, so the DAG stays acyclic. `runtime` and `tools` see `ui` only
-indirectly through `engine`, matching how they already reach `gpu`/`platform`/
-`script` today.
+`ui` imports only `core` (its interpreter/layout math plus the host-interface types),
+`gpu` (to draw), and `platform` (to receive input) — the tier issue #130 sketched. It
+does **not** import `ecs` or `data`: the DAG places every port at core-tier, and a
+`ui → ecs` edge would be a new downward reach the DAG forbids, exactly as it forbids
+`script → ecs` (ADR 0015). `engine` gains exactly one new import (`ui`) and is the
+**sole** importer; `ui` never imports `engine`, so the graph stays acyclic and
+Vulkan stays sealed below `gpu` (invariant #4 — `ui` names no Vulkan type, only the
+`gpu` port vocabulary). `runtime` and `tools` reach `ui` only through `engine`, as
+they already reach `gpu`/`platform`/`script`.
+
+**How `ui` reaches live gameplay state without importing `ecs`: the ADR 0015 host
+seam.** This is precisely the problem ADR 0015 (accepted) already solved for
+`script`: a core-tier module that must observe engine-owned `World` state cannot name
+`World` or `ecs.Entity`, so it declares an **abstract host interface in `core`-only
+terms** and `engine` — which already depends on it and owns `World` — supplies the
+concrete implementation. `ui` follows that pattern exactly: it defines a small host
+vtable of plain function pointers over `core`/builtin types (a bound-value lookup for
+the displayed scalars/strings, and the reverse dispatch of a UI event back to the
+script layer), and `engine` fills it against the live `Sim`/`World` each frame it
+drives UI. Nothing engine- or `ecs`-specific crosses back up. The concrete host
+signatures are #132/#134's to pin (like ADR 0003's surface, a later change to them is
+its own ADR); this ADR fixes only that the seam exists and points the DAG-legal way.
+
+**Why a separate `core + gpu + platform` module and not an `engine` subsystem (the
+`render.zig` precedent).** Rendering (`src/engine/render.zig`, `src/engine/sprite.zig`)
+lives **inside** `engine`, importing `core`/`gpu`/`data` and reading `World`
+directly — deliberately, because `render.project` *iterates the whole ECS every
+frame*, reading each entity's `transforms`/`appearances`/`sprites` columns, so it is
+intrinsically an `ecs`+`data` consumer and belongs where those live. `ui` is the
+opposite shape: it interprets its **own** data (a widget tree), never the entity
+columns, and touches gameplay state only through a handful of named bindings. So it
+has no reason to depend on `ecs`/`data`, and keeping it a `core + gpu + platform` port
+module (a) makes that narrowness a build-enforced boundary (a `ui → ecs` import is a
+compile error, not a temptation), (b) preserves the headless-testability §2 requires —
+layout/hit-test/focus are assertable against a fake host and the null `gpu` backend
+without standing up a full `Sim`, exactly as ADR 0015 notes a fake `Host` over a plain
+`World` exercises the script seam — and (c) matches #130's tier. This is a
+load-bearing boundary (ADR 0015's own justification: honoring the import DAG), not
+speculative flexibility.
 
 ### 6. Prerequisite: text/font rendering does not exist yet
 
@@ -161,10 +193,11 @@ gains zero Pac-Man-specific concept from building it, the same discipline ADR 00
   module every future `engine` change must keep acyclic against; UI's "cosmetic,
   hash-excluded, one-way bound" discipline must be enforced the same way `Appearance`/
   `Sprite` are, or a HUD becomes a silent second source of truth for gameplay state.
-- **Committed to:** `ui → core + data + ecs + gpu + platform`, with `engine` the only
-  importer of `ui`; UI structure as ZON, UI behavior as Lua events, never a per-frame
-  per-widget callback; UI state excluded from `World.stateHash`; `zgui` remains
-  `tools/`-only for the foreseeable future.
+- **Committed to:** `ui → core + gpu + platform`, with `engine` the only importer of
+  `ui` and the live gameplay state reached through an engine-filled host seam (ADR
+  0015 pattern), never a direct `ui → ecs`/`data` import; UI structure as ZON, UI
+  behavior as Lua events, never a per-frame per-widget callback; UI state excluded
+  from `World.stateHash`; `zgui` remains `tools/`-only for the foreseeable future.
 - **Explicitly not doing here:** no concrete widget/layout ZON schema (#132), no
   concrete `mana`-surface UI events or handle types (#134, its own ADR per ADR 0003
   §5's "any change to the surface needs its own ADR"), no font/glyph format decision
@@ -175,6 +208,8 @@ Cross-references: #130 (this decision), #131 (text/font rendering, prerequisite)
 #132 (widget/layout ZON format), #133 (Pac-Man HUD, anchor slice), #134 (input focus/
 routing), #135/#136 (navigation and data-bound-grid follow-ups); builds on ADR 0003
 (Lua scripting API/event model), ADR 0004 (scene/entity schema), ADR 0009 (platform
-port), ADR 0010 (gpu port surface), ADR 0018 (a game is data), ADR 0024 (named data
-components), ADR 0030 (appearance as data / cosmetic-hash-exclusion precedent), ADR
-0031 (sprite rendering, the other cosmetic-and-hash-excluded precedent).
+port), ADR 0010 (gpu port surface), ADR 0015 (the script↔engine host seam — the
+DAG-legal pattern this ADR reuses to bind sim state), ADR 0018 (a game is data), ADR
+0024 (named data components), ADR 0030 (appearance as data / cosmetic-hash-exclusion
+precedent), ADR 0031 (sprite rendering, the other cosmetic-and-hash-excluded
+precedent).
