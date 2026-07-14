@@ -4,24 +4,34 @@
 // OWN cell, an unwalkable-onward nav target: pac holds still on that axis rather than
 // detouring sideways through the maze to find some other way down (the pre-#108 bug this
 // regresses; the #139 far target is a pure-axis scan, so it still can't corner-cut).
-// Holding DOWN from tick 10 changes the heading to
+// Holding UP from tick 10 changes the heading to
 // vertical while pac is still a few cells short of column 8's row-8 gap, so the very
-// first "down" retarget picks a wall cell; by tick 50 pac has NOT moved off row 9 at
+// first "up" retarget picks a wall cell; by tick 50 pac has NOT moved off row 9 at
 // all (y is still 4). Since #126 nav is axis-aligned and grid-locked, a blocked agent
 // glides to its current cell centre and stops flush there instead of freezing mid-cell:
 // pac finishes reaching column 7's centre (world x = -2) and holds — proof nav neither
 // auto-routes around the block nor slides diagonally. `08_straight_through.zon` is the
 // companion case where the pressed direction *is* open: pac turns, crosses an
 // intersection, and stops only at a real wall.
+//
+// Issue #159: this scenario presses UP, not DOWN. Row 9 (pac's start row) sits one
+// cell above the maze's bottom border (row 10, a solid wall the full width), so a
+// "down" press here would always block trivially one cell later regardless of column
+// — it would no longer exercise `farthest_open`'s "no auto-detour" behavior against
+// the maze's interior wall pattern (column 8's row-8 gap vs. the walls flanking it).
+// "up" (row-, toward row 0 — the corrected on_key mapping's up-on-screen direction)
+// walks toward that interior gap instead, reproducing exactly the case this scenario
+// was written to pin; the expected numbers are unchanged because they were always the
+// `dr = -1` trajectory, just reached (pre-fix) by the wrongly-labeled "down" key.
 .{
     .steps = 50,
     .input_trace = .{
         .{ .ticks = 10, .keys = .{} },
-        .{ .ticks = 40, .keys = .{"down"} },
+        .{ .ticks = 40, .keys = .{"up"} },
     },
     .expect = .{
         .{
-            .label = "turn: on_key(down) while blocked holds pac in place — no auto-detour around the wall",
+            .label = "turn: on_key(up) while blocked holds pac in place — no auto-detour around the wall",
             .at_tick = 50,
             .check = .{ .occupied = .{ .x = -2.0, .y = 4, .eps = 0.02 } },
         },
