@@ -412,3 +412,17 @@ test "nav: determinism — two identical nav runs produce the same state hash" {
     const b = try navScenarioHash(8);
     try testing.expectEqual(a, b);
 }
+
+/// Pinned golden hash for `navScenarioHash(8)` (issue #152): unlike the test above —
+/// which only proves two runs agree with *each other* — this asserts the hash against a
+/// literal captured value, so a silent drift in `nextStep`/`steer`'s math (the sim's most
+/// audited-as-uncovered path; `tests/determinism.zig`'s golden fixture is tilemap- and
+/// collider-free, so nav is a no-op there) actually fails CI instead of merely being
+/// self-consistent. Same pattern as `tests/determinism.zig`'s `golden_state_hash`: update
+/// only as a deliberate, reviewed step alongside an intended nav math change, by running
+/// this test, reading the actual hash out of the failure diff, and pasting it in below.
+const golden_nav_hash: u64 = 0x297e8967e83da7b8;
+
+test "nav: determinism — pinned golden hash over the maze-detour scenario" {
+    try testing.expectEqual(golden_nav_hash, try navScenarioHash(8));
+}
