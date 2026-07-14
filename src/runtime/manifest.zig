@@ -42,6 +42,11 @@ pub const Manifest = struct {
     /// scripting should also set `script_api`, so a build without `-Denable-lua` is
     /// refused rather than silently running scriptless.
     script: ?[]const u8 = null,
+    /// Optional data-driven HUD screen (ADR 0034; issue #133): a package-relative ZON
+    /// path parsed as a `ui.Screen` and composited (display-only) over the game frame in
+    /// `--play` and `--render-play-frame`. Absent ⇒ no HUD (genre-neutral: the engine
+    /// draws whatever the package declares). Watched for hot reload.
+    hud: ?[]const u8 = null,
 };
 
 /// Parse a manifest from NUL-terminated ZON `source`. Unknown fields are ignored
@@ -61,7 +66,7 @@ pub fn free(gpa: Allocator, manifest: Manifest) void {
 /// and script (issue #51) files. Returned paths borrow from `manifest`; the slice is
 /// owned by `gpa` (free it, not the elements).
 pub fn watchPaths(gpa: Allocator, manifest: Manifest) Allocator.Error![]const []const u8 {
-    const optional = [_]?[]const u8{ manifest.prototypes, manifest.script };
+    const optional = [_]?[]const u8{ manifest.prototypes, manifest.script, manifest.hud };
     var extra: usize = 0;
     for (optional) |o| {
         if (o != null) extra += 1;
@@ -207,6 +212,40 @@ test "manifest: script field parses and watchPaths lists scene, then prototypes,
     try testing.expectEqual(@as(usize, 4), paths.len); // game + scene + protos + script
     try testing.expectEqualStrings("protos.zon", paths[2]);
     try testing.expectEqualStrings("rules.lua", paths[3]);
+}
+
+test "manifest: hud field parses and watchPaths includes it when present" {
+    const src =
+        \\.{
+        \\    .name = "h",
+        \\    .version = "1",
+        \\    .entry_scene = "scenes/a.zon",
+        \\    .scenes = .{ "scenes/a.zon" },
+        \\    .hud = "hud.zon",
+        \\}
+    ;
+    const m = try parse(testing.allocator, src);
+    defer free(testing.allocator, m);
+    try testing.expectEqualStrings("hud.zon", m.hud.?);
+
+    const paths = try watchPaths(testing.allocator, m);
+    defer testing.allocator.free(paths);
+    try testing.expectEqual(@as(usize, 3), paths.len); // game.zon + one scene + hud
+    try testing.expectEqualStrings("hud.zon", paths[2]);
+}
+
+test "manifest: hud defaults to null (no HUD screen)" {
+    const src =
+        \\.{
+        \\    .name = "h",
+        \\    .version = "1",
+        \\    .entry_scene = "s.zon",
+        \\    .scenes = .{ "s.zon" },
+        \\}
+    ;
+    const m = try parse(testing.allocator, src);
+    defer free(testing.allocator, m);
+    try testing.expect(m.hud == null);
 }
 
 test "manifest: prototypes defaults to null (no prototype file)" {

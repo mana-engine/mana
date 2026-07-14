@@ -349,7 +349,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "data", .module = data },
         .{ .name = "engine", .module = engine },
     };
-    for ([_][]const u8{ "tests/determinism.zig", "tests/hot_reload.zig", "tests/acceptance_scenarios.zig", "tests/render_svg.zig" }) |path| {
+    for ([_][]const u8{ "tests/determinism.zig", "tests/hot_reload.zig", "tests/acceptance_scenarios.zig", "tests/render_svg.zig", "tests/hud.zig" }) |path| {
         const mod = b.createModule(.{
             .root_source_file = b.path(path),
             .target = target,

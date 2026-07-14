@@ -7,6 +7,9 @@
     },
     .prototypes = "prototypes.zon",
     .script = "rules.lua",
+    // Data-bound score/lives HUD (ADR 0034; issue #133), composited display-only over
+    // the game frame. Content, interpreted by the engine — no GUI code in the package.
+    .hud = "hud.zon",
     // Requires the mana v1 scripting API (ADR 0003). A build without -Denable-lua
     // is refused rather than running scriptless.
     .script_api = 1,
