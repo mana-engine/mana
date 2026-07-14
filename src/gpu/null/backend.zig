@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const port = @import("../port.zig");
+const raster = @import("textured_raster.zig");
 const Allocator = std.mem.Allocator;
 
 /// An offscreen colour target backed by a host RGBA8 pixel buffer owned by `gpa`.
@@ -68,9 +69,9 @@ pub const Pipeline = struct {
 };
 
 /// The textured sprite pipeline (ADR 0031 §4). Like `Pipeline`, an empty handle: the
-/// null rasterizer fills a sprite quad with its flat tint rather than sampling the
-/// atlas (it is a real, testable no-op — not a texel sampler), so no pipeline state is
-/// needed. Present for surface parity with the Vulkan backend's textured pipeline.
+/// null rasterizer is fixed-function (it samples the bound atlas per fragment; see
+/// `CommandList.drawTextured`), so no pipeline state is needed. Present for surface
+/// parity with the Vulkan backend's textured pipeline.
 pub const TexturedPipeline = struct {
     /// No-op release; present for surface parity with the Vulkan backend.
     pub fn deinit(self: *TexturedPipeline, dev: *Device) void {
@@ -85,9 +86,12 @@ pub const CommandList = struct {
     target: ?*Texture = null,
     vertices: []const u8 = &.{},
     /// Whether the bound pipeline is the textured sprite pipeline (ADR 0031): when set,
-    /// `draw` interprets `vertices` as `port.TexturedVertex` and fills each quad with
-    /// its tint. `bindPipeline` (flat) clears it; `bindTexturedPipeline` sets it.
+    /// `draw` interprets `vertices` as `port.TexturedVertex` and samples the bound atlas.
+    /// `bindPipeline` (flat) clears it; `bindTexturedPipeline` sets it.
     textured: bool = false,
+    /// The atlas the textured pipeline samples, bound by `bindTexture` (null until then).
+    /// A textured `draw` samples it nearest-neighbour at each fragment's interpolated UV.
+    atlas: ?*const Texture = null,
 
     /// Begin rendering into `target`, clearing it to `clear` (RGBA, 0..1).
     pub fn beginRendering(self: *CommandList, target: *Texture, clear: [4]f32) void {
@@ -117,13 +121,13 @@ pub const CommandList = struct {
         self.textured = true;
     }
 
-    /// Bind `tex` as the sampled atlas for the textured pipeline. No-op: the null
-    /// backend does not sample texels (it fills the quad's tint); `pipeline`/`tex` are
-    /// accepted only for surface parity with the Vulkan backend's descriptor bind.
+    /// Bind `tex` as the sampled atlas for the textured pipeline: the next textured
+    /// `draw` samples its pixels nearest-neighbour at each fragment's interpolated UV
+    /// (ADR 0031 §4). `pipeline` carries no state on the null backend. `tex` is borrowed
+    /// and must outlive the draw.
     pub fn bindTexture(self: *CommandList, pipeline: *TexturedPipeline, tex: *Texture) void {
-        _ = self;
         _ = pipeline;
-        _ = tex;
+        self.atlas = tex;
     }
 
     /// Bind the vertex buffer the next `draw` rasterizes.
@@ -171,41 +175,21 @@ pub const CommandList = struct {
         }
     }
 
-    /// Rasterize `vertex_count` textured vertices (6 per quad) as their bounding box
-    /// filled with the tint colour (ADR 0031 §4). The null backend does not sample the
-    /// atlas — it is a flat-fill test double — so a sprite quad draws as its tint over
-    /// its (possibly rotated) footprint. Vertices are `port.TexturedVertex`.
+    /// Rasterize `vertex_count` textured vertices (6 per quad → two triangles) into the
+    /// bound target, sampling the bound atlas (ADR 0031 §4). Delegates each triangle to the
+    /// pure `textured_raster.rasterTri` — a REAL nearest-neighbour texel sampler with
+    /// straight-alpha blend, not a flat-fill — so a `render.projectSprites` geometry/UV bug
+    /// reproduces headlessly (see `textured_raster.zig`). No atlas bound ⇒ nothing is
+    /// sampled (no-op). Vertices are `port.TexturedVertex`.
     fn drawTextured(self: *CommandList, vertex_count: u32) void {
         const target = self.target orelse return;
+        const atlas = self.atlas orelse return;
+        if (atlas.width == 0 or atlas.height == 0) return;
         const verts = std.mem.bytesAsSlice(port.TexturedVertex, self.vertices);
         var base: usize = 0;
         while (base + 6 <= vertex_count) : (base += 6) {
-            var min_x: f32 = verts[base].x;
-            var max_x: f32 = verts[base].x;
-            var min_y: f32 = verts[base].y;
-            var max_y: f32 = verts[base].y;
-            for (verts[base .. base + 6]) |v| {
-                min_x = @min(min_x, v.x);
-                max_x = @max(max_x, v.x);
-                min_y = @min(min_y, v.y);
-                max_y = @max(max_y, v.y);
-            }
-            const c = [3]u8{ toU8(verts[base].r), toU8(verts[base].g), toU8(verts[base].b) };
-            const x0 = clampPx(ndcToPx(min_x, @floatFromInt(target.width)), target.width);
-            const x1 = clampPx(ndcToPx(max_x, @floatFromInt(target.width)), target.width);
-            const y0 = clampPx(ndcToPx(min_y, @floatFromInt(target.height)), target.height);
-            const y1 = clampPx(ndcToPx(max_y, @floatFromInt(target.height)), target.height);
-            var y = y0;
-            while (y < y1) : (y += 1) {
-                var x = x0;
-                while (x < x1) : (x += 1) {
-                    const i = (@as(usize, y) * target.width + x) * 4;
-                    target.pixels[i + 0] = c[0];
-                    target.pixels[i + 1] = c[1];
-                    target.pixels[i + 2] = c[2];
-                    target.pixels[i + 3] = 255;
-                }
-            }
+            raster.rasterTri(target.pixels, target.width, target.height, atlas.pixels, atlas.width, atlas.height, verts[base + 0], verts[base + 1], verts[base + 2]);
+            raster.rasterTri(target.pixels, target.width, target.height, atlas.pixels, atlas.width, atlas.height, verts[base + 3], verts[base + 4], verts[base + 5]);
         }
     }
 
@@ -260,9 +244,9 @@ pub const Device = struct {
 
     /// Upload tightly-packed RGBA8 `rgba` into `tex` (ADR 0031: a decoded sprite sheet
     /// reaching the GPU). On the null backend this copies the bytes into the texture's
-    /// host pixel buffer — a real adapter (the bytes are tracked and readable), but the
-    /// null rasterizer still fills a quad's flat colour and never samples them; texel
-    /// sampling is the Vulkan path only. `rgba.len` must equal the texture's byte size.
+    /// host pixel buffer — a real adapter (the bytes are tracked and readable) — and the
+    /// null textured rasterizer samples them nearest-neighbour when `tex` is the bound
+    /// atlas (`drawTextured`). `rgba.len` must equal the texture's byte size.
     /// `dev` is unused (host memory) but kept for surface parity with the Vulkan backend,
     /// which needs the device to stage the copy. Never fails on the null backend; `!void`
     /// matches the Vulkan backend's fallible upload.
@@ -476,6 +460,39 @@ test "null backend: uploadTexture copies RGBA bytes into a sampled texture" {
     // The null adapter really holds the uploaded bytes (a readable test double), even
     // though its rasterizer draws flat colour rather than sampling them.
     try testing.expectEqualSlices(u8, &rgba, tex.pixels);
+}
+
+test "null backend: a textured draw with no atlas bound samples nothing" {
+    var dev = try Device.init(testing.allocator);
+    defer dev.deinit();
+    var target = try dev.createTexture(.{ .width = 4, .height = 4, .format = .rgba8_unorm, .usage = .{ .color_attachment = true, .transfer_src = true } });
+    defer target.deinit(&dev);
+
+    const q = [_]port.TexturedVertex{
+        .{ .x = -1, .y = -1, .u = 0, .v = 0, .r = 1, .g = 1, .b = 1 },
+        .{ .x = 1, .y = -1, .u = 1, .v = 0, .r = 1, .g = 1, .b = 1 },
+        .{ .x = -1, .y = 1, .u = 0, .v = 1, .r = 1, .g = 1, .b = 1 },
+        .{ .x = -1, .y = 1, .u = 0, .v = 1, .r = 1, .g = 1, .b = 1 },
+        .{ .x = 1, .y = -1, .u = 1, .v = 0, .r = 1, .g = 1, .b = 1 },
+        .{ .x = 1, .y = 1, .u = 1, .v = 1, .r = 1, .g = 1, .b = 1 },
+    };
+    var vbuf = try dev.createBuffer(.{ .size = @sizeOf(@TypeOf(q)), .usage = .{ .vertex = true } });
+    defer vbuf.deinit(&dev);
+    try vbuf.write(&dev, std.mem.asBytes(&q));
+    var pipe = try dev.createTexturedPipeline(.rgba8_unorm);
+    defer pipe.deinit(&dev);
+
+    var cmd = try dev.beginCommands();
+    defer cmd.deinit(&dev);
+    cmd.beginRendering(&target, .{ 0, 0, 0, 1 });
+    cmd.bindTexturedPipeline(&pipe);
+    // No bindTexture → the textured draw must be a no-op, leaving the clear intact.
+    cmd.bindVertexBuffer(&vbuf);
+    cmd.draw(6);
+    cmd.endRendering();
+    try dev.submit(&cmd);
+
+    for (0..4 * 4) |p| try testing.expectEqual(@as(u8, 0), target.pixels[p * 4 + 0]);
 }
 
 test "null backend: swapchain acquire -> render -> present captures the frame" {

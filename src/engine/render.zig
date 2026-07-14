@@ -301,6 +301,66 @@ test "projectSprites: places a textured quad and faces its velocity" {
     try testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), quads[0].angle, 1e-5);
 }
 
+test "projectSprites → captureFrame: the animation cursor selects the frame rendered headlessly" {
+    // The visibility guarantee (issue #122): the current chomp frame the null backend
+    // composites headlessly is the one the animation cursor points at — so a broken sprite
+    // shows up in a PNG + this test, not only when a user plays `--play`. Two distinct
+    // frames (red, blue) prove the sampled texel — not a flat tint — reaches the target.
+    const gpa = testing.allocator;
+    var f0: [4 * 4 * 4]u8 = undefined; // opaque red
+    var f1: [4 * 4 * 4]u8 = undefined; // opaque blue
+    var p: usize = 0;
+    while (p < f0.len) : (p += 4) {
+        f0[p + 0] = 255;
+        f0[p + 1] = 0;
+        f0[p + 2] = 0;
+        f0[p + 3] = 255;
+        f1[p + 0] = 0;
+        f1[p + 1] = 0;
+        f1[p + 2] = 255;
+        f1[p + 3] = 255;
+    }
+    var store = try spriteStoreWith(gpa, "s.msf", .{
+        .width = 4,
+        .height = 4,
+        .frames = &.{ &f0, &f1 },
+        .clips = &.{.{ .name = "chomp", .fps = 12, .frames = &.{ 0, 1 } }},
+    });
+    defer store.deinit();
+    var atlas = try sprite.buildAtlas(gpa, &store);
+    defer atlas.deinit();
+
+    var world = World.init(gpa);
+    defer world.deinit();
+    const e = try world.spawn();
+    try world.setTransform(e, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try world.setAppearance(e, .{ .color = .{ 1, 1, 1 }, .size = 0.5 }); // fills the tiny frame
+    try world.setSprite(e, .{ .sheet = "s.msf", .clip = "chomp" });
+    try world.setVelocity(e, .{ .v = .{ .x = 1, .y = 0, .z = 0 } }); // face +x → angle 0, axis-aligned
+
+    // view 16x16, scale 32 → size 0.5 ⇒ half 8px = NDC 1.0 (a full-frame quad).
+    const view: View = .{ .width = 16, .height = 16, .projection = .{ .orthographic = .{ .scale = 32 } } };
+    const center = (8 * 16 + 8) * 4;
+
+    // Frame 0 (clip position 0) → the red sheet frame fills the capture.
+    try world.setAnimationState(e, .{ .frame = 0 });
+    const q0 = try projectSprites(gpa, &world, view, &store, &atlas);
+    defer gpa.free(q0);
+    const px0 = try gpu.captureFrame(gpa, view.width, view.height, &.{}, q0, atlas.pixels, atlas.width, atlas.height, .{ 0, 0, 0, 1 });
+    defer gpa.free(px0);
+    try testing.expectEqual(@as(u8, 255), px0[center + 0]); // red
+    try testing.expectEqual(@as(u8, 0), px0[center + 2]);
+
+    // Frame 1 (clip position 1) → the blue sheet frame — the cursor changed the output.
+    try world.setAnimationState(e, .{ .frame = 1 });
+    const q1 = try projectSprites(gpa, &world, view, &store, &atlas);
+    defer gpa.free(q1);
+    const px1 = try gpu.captureFrame(gpa, view.width, view.height, &.{}, q1, atlas.pixels, atlas.width, atlas.height, .{ 0, 0, 0, 1 });
+    defer gpa.free(px1);
+    try testing.expectEqual(@as(u8, 0), px1[center + 0]);
+    try testing.expectEqual(@as(u8, 255), px1[center + 2]); // blue
+}
+
 test "projectSprites: a stationary entity keeps angle 0; an unloaded sheet is skipped" {
     const gpa = testing.allocator;
     var px: [1 * 1 * 4]u8 = .{ 9, 9, 9, 255 };
