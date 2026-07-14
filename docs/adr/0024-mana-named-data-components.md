@@ -1,6 +1,6 @@
 # 0024. `mana.get`/`mana.set`: named scalar data components
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-13
 
 ## Context

@@ -1,6 +1,6 @@
 # 0036. Text rendering: an embedded bitmap font + layout through the sprite atlas/batcher
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-14
 
 ## Context

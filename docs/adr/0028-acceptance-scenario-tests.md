@@ -1,6 +1,6 @@
 # 0028. Acceptance / scenario tests: a behavioral oracle atop the deterministic sim
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-13
 
 ## Context
