@@ -4,8 +4,10 @@
 // outcome a state hash cannot express. Since #108, pac's nav target is the next cell
 // in its heading rather than a far one; the dot sits on the same open row either way,
 // so pac reaches the identical spot, just a few ticks later (the 0.1s retarget
-// cadence occasionally catches pac mid-cell) — hence `at_tick` moved from 32 to 43,
-// unchanged position.
+// cadence occasionally catches pac mid-cell) — hence `at_tick` moved from 32 to 43.
+// Since #126 nav is axis-aligned/grid-locked; pac still eats the row-9 dot (world
+// (-5,4)) on its leftward march, and by tick 43 it sits on that now-empty cell centre
+// (world x = -5, lane-centred at y = 4), where the score reads back.
 .{
     .steps = 43,
     .input_trace = .{
@@ -20,7 +22,7 @@
         .{
             .label = "eat: eating a dot adds 10 to pac's score",
             .at_tick = 43,
-            .check = .{ .data_at = .{ .pos = .{ .x = -4.333, .y = 4, .eps = 0.02 }, .name = "score", .value = 10 } },
+            .check = .{ .data_at = .{ .pos = .{ .x = -5.0, .y = 4, .eps = 0.02 }, .name = "score", .value = 10 } },
         },
     },
 }
