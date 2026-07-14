@@ -8,7 +8,7 @@ const core = @import("core");
 pub const zon = @import("zon.zig");
 pub const watch = @import("watch.zig");
 pub const png = @import("png.zig");
-/// The MSF1 sprite-sheet container (ADR 0031): `encode` (used by `tools/spritegen`)
+/// The MSF2 sprite-sheet container (ADR 0031, ADR 0033): `encode` (used by `tools/spritegen`)
 /// and `decode` (used by the engine's sprite loader) of a dependency-free RGBA8
 /// frame + clip container. The single definition of the format on both sides.
 pub const msf = @import("msf.zig");

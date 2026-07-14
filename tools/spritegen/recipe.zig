@@ -49,13 +49,24 @@ pub const Frame = struct {
     ops: []const Op,
 };
 
-/// A named animation clip: an ordered list of frame indices played at `fps`. Frame
-/// indices refer to positions in the recipe's `frames`. Ping-pong/loop behaviour is a
-/// consumer (engine) choice, not encoded here.
+/// A named animation clip (ADR 0031, ADR 0033): an ordered list of frame indices played
+/// at `fps`, plus optional per-facing phase lists for a directional sprite. Frame indices
+/// refer to positions in the recipe's `frames`. Ping-pong/loop behaviour is a consumer
+/// (engine) choice, not encoded here.
+///
+/// `frames` is the non-directional / default phase list (optional if any facing is given
+/// — the tool then derives a base from the first present facing). Author a facing to make
+/// the sprite directional; OMIT one horizontal facing (`left`/`right`) to have the engine
+/// mirror it from its opposite (ADR 0033 §2: "absence is the signal"). Author both to opt
+/// out of mirroring for an asymmetric character.
 pub const Clip = struct {
     name: []const u8,
     fps: u32,
-    frames: []const u32,
+    frames: []const u32 = &.{},
+    up: ?[]const u32 = null,
+    down: ?[]const u32 = null,
+    left: ?[]const u32 = null,
+    right: ?[]const u32 = null,
 };
 
 /// A full sprite recipe. `size` is the square canvas edge in pixels. `background`
@@ -70,7 +81,7 @@ pub const Recipe = struct {
 
 /// Errors rasterization can raise beyond allocation: a colour name absent from the
 /// palette, a clip frame index out of range, or a degenerate canvas size.
-pub const Error = error{ UnknownColor, FrameIndexOutOfRange, EmptyRecipe } || Allocator.Error;
+pub const Error = error{ UnknownColor, FrameIndexOutOfRange, EmptyRecipe, EmptyClip } || Allocator.Error;
 
 /// The rasterized output: one RGBA8 buffer per frame (`size*size*4` bytes each),
 /// plus the frame edge in pixels. Caller owns it; free with `deinit`.
@@ -114,13 +125,24 @@ pub fn rasterize(gpa: Allocator, recipe: Recipe) Error!Rasterized {
     return .{ .size = recipe.size, .frames = frames };
 }
 
-/// Ensure every clip's frame index is in range (so the engine never indexes past the
-/// sheet). Called before any rasterization work.
+/// Ensure every clip's frame index — in its base list AND every per-facing phase list
+/// (ADR 0033) — is in range (so the engine never indexes past the sheet). Also rejects a
+/// clip that names no frames at all (neither `frames` nor any facing), which would carry
+/// no phase length. Called before any rasterization work.
 fn validateClips(recipe: Recipe) Error!void {
     for (recipe.animations) |clip| {
+        var any = clip.frames.len > 0;
         for (clip.frames) |idx| {
             if (idx >= recipe.frames.len) return error.FrameIndexOutOfRange;
         }
+        for ([_]?[]const u32{ clip.up, clip.down, clip.left, clip.right }) |facing| {
+            const list = facing orelse continue;
+            if (list.len > 0) any = true;
+            for (list) |idx| {
+                if (idx >= recipe.frames.len) return error.FrameIndexOutOfRange;
+            }
+        }
+        if (!any) return error.EmptyClip;
     }
 }
 
@@ -217,6 +239,63 @@ test "recipe: an unknown colour name is an error" {
     const parsed = try data.zon.parse(Recipe, testing.allocator, bad);
     defer data.zon.free(testing.allocator, parsed);
     try testing.expectError(error.UnknownColor, rasterize(testing.allocator, parsed));
+}
+
+test "recipe: a directional clip's per-facing frames are validated and rasterized" {
+    const dir: [:0]const u8 =
+        \\.{
+        \\    .size = 8,
+        \\    .palette = .{
+        \\        .{ .name = "fill", .rgba = .{ 255, 220, 40, 255 } },
+        \\        .{ .name = "clear", .rgba = .{ 0, 0, 0, 0 } },
+        \\    },
+        \\    .frames = .{
+        \\        .{ .ops = .{ .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.45, .color = "fill" } } } },
+        \\        .{ .ops = .{
+        \\            .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.45, .color = "fill" } },
+        \\            .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.5, .a0 = -30, .a1 = 30, .color = "clear" } },
+        \\        } },
+        \\    },
+        \\    .animations = .{
+        \\        .{ .name = "chomp", .fps = 8, .up = .{ 0, 1 }, .down = .{ 1, 0 }, .right = .{ 0, 1 } },
+        \\    },
+        \\}
+    ;
+    const parsed = try data.zon.parse(Recipe, testing.allocator, dir);
+    defer data.zon.free(testing.allocator, parsed);
+    var out = try rasterize(testing.allocator, parsed);
+    defer out.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), out.frames.len);
+    // left is omitted (mirrored from right at render); the clip is still valid.
+    try testing.expect(parsed.animations[0].left == null);
+}
+
+test "recipe: a directional facing frame index out of range is an error" {
+    const bad: [:0]const u8 =
+        \\.{
+        \\    .size = 8,
+        \\    .palette = .{ .{ .name = "fill", .rgba = .{ 1, 2, 3, 255 } } },
+        \\    .frames = .{ .{ .ops = .{ .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.4, .color = "fill" } } } } },
+        \\    .animations = .{ .{ .name = "x", .fps = 4, .right = .{ 0, 9 } } },
+        \\}
+    ;
+    const parsed = try data.zon.parse(Recipe, testing.allocator, bad);
+    defer data.zon.free(testing.allocator, parsed);
+    try testing.expectError(error.FrameIndexOutOfRange, rasterize(testing.allocator, parsed));
+}
+
+test "recipe: a clip that names no frames at all is an error" {
+    const bad: [:0]const u8 =
+        \\.{
+        \\    .size = 8,
+        \\    .palette = .{ .{ .name = "fill", .rgba = .{ 1, 2, 3, 255 } } },
+        \\    .frames = .{ .{ .ops = .{ .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.4, .color = "fill" } } } } },
+        \\    .animations = .{ .{ .name = "empty", .fps = 4 } },
+        \\}
+    ;
+    const parsed = try data.zon.parse(Recipe, testing.allocator, bad);
+    defer data.zon.free(testing.allocator, parsed);
+    try testing.expectError(error.EmptyClip, rasterize(testing.allocator, parsed));
 }
 
 test "recipe: a clip frame index out of range is an error" {

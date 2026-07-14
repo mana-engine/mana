@@ -95,6 +95,14 @@ pub const AnimationState = struct {
     /// render-time animation system (see `animation.clipPosition`); the sheet frame index
     /// the renderer samples is `clip.frames[frame]`.
     frame: u16 = 0,
+    /// Latched last-non-zero world-space travel heading (ADR 0033 §3), written from
+    /// `Velocity` by the render-time `sprite.advance` whenever velocity is non-zero and
+    /// RETAINED across the brief zero-velocity ticks at a grid intersection. The renderer
+    /// classifies it through the projection into a screen `Facing` to pick a directional
+    /// clip frame; latching is what stops the facing flickering (#125). Zero until the
+    /// entity first moves (⇒ the clip's non-directional pose). Cosmetic and hash-excluded
+    /// like the rest of the cursor.
+    heading: Vec2 = .{ .x = 0, .y = 0 },
 };
 
 /// Playback behaviour of a `Sprite`'s clip when its last frame is reached (ADR 0031 §1):

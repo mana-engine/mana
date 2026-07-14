@@ -1,9 +1,14 @@
-//! MSF1 — "mana sprite format", version 1 (ADR 0031 §2): the provisional, dependency-
-//! free container `spritegen` emits (`encode`) and the engine decodes (`decode`). It
-//! carries raw straight-alpha RGBA8 frames plus a clip table, little-endian, no
-//! compression. It is deliberately trivial (decode is a header read + slices) and
-//! **provisional** — pending #109's interchange-codec decision, only the per-frame blob
-//! encoding would change, behind the same versioned header.
+//! MSF2 — "mana sprite format", version 2 (ADR 0031 §2, ADR 0033): the dependency-free
+//! container `spritegen` emits (`encode`) and the engine decodes (`decode`). It carries
+//! raw straight-alpha RGBA8 frames plus a clip table, little-endian, no compression. It
+//! is deliberately trivial (decode is a header read + slices).
+//!
+//! MSF2 (ADR 0033) adds a per-clip **facing dimension**: alongside the non-directional
+//! `frames` list (the single-facing fallback, unchanged), a clip may carry a phase list
+//! per screen facing (up/down/left/right). A missing horizontal facing is X-flipped from
+//! its opposite at render time (the "absence is the signal" mirror rule, ADR 0033 §2) —
+//! the format stores only what is authored, no mirror boolean. The per-frame blob
+//! encoding remains open (#109 could later swap it behind the versioned header).
 //!
 //! Lives in `data` (the file layer, beside `png`/`zon`) so it is the SINGLE definition
 //! of the format: `tools/spritegen` imports `data.msf` to encode, the engine's sprite
@@ -16,16 +21,30 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// Magic bytes at the start of every MSF1 file.
-pub const magic = "MSF1";
-/// Format version the header carries. A breaking change bumps this (e.g. "MSF2").
-pub const version: u16 = 1;
+/// Magic bytes at the start of every MSF2 file (bumped from `"MSF1"` for the facing
+/// dimension, ADR 0033; MSF1 files no longer decode — sheets are regenerated artifacts).
+pub const magic = "MSF2";
+/// Format version the header carries. A breaking change bumps this.
+pub const version: u16 = 2;
 
-/// A clip in decoded form: a name, a playback rate, and frame indices into `frames`.
+/// A screen-space travel facing a directional clip may carry a distinct phase list for
+/// (ADR 0033). The engine classifies an entity's world-space heading into one of these
+/// through the active projection; a non-directional clip carries none. The enum's
+/// integer order (up, down, left, right) is the wire order of `Clip.facings` and its
+/// facing-mask bits.
+pub const Facing = enum(u2) { up, down, left, right };
+
+/// A clip in decoded form (ADR 0031, ADR 0033): a name, a playback rate, the
+/// non-directional `frames` phase list (the single-facing fallback), and an optional
+/// phase list per screen facing. `facings[@intFromEnum(f)]` is null when facing `f` is
+/// not authored — a missing horizontal facing is mirrored from its opposite at render
+/// time (ADR 0033 §2), a missing vertical facing falls back to `frames`. Each phase list
+/// holds frame indices into the sheet's `frames`.
 pub const Clip = struct {
     name: []const u8,
     fps: u16,
     frames: []const u16,
+    facings: [4]?[]const u16 = .{ null, null, null, null },
 };
 
 /// A decoded (or to-be-encoded) sheet: square-free `width`×`height` frames plus clips.
@@ -41,7 +60,7 @@ pub const Sheet = struct {
 /// Errors `decode` can raise on a malformed or truncated buffer.
 pub const DecodeError = error{ BadMagic, BadVersion, Truncated, SizeMismatch } || Allocator.Error;
 
-/// Encode `sheet` to MSF1 bytes. Caller owns the result. Asserts each frame buffer is
+/// Encode `sheet` to MSF2 bytes. Caller owns the result. Asserts each frame buffer is
 /// exactly `width*height*4` bytes.
 pub fn encode(gpa: Allocator, sheet: Sheet) Allocator.Error![]u8 {
     const frame_bytes: usize = @as(usize, sheet.width) * sheet.height * 4;
@@ -64,13 +83,29 @@ pub fn encode(gpa: Allocator, sheet: Sheet) Allocator.Error![]u8 {
         try out.append(gpa, @intCast(clip.name.len));
         try out.appendSlice(gpa, clip.name);
         try appendInt(gpa, &out, u16, clip.fps);
-        try appendInt(gpa, &out, u16, @intCast(clip.frames.len));
-        for (clip.frames) |idx| try appendInt(gpa, &out, u16, idx);
+        try appendFrameList(gpa, &out, clip.frames);
+        // Facing mask (bit i ⇒ facings[i] present, in enum order up/down/left/right),
+        // then one phase list per present facing — MSF2's additive per-clip extension.
+        var mask: u8 = 0;
+        for (clip.facings, 0..) |f, i| {
+            if (f != null) mask |= @as(u8, 1) << @intCast(i);
+        }
+        try out.append(gpa, mask);
+        for (clip.facings) |f| {
+            if (f) |list| try appendFrameList(gpa, &out, list);
+        }
     }
     return out.toOwnedSlice(gpa);
 }
 
-/// Decode MSF1 `bytes` into a `Sheet` whose slices are owned by the caller (free with
+/// Append a `u16` length-prefixed frame-index list to `out` (a clip's base or per-facing
+/// phase list). Asserts the list fits a `u16` length.
+fn appendFrameList(gpa: Allocator, out: *std.ArrayList(u8), list: []const u16) Allocator.Error!void {
+    try appendInt(gpa, out, u16, @intCast(list.len));
+    for (list) |idx| try appendInt(gpa, out, u16, idx);
+}
+
+/// Decode MSF2 `bytes` into a `Sheet` whose slices are owned by the caller (free with
 /// `free`). Rejects a bad magic/version or a truncated buffer.
 pub fn decode(gpa: Allocator, bytes: []const u8) DecodeError!Sheet {
     var r: Reader = .{ .bytes = bytes };
@@ -97,10 +132,7 @@ pub fn decode(gpa: Allocator, bytes: []const u8) DecodeError!Sheet {
     var clips = try gpa.alloc(Clip, clip_cnt);
     var cgot: usize = 0;
     errdefer {
-        for (clips[0..cgot]) |c| {
-            gpa.free(c.name);
-            gpa.free(c.frames);
-        }
+        for (clips[0..cgot]) |c| freeClip(gpa, c);
         gpa.free(clips);
     }
     for (0..clip_cnt) |i| {
@@ -108,24 +140,48 @@ pub fn decode(gpa: Allocator, bytes: []const u8) DecodeError!Sheet {
         const name = try gpa.dupe(u8, try r.take(name_len));
         errdefer gpa.free(name);
         const fps = try r.int(u16);
-        const n = try r.int(u16);
-        var idxs = try gpa.alloc(u16, n);
-        errdefer gpa.free(idxs);
-        for (0..n) |j| idxs[j] = try r.int(u16);
-        clips[i] = .{ .name = name, .fps = fps, .frames = idxs };
+        const base = try readFrameList(gpa, &r);
+        errdefer gpa.free(base);
+        // MSF2 per-clip facing mask + a phase list per present facing (enum order).
+        var facings: [4]?[]const u16 = .{ null, null, null, null };
+        errdefer for (facings) |f| {
+            if (f) |list| gpa.free(list);
+        };
+        const mask = try r.int(u8);
+        for (&facings, 0..) |*slot, bit| {
+            if (mask & (@as(u8, 1) << @intCast(bit)) != 0) slot.* = try readFrameList(gpa, &r);
+        }
+        clips[i] = .{ .name = name, .fps = fps, .frames = base, .facings = facings };
         cgot += 1;
     }
     return .{ .width = width, .height = height, .frames = frames, .clips = clips };
+}
+
+/// Read a `u16` length-prefixed frame-index list from `r` (a clip's base or per-facing
+/// phase list). Caller owns the returned slice.
+fn readFrameList(gpa: Allocator, r: *Reader) DecodeError![]u16 {
+    const n = try r.int(u16);
+    var idxs = try gpa.alloc(u16, n);
+    errdefer gpa.free(idxs);
+    for (0..n) |j| idxs[j] = try r.int(u16);
+    return idxs;
+}
+
+/// Free one decoded `Clip`'s owned slices (its name, base frame list, and any per-facing
+/// lists). Shared by `decode`'s error path and `free`.
+fn freeClip(gpa: Allocator, c: Clip) void {
+    gpa.free(c.name);
+    gpa.free(c.frames);
+    for (c.facings) |f| {
+        if (f) |list| gpa.free(list);
+    }
 }
 
 /// Free a `Sheet` produced by `decode`.
 pub fn free(gpa: Allocator, sheet: Sheet) void {
     for (sheet.frames) |f| gpa.free(f);
     gpa.free(sheet.frames);
-    for (sheet.clips) |c| {
-        gpa.free(c.name);
-        gpa.free(c.frames);
-    }
+    for (sheet.clips) |c| freeClip(gpa, c);
     gpa.free(sheet.clips);
 }
 
@@ -168,8 +224,20 @@ test "format: encode then decode round-trips a sheet" {
     for (&f1, 0..) |*b, i| b.* = @intCast((i * 3) & 0xff);
     const frames = [_][]const u8{ &f0, &f1 };
     const clips = [_]Clip{
-        .{ .name = "chomp", .fps = 12, .frames = &.{ 0, 1, 0 } },
-        .{ .name = "idle", .fps = 1, .frames = &.{0} },
+        // A directional clip (ADR 0033): base + up/down/right authored, left OMITTED so
+        // it is inferred by mirroring right — the round-trip must preserve the absence.
+        .{
+            .name = "chomp",
+            .fps = 12,
+            .frames = &.{ 0, 1, 0 },
+            .facings = .{
+                &.{ 0, 1 }, // up
+                &.{ 1, 0 }, // down
+                null, // left — absent (mirror of right)
+                &.{ 0, 1, 0 }, // right
+            },
+        },
+        .{ .name = "idle", .fps = 1, .frames = &.{0} }, // non-directional, no facings
     };
     const sheet: Sheet = .{ .width = w, .height = h, .frames = &frames, .clips = &clips };
 
@@ -187,11 +255,19 @@ test "format: encode then decode round-trips a sheet" {
     try testing.expectEqualStrings("chomp", back.clips[0].name);
     try testing.expectEqual(@as(u16, 12), back.clips[0].fps);
     try testing.expectEqualSlices(u16, &.{ 0, 1, 0 }, back.clips[0].frames);
+    // The facing dimension round-trips, absence included: left stays null (mirrored).
+    try testing.expectEqualSlices(u16, &.{ 0, 1 }, back.clips[0].facings[@intFromEnum(Facing.up)].?);
+    try testing.expectEqualSlices(u16, &.{ 1, 0 }, back.clips[0].facings[@intFromEnum(Facing.down)].?);
+    try testing.expect(back.clips[0].facings[@intFromEnum(Facing.left)] == null);
+    try testing.expectEqualSlices(u16, &.{ 0, 1, 0 }, back.clips[0].facings[@intFromEnum(Facing.right)].?);
     try testing.expectEqualStrings("idle", back.clips[1].name);
+    // A non-directional clip carries no facings (single-facing fallback unchanged).
+    for (back.clips[1].facings) |f| try testing.expect(f == null);
 }
 
 test "format: decode rejects bad magic and truncation" {
     const gpa = testing.allocator;
-    try testing.expectError(error.BadMagic, decode(gpa, "XXXX\x01\x00"));
-    try testing.expectError(error.Truncated, decode(gpa, "MSF1"));
+    try testing.expectError(error.BadMagic, decode(gpa, "XXXX\x02\x00"));
+    try testing.expectError(error.BadMagic, decode(gpa, "MSF1\x01\x00")); // MSF1 no longer decodes
+    try testing.expectError(error.Truncated, decode(gpa, "MSF2"));
 }

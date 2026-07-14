@@ -1,5 +1,5 @@
-// pac — a sprite recipe for `tools/spritegen` (ADR 0031). This ZON file is the SOURCE
-// OF TRUTH (invariant #1); the sheet + preview it generates are DERIVED artifacts,
+// pac — a sprite recipe for `tools/spritegen` (ADR 0031, ADR 0033). This ZON file is the
+// SOURCE OF TRUTH (invariant #1); the sheet + preview it generates are DERIVED artifacts,
 // never committed (see `.gitignore`). Regenerate + view with:
 //
 //   mise run assets              # generates into games/pacman/sprites/generated/ (gitignored)
@@ -9,9 +9,12 @@
 // generic primitives (disc, wedge, …). "pac" is this data file.
 //
 // A classic Pac-Man chomp: a yellow disc with a pie-wedge mouth (drawn with the erase
-// colour `clear`, which cuts a transparent hole) opening to the right. Four frames from
-// nearly-closed to wide-open; the `chomp` clip ping-pongs them so the mouth opens and
-// shuts. Mouth is symmetric about the +x axis (a0/a1 are the half-angles, in degrees).
+// colour `clear`, which cuts a transparent hole). It is DIRECTIONAL (ADR 0033): the mouth
+// opens toward the travel direction. Twelve frames — four chomp phases (nearly-closed →
+// wide-open) for each of right, up, and down. LEFT is omitted on purpose: the engine
+// mirrors it from `right` by X-flipping the UVs ("absence is the signal", ADR 0033 §2), so
+// pac faces all four travel directions from three authored sets. Wedge angles are degrees
+// from +x, clockwise (y is down): right ≈ 0°, up ≈ −90° (screen top), down ≈ +90°.
 .{
     .size = 32,
     .palette = .{
@@ -21,29 +24,68 @@
     // Transparent background so the sprite composites cleanly onto the maze.
     .background = null,
     .frames = .{
-        // Frame 0 — mouth almost shut.
-        .{ .name = "shut", .ops = .{
+        // --- Right-facing (mouth opens toward +x), frames 0..3 ---
+        .{ .name = "shut_r", .ops = .{
             .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
             .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = -3, .a1 = 3, .color = "clear" } },
         } },
-        // Frame 1 — opening.
-        .{ .name = "ajar", .ops = .{
+        .{ .name = "ajar_r", .ops = .{
             .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
             .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = -18, .a1 = 18, .color = "clear" } },
         } },
-        // Frame 2 — half open.
-        .{ .name = "half", .ops = .{
+        .{ .name = "half_r", .ops = .{
             .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
             .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = -34, .a1 = 34, .color = "clear" } },
         } },
-        // Frame 3 — wide open.
-        .{ .name = "open", .ops = .{
+        .{ .name = "open_r", .ops = .{
             .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
             .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = -50, .a1 = 50, .color = "clear" } },
         } },
+        // --- Up-facing (mouth opens toward −y / screen top), frames 4..7 ---
+        .{ .name = "shut_u", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
+            .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = -93, .a1 = -87, .color = "clear" } },
+        } },
+        .{ .name = "ajar_u", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
+            .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = -108, .a1 = -72, .color = "clear" } },
+        } },
+        .{ .name = "half_u", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
+            .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = -124, .a1 = -56, .color = "clear" } },
+        } },
+        .{ .name = "open_u", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
+            .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = -140, .a1 = -40, .color = "clear" } },
+        } },
+        // --- Down-facing (mouth opens toward +y / screen bottom), frames 8..11 ---
+        .{ .name = "shut_d", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
+            .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = 87, .a1 = 93, .color = "clear" } },
+        } },
+        .{ .name = "ajar_d", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
+            .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = 72, .a1 = 108, .color = "clear" } },
+        } },
+        .{ .name = "half_d", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
+            .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = 56, .a1 = 124, .color = "clear" } },
+        } },
+        .{ .name = "open_d", .ops = .{
+            .{ .disc = .{ .cx = 0.5, .cy = 0.5, .r = 0.46, .color = "pac" } },
+            .{ .wedge = .{ .cx = 0.5, .cy = 0.5, .r = 0.52, .a0 = 40, .a1 = 140, .color = "clear" } },
+        } },
     },
     .animations = .{
-        // Ping-pong the four frames so the mouth opens then shuts, ~12 fps.
-        .{ .name = "chomp", .fps = 12, .frames = .{ 0, 1, 2, 3, 2, 1 } },
+        // One directional chomp at ~12 fps. Each facing lists its four phases out and back
+        // (shut → open → shut) so the mouth opens then shuts while running. `left` is
+        // omitted — the engine renders it by X-flipping `right` (ADR 0033 §2).
+        .{
+            .name = "chomp",
+            .fps = 12,
+            .right = .{ 0, 1, 2, 3, 2, 1 },
+            .up = .{ 4, 5, 6, 7, 6, 5 },
+            .down = .{ 8, 9, 10, 11, 10, 9 },
+        },
     },
 }

@@ -149,6 +149,11 @@ fn loadOne(store: *SheetStore, gpa: Allocator, io: Io, base: Io.Dir, pkg: []cons
 pub fn advance(world: *World, store: *const SheetStore, dt_s: f32) void {
     for (world.sprites.entities(), world.sprites.slice()) |idx, sprite| {
         const anim = world.animations.get(idx) orelse continue;
+        // Latch the travel heading (ADR 0033 §3): retain the last NON-ZERO velocity so a
+        // momentary stop at a grid intersection does not reset (and flicker) the facing.
+        if (world.velocities.get(idx)) |vel| {
+            if (vel.v.x != 0 or vel.v.y != 0) anim.heading = .{ .x = vel.v.x, .y = vel.v.y };
+        }
         if (dt_s > 0) anim.time_s += dt_s;
         const sheet = store.get(sprite.sheet) orelse {
             anim.frame = 0;
@@ -170,6 +175,39 @@ pub fn findClip(sheet: *const msf.Sheet, name: []const u8) ?*const msf.Clip {
         if (std.mem.eql(u8, c.name, name)) return c;
     }
     return null;
+}
+
+/// A clip's resolved phase list for a facing, plus whether its UVs must be X-flipped.
+pub const Resolved = struct {
+    /// The phase list (frame indices into the sheet) to animate over — the `frame` cursor
+    /// indexes this. Never empty unless the clip's base `frames` is empty.
+    frames: []const u16,
+    /// True ⇒ the renderer horizontally flips the sampled frame (the "absence is the
+    /// signal" mirror, ADR 0033 §2): an authored facing is never mirrored, an inferred one
+    /// (a horizontal facing derived from its authored opposite) always is.
+    mirror_x: bool,
+};
+
+/// Select which phase list a clip plays for screen `facing`, and whether it is mirrored
+/// (ADR 0033 §2). `facing` null (the entity has never moved / a non-directional clip) ⇒
+/// the base `frames` list, no mirror. An authored facing is used as-authored. A missing
+/// horizontal facing is inferred by X-flipping its authored opposite (declare-one =
+/// mirror; declare-both = as-authored, no flip). A missing vertical facing — you cannot
+/// flip "up" into "down" — falls back to the base `frames` list, no mirror. Pure; the
+/// returned slice borrows `clip`.
+pub fn resolveFacing(clip: *const msf.Clip, facing: ?msf.Facing) Resolved {
+    const f = facing orelse return .{ .frames = clip.frames, .mirror_x = false };
+    if (clip.facings[@intFromEnum(f)]) |list| return .{ .frames = list, .mirror_x = false };
+    // The requested facing is absent: mirror a horizontal facing from its opposite.
+    const opposite: ?msf.Facing = switch (f) {
+        .left => .right,
+        .right => .left,
+        .up, .down => null, // vertical facings are never auto-derived
+    };
+    if (opposite) |o| {
+        if (clip.facings[@intFromEnum(o)]) |list| return .{ .frames = list, .mirror_x = true };
+    }
+    return .{ .frames = clip.frames, .mirror_x = false };
 }
 
 /// The atlas sub-rect one sheet frame occupies (issue #113 phase 2b; ADR 0031 §4).
@@ -473,6 +511,95 @@ test "sprite: loadForScene loads a sheet shared by a live entity and a prototype
     // One shared ref across both sources ⇒ one decoded entry, not two.
     try testing.expectEqual(@as(usize, 1), store.count());
     try testing.expect(store.get("sprites/pac.msf") != null);
+}
+
+test "sprite: resolveFacing picks the authored list, infers a mirror, or falls back" {
+    // right + down authored; left and up absent.
+    const clip: msf.Clip = .{
+        .name = "chomp",
+        .fps = 12,
+        .frames = &.{ 0, 1 }, // base
+        .facings = .{ null, &.{ 8, 9 }, null, &.{ 0, 1 } }, // up, down, left, right
+    };
+    // An authored facing is used as-authored, no mirror.
+    {
+        const r = resolveFacing(&clip, .right);
+        try testing.expectEqualSlices(u16, &.{ 0, 1 }, r.frames);
+        try testing.expect(!r.mirror_x);
+    }
+    {
+        const r = resolveFacing(&clip, .down);
+        try testing.expectEqualSlices(u16, &.{ 8, 9 }, r.frames);
+        try testing.expect(!r.mirror_x);
+    }
+    // A missing horizontal facing (left) infers the mirror of its opposite (right).
+    {
+        const r = resolveFacing(&clip, .left);
+        try testing.expectEqualSlices(u16, &.{ 0, 1 }, r.frames);
+        try testing.expect(r.mirror_x);
+    }
+    // A missing vertical facing (up) is never mirrored — it falls back to base, no flip.
+    {
+        const r = resolveFacing(&clip, .up);
+        try testing.expectEqualSlices(u16, &.{ 0, 1 }, r.frames);
+        try testing.expect(!r.mirror_x);
+    }
+    // No facing (never moved / non-directional) ⇒ base, no flip.
+    {
+        const r = resolveFacing(&clip, null);
+        try testing.expectEqualSlices(u16, &.{ 0, 1 }, r.frames);
+        try testing.expect(!r.mirror_x);
+    }
+}
+
+test "sprite: resolveFacing does NOT mirror when both horizontal facings are authored" {
+    // Both left and right authored (an asymmetric character): each is used as-authored.
+    const clip: msf.Clip = .{
+        .name = "walk",
+        .fps = 8,
+        .frames = &.{0},
+        .facings = .{ null, null, &.{ 4, 5 }, &.{ 0, 1 } }, // left AND right present
+    };
+    const left = resolveFacing(&clip, .left);
+    try testing.expectEqualSlices(u16, &.{ 4, 5 }, left.frames);
+    try testing.expect(!left.mirror_x); // voluntary declaration overrides inference
+    const right = resolveFacing(&clip, .right);
+    try testing.expectEqualSlices(u16, &.{ 0, 1 }, right.frames);
+    try testing.expect(!right.mirror_x);
+}
+
+test "sprite: advance latches the last non-zero heading across a momentary stop" {
+    const gpa = testing.allocator;
+    const px = [_]u8{ 1, 2, 3, 4 };
+    var store = try storeWith(gpa, "s.msf", .{
+        .width = 1,
+        .height = 1,
+        .frames = &.{&px},
+        .clips = &.{.{ .name = "walk", .fps = 10, .frames = &.{0} }},
+    });
+    defer store.deinit();
+
+    var w = World.init(gpa);
+    defer w.deinit();
+    const e = try w.spawn();
+    try w.setSprite(e, .{ .sheet = "s.msf", .clip = "walk" });
+
+    // Moving +x latches heading (+1, 0).
+    try w.setVelocity(e, .{ .v = .{ .x = 1, .y = 0, .z = 0 } });
+    advance(&w, &store, 0.05);
+    try testing.expectEqual(@as(f32, 1), w.getAnimationState(e).?.heading.x);
+    try testing.expectEqual(@as(f32, 0), w.getAnimationState(e).?.heading.y);
+
+    // Velocity drops to zero (an intersection): the latched heading is RETAINED, not reset.
+    try w.setVelocity(e, .{ .v = .{ .x = 0, .y = 0, .z = 0 } });
+    advance(&w, &store, 0.05);
+    try testing.expectEqual(@as(f32, 1), w.getAnimationState(e).?.heading.x);
+
+    // A new non-zero velocity updates the latch.
+    try w.setVelocity(e, .{ .v = .{ .x = 0, .y = -2, .z = 0 } });
+    advance(&w, &store, 0.05);
+    try testing.expectEqual(@as(f32, 0), w.getAnimationState(e).?.heading.x);
+    try testing.expectEqual(@as(f32, -2), w.getAnimationState(e).?.heading.y);
 }
 
 test "sprite: advance resolves the frame cursor from wall-clock time" {

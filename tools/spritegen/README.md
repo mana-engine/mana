@@ -3,8 +3,8 @@
 A standalone, **genre-neutral** dev tool (ADR 0031). It reads a ZON *sprite recipe* and
 deterministically rasterizes it into two **derived** artifacts:
 
-- `<name>.msf` — the sprite-sheet asset (MSF1: raw RGBA8 frames + a clip table; the
-  engine decodes it — Lane B).
+- `<name>.msf` — the sprite-sheet asset (MSF2: raw RGBA8 frames + a clip table with an
+  optional per-facing dimension; the engine decodes it).
 - `<name>_preview.png` — a human-viewable montage of the frames over a checkerboard.
 
 Neither is committed. The **recipe** (`.zon`) is the source of truth (CLAUDE.md
@@ -36,7 +36,8 @@ syntax). Then open the preview in any browser / OS image viewer:
 | macOS | `open games/pacman/sprites/generated/pac_preview.png` |
 | Windows | `start games\pacman\sprites\generated\pac_preview.png` |
 
-You will see the four pac frames chomping (mouth shut → wide open).
+You will see pac's chomp frames for each facing (right, up, down — left is mirrored from
+right at render time, so it is not in the sheet).
 
 ## Recipe format
 
@@ -90,15 +91,41 @@ Each clip is `{ .name, .fps, .frames }`, where `.frames` lists frame indices (in
 (e.g. `.{ 0, 1, 2, 3, 2, 1 }`). Loop vs. once vs. ping-pong at runtime is the engine's
 choice (`Sprite.loop`, ADR 0031); the clip itself is just an ordered index list + rate.
 
-## MSF1 asset layout (provisional)
+#### Directional clips (ADR 0033)
 
-Little-endian, no compression (ADR 0031 §2; **provisional** pending the #109 interchange
-codec — only the per-frame blob encoding would change behind the versioned header):
+A clip may add per-facing phase lists — `.up`, `.down`, `.left`, `.right` — so a sprite
+faces its travel direction with distinct frames rather than a rotated one. The engine
+classifies an entity's travel heading into a screen facing and plays that facing's list.
+
+**Mirror rule — absence is the signal.** Omit exactly one horizontal facing (`left` or
+`right`) and the engine renders it by X-flipping the authored opposite (no extra art, no
+flag). Author *both* to opt out of mirroring (an asymmetric character). A directional clip
+needs no explicit `.frames`: the tool derives the base/default pose from the first present
+facing (order right, down, up, left).
+
+```zon
+.{ .name = "chomp", .fps = 12,
+   .right = .{ 0, 1, 2, 3, 2, 1 },   // left is omitted → mirrored from right
+   .up    = .{ 4, 5, 6, 7, 6, 5 },
+   .down  = .{ 8, 9, 10, 11, 10, 9 } }
+```
+
+A non-directional clip authors only `.frames` and behaves exactly as before.
+
+## MSF2 asset layout
+
+Little-endian, no compression (ADR 0031 §2, ADR 0033; the per-frame blob encoding could
+still change behind the versioned header pending the #109 interchange codec):
 
 ```
-magic "MSF1" | version:u16 | width:u16 | height:u16 | frame_cnt:u16 | clip_cnt:u16 | reserved:u16
+magic "MSF2" | version:u16 | width:u16 | height:u16 | frame_cnt:u16 | clip_cnt:u16 | reserved:u16
 frames:  frame_cnt × (width*height*4) RGBA8 (straight alpha, row-major, top-to-bottom)
-clips:   clip_cnt × { name_len:u8, name, fps:u16, n:u16, indices:n×u16 }
+clips:   clip_cnt × {
+           name_len:u8, name, fps:u16,
+           base_n:u16, base_indices:base_n×u16,          // non-directional / default list
+           facing_mask:u8,                               // bit i ⇒ facing i present (up,down,left,right)
+           per present facing i: n:u16, indices:n×u16     // in enum order up,down,left,right
+         }
 ```
 
 ## Determinism

@@ -78,6 +78,23 @@ fn projectPoint(proj: Projection, pos: core.Vec3, origin: core.Vec2) struct { sc
     };
 }
 
+/// Classify a world-space travel `heading` into the screen `Facing` it points toward
+/// under `proj` (ADR 0033 §3), or null when the heading is zero (the entity has never
+/// moved ⇒ the clip's non-directional pose). The heading is projected to screen space
+/// (so the up/down/left/right classification is projection-correct, not an assumption
+/// that world axes equal screen axes) and the dominant screen axis picks the cardinal:
+/// screen +x ⇒ right, −x ⇒ left, +y ⇒ down, −y ⇒ up (ties resolve horizontal). Pure.
+fn screenFacing(proj: Projection, heading: core.Vec2, origin: core.Vec2) ?data.msf.Facing {
+    if (heading.x == 0 and heading.y == 0) return null;
+    const base = projectPoint(proj, .{ .x = 0, .y = 0, .z = 0 }, origin);
+    const ahead = projectPoint(proj, .{ .x = heading.x, .y = heading.y, .z = 0 }, origin);
+    const dx = ahead.screen.x - base.screen.x;
+    const dy = ahead.screen.y - base.screen.y;
+    if (dx == 0 and dy == 0) return null;
+    if (@abs(dx) >= @abs(dy)) return if (dx > 0) .right else .left;
+    return if (dy > 0) .down else .up;
+}
+
 /// Distinct colours cycled per entity so drawn quads are visually separable. Fallback
 /// only: an entity with a declared `Appearance` (ADR 0030) uses its own color instead.
 pub const default_palette = [_][3]f32{
@@ -187,15 +204,17 @@ fn lessThanSpriteDepth(_: void, a: SpriteDepthEntry, b: SpriteDepthEntry) bool {
 }
 
 /// Project every `Sprite` entity in `world` into a textured `gpu.SpriteQuad` (issue #113
-/// phase 2b; ADR 0031 §4): resolve the entity's current sheet frame (`AnimationState`'s
-/// clip cursor → the clip's frame list → a sheet frame index), look that frame's UV
-/// sub-rect up in `atlas`, and place the quad at the entity's projected screen footprint
-/// (same centre/half-size math as `project`, `Appearance`-aware). The quad's `tint` is
-/// the entity's `Appearance.color` (white if none), and its `angle` faces the entity's
-/// travel direction — the screen-space direction of its `Velocity`, so a directional
-/// sprite (Pac's wedge) turns to face where it moves; a stationary entity keeps `angle`
-/// 0 (its default/right-facing pose). Results are painter-sorted far-to-near like
-/// `project`. An entity whose sheet is unloaded, or whose current frame is not in the
+/// phase 2b; ADR 0031 §4, ADR 0033): resolve the entity's current sheet frame — classify
+/// its latched `AnimationState.heading` into a screen `Facing`, pick that facing's phase
+/// list (`sprite.resolveFacing`, mirroring a missing horizontal facing from its opposite),
+/// index it by the clip cursor → a sheet frame index — look that frame's UV sub-rect up in
+/// `atlas`, and place the quad at the entity's projected screen footprint (same centre/
+/// half-size math as `project`, `Appearance`-aware). The quad's `tint` is the entity's
+/// `Appearance.color` (white if none); an inferred (mirrored) facing X-flips the frame's UV
+/// (a CPU-side U swap, no shader change). Sprite quads are axis-aligned — facing is a frame
+/// choice, not a rotation (ADR 0033 retired the wedge-rotation hack). Results are painter-
+/// sorted far-to-near like `project`. An entity whose sheet is unloaded, or whose current
+/// frame is not in the
 /// atlas, is skipped here — and because `project` suppresses the flat quad only for a
 /// sprite that DOES draw (issue #121), such an entity still gets its flat `Appearance`
 /// quad from `project` and stays visible (a box), rather than vanishing. A missing sheet
@@ -219,18 +238,23 @@ pub fn projectSprites(
         const t = world.transforms.get(entity_index) orelse continue;
         const sheet = store.get(spr.sheet) orelse continue;
 
-        // Resolve the sheet frame the animation cursor currently points at: the clip's
-        // frame list indexed by `AnimationState.frame` (its clip position), clamped so a
-        // stale cursor after a clip swap can't read past the list. No/empty clip ⇒ the
-        // sheet's frame 0.
+        // Resolve the sheet frame to draw (ADR 0033): classify the entity's latched
+        // heading into a screen facing, pick that facing's phase list (mirroring a missing
+        // horizontal facing from its opposite), then index it by the animation cursor
+        // (`AnimationState.frame`), clamped so a stale cursor can't read past the list.
+        // No/empty clip ⇒ the sheet's frame 0, unmirrored.
         var sheet_frame: u16 = 0;
+        var mirror_x = false;
         if (sprite.findClip(sheet, spr.clip)) |clip| {
-            if (clip.frames.len > 0) {
+            const heading = if (world.animations.get(entity_index)) |a| a.heading else core.Vec2{ .x = 0, .y = 0 };
+            const resolved = sprite.resolveFacing(clip, screenFacing(view.projection, heading, origin));
+            mirror_x = resolved.mirror_x;
+            if (resolved.frames.len > 0) {
                 const pos: usize = if (world.animations.get(entity_index)) |a|
-                    @min(@as(usize, a.frame), clip.frames.len - 1)
+                    @min(@as(usize, a.frame), resolved.frames.len - 1)
                 else
                     0;
-                sheet_frame = clip.frames[pos];
+                sheet_frame = resolved.frames[pos];
             }
         }
         const region = atlas.uv(spr.sheet, sheet_frame) orelse continue;
@@ -240,25 +264,20 @@ pub fn projectSprites(
         const half_px = if (appearance) |a| (a.size / 2) * pxPerWorldUnit(view.projection) else view.quad_half_px;
         const tint = if (appearance) |a| a.color else [3]f32{ 1, 1, 1 };
 
-        // Face the travel direction: the screen-space angle of the velocity, found by
-        // projecting a point one velocity-step ahead and taking the delta (works for any
-        // projection). Zero velocity leaves the quad at angle 0 (its default pose).
-        var angle: f32 = 0;
-        if (world.velocities.get(entity_index)) |vel| {
-            if (vel.v.x != 0 or vel.v.y != 0) {
-                const ahead = projectPoint(view.projection, .{ .x = t.pos.x + vel.v.x, .y = t.pos.y + vel.v.y, .z = t.pos.z }, origin);
-                angle = std.math.atan2(ahead.screen.y - p.screen.y, ahead.screen.x - p.screen.x);
-            }
-        }
+        // Mirror an inferred facing by swapping the frame's U endpoints: the vertex builder
+        // interpolates U linearly across the quad, so the sampled frame is X-flipped with
+        // no shader change (ADR 0033 §2). V (the vertical axis) is untouched.
+        var uv_min = region.min;
+        var uv_max = region.max;
+        if (mirror_x) std.mem.swap(f32, &uv_min[0], &uv_max[0]);
 
         try entries.append(gpa, .{
             .quad = .{
                 .center = .{ p.screen.x / half_w - 1, p.screen.y / half_h - 1 },
                 .half = .{ half_px / half_w, half_px / half_h },
-                .uv_min = region.min,
-                .uv_max = region.max,
+                .uv_min = uv_min,
+                .uv_max = uv_max,
                 .tint = tint,
-                .angle = angle,
             },
             .depth = p.depth,
             .entity_index = entity_index,
@@ -285,9 +304,9 @@ fn spriteStoreWith(gpa: Allocator, ref: []const u8, sheet: data.msf.Sheet) !spri
     return store;
 }
 
-test "projectSprites: places a textured quad and faces its velocity" {
+test "projectSprites: places a textured quad at the projected footprint" {
     const gpa = testing.allocator;
-    // A 2x2, single-frame sheet with a one-position clip.
+    // A 2x2, single-frame non-directional clip (no facings).
     var px: [2 * 2 * 4]u8 = undefined;
     for (&px, 0..) |*b, i| b.* = @intCast(i & 0xff);
     var store = try spriteStoreWith(gpa, "s.msf", .{
@@ -305,7 +324,6 @@ test "projectSprites: places a textured quad and faces its velocity" {
     const e = try world.spawn();
     try world.setTransform(e, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
     try world.setSprite(e, .{ .sheet = "s.msf", .clip = "walk" });
-    try world.setVelocity(e, .{ .v = .{ .x = 0, .y = 1, .z = 0 } }); // moving +Y (screen-down)
 
     const view: View = .{ .width = 256, .height = 256, .projection = .{ .orthographic = .{ .scale = 32 } } };
     const quads = try projectSprites(gpa, &world, view, &store, &atlas);
@@ -315,11 +333,146 @@ test "projectSprites: places a textured quad and faces its velocity" {
     // Entity at the origin projects to the NDC centre.
     try testing.expectApproxEqAbs(@as(f32, 0), quads[0].center[0], 1e-6);
     try testing.expectApproxEqAbs(@as(f32, 0), quads[0].center[1], 1e-6);
-    // The single frame fills the whole atlas → full UV span.
+    // The single frame fills the whole atlas → full UV span, unmirrored (uv_min < uv_max).
     try testing.expectApproxEqAbs(@as(f32, 0), quads[0].uv_min[0], 1e-6);
     try testing.expectApproxEqAbs(@as(f32, 1), quads[0].uv_max[0], 1e-6);
-    // +Y world velocity is screen-down under orthographic ⇒ angle +pi/2 (atan2(+dy, 0)).
-    try testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), quads[0].angle, 1e-5);
+}
+
+test "projectSprites: a directional clip selects the frame for the latched facing" {
+    const gpa = testing.allocator;
+    // Four distinct 1x1 frames: 0=right, 1=down, 2=up (left inferred from right).
+    var f_right = [_]u8{ 10, 0, 0, 255 };
+    var f_down = [_]u8{ 0, 20, 0, 255 };
+    var f_up = [_]u8{ 0, 0, 30, 255 };
+    var store = try spriteStoreWith(gpa, "s.msf", .{
+        .width = 1,
+        .height = 1,
+        .frames = &.{ &f_right, &f_down, &f_up },
+        .clips = &.{.{
+            .name = "chomp",
+            .fps = 10,
+            .frames = &.{0}, // base = right
+            .facings = .{ &.{2}, &.{1}, null, &.{0} }, // up, down, left(absent), right
+        }},
+    });
+    defer store.deinit();
+    var atlas = try sprite.buildAtlas(gpa, &store);
+    defer atlas.deinit();
+
+    var world = World.init(gpa);
+    defer world.deinit();
+    const e = try world.spawn();
+    try world.setTransform(e, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try world.setSprite(e, .{ .sheet = "s.msf", .clip = "chomp" });
+    const view: View = .{ .width = 16, .height = 16, .projection = .{ .orthographic = .{ .scale = 32 } } };
+
+    // A helper: the atlas UV for a given sheet frame, so we can assert which frame drew.
+    const uvFor = struct {
+        fn f(a: *const sprite.Atlas, frame: u16) [2]f32 {
+            return a.uv("s.msf", frame).?.min;
+        }
+    }.f;
+
+    // Heading up (world −Y = screen up) → the up facing → frame 2, no mirror.
+    try world.setAnimationState(e, .{ .heading = .{ .x = 0, .y = -1 } });
+    const up = try projectSprites(gpa, &world, view, &store, &atlas);
+    defer gpa.free(up);
+    try testing.expectApproxEqAbs(uvFor(&atlas, 2)[0], up[0].uv_min[0], 1e-6);
+    try testing.expect(up[0].uv_min[0] <= up[0].uv_max[0]); // not mirrored
+
+    // Heading down (world +Y) → the down facing → frame 1.
+    try world.setAnimationState(e, .{ .heading = .{ .x = 0, .y = 1 } });
+    const down = try projectSprites(gpa, &world, view, &store, &atlas);
+    defer gpa.free(down);
+    try testing.expectApproxEqAbs(uvFor(&atlas, 1)[0], down[0].uv_min[0], 1e-6);
+}
+
+test "projectSprites: a missing horizontal facing is X-flipped from its opposite (mirror rule)" {
+    const gpa = testing.allocator;
+    // Right authored, left absent ⇒ heading left renders right's frame with swapped U.
+    var f_right = [_]u8{ 10, 0, 0, 255 };
+    var f_down = [_]u8{ 0, 20, 0, 255 };
+    var store = try spriteStoreWith(gpa, "s.msf", .{
+        .width = 1,
+        .height = 1,
+        .frames = &.{ &f_right, &f_down },
+        .clips = &.{.{
+            .name = "chomp",
+            .fps = 10,
+            .frames = &.{0},
+            .facings = .{ null, &.{1}, null, &.{0} }, // up(absent), down, left(absent), right
+        }},
+    });
+    defer store.deinit();
+    var atlas = try sprite.buildAtlas(gpa, &store);
+    defer atlas.deinit();
+
+    var world = World.init(gpa);
+    defer world.deinit();
+    const e = try world.spawn();
+    try world.setTransform(e, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try world.setSprite(e, .{ .sheet = "s.msf", .clip = "chomp" });
+    const view: View = .{ .width = 16, .height = 16, .projection = .{ .orthographic = .{ .scale = 32 } } };
+
+    const right_uv = atlas.uv("s.msf", 0).?;
+
+    // Heading right → right's frame, unmirrored: uv_min.u < uv_max.u.
+    try world.setAnimationState(e, .{ .heading = .{ .x = 1, .y = 0 } });
+    const r = try projectSprites(gpa, &world, view, &store, &atlas);
+    defer gpa.free(r);
+    try testing.expectApproxEqAbs(right_uv.min[0], r[0].uv_min[0], 1e-6);
+    try testing.expectApproxEqAbs(right_uv.max[0], r[0].uv_max[0], 1e-6);
+
+    // Heading left → SAME frame (right's), but U endpoints swapped ⇒ X-flip. V unchanged.
+    try world.setAnimationState(e, .{ .heading = .{ .x = -1, .y = 0 } });
+    const l = try projectSprites(gpa, &world, view, &store, &atlas);
+    defer gpa.free(l);
+    try testing.expectApproxEqAbs(right_uv.max[0], l[0].uv_min[0], 1e-6); // swapped
+    try testing.expectApproxEqAbs(right_uv.min[0], l[0].uv_max[0], 1e-6);
+    try testing.expectApproxEqAbs(right_uv.min[1], l[0].uv_min[1], 1e-6); // V untouched
+}
+
+test "projectSprites → advance: the latched heading holds facing across a momentary stop (no flip, #125)" {
+    const gpa = testing.allocator;
+    var f_right = [_]u8{ 10, 0, 0, 255 };
+    var f_down = [_]u8{ 0, 20, 0, 255 };
+    var store = try spriteStoreWith(gpa, "s.msf", .{
+        .width = 1,
+        .height = 1,
+        .frames = &.{ &f_right, &f_down },
+        .clips = &.{.{
+            .name = "chomp",
+            .fps = 10,
+            .frames = &.{0},
+            .facings = .{ null, &.{1}, null, &.{0} }, // down + right authored
+        }},
+    });
+    defer store.deinit();
+    var atlas = try sprite.buildAtlas(gpa, &store);
+    defer atlas.deinit();
+
+    var world = World.init(gpa);
+    defer world.deinit();
+    const e = try world.spawn();
+    try world.setTransform(e, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try world.setSprite(e, .{ .sheet = "s.msf", .clip = "chomp" });
+    const view: View = .{ .width = 16, .height = 16, .projection = .{ .orthographic = .{ .scale = 32 } } };
+    const down_uv = atlas.uv("s.msf", 1).?.min[0];
+
+    // Move down: advance latches the heading, so the down facing (frame 1) is chosen.
+    try world.setVelocity(e, .{ .v = .{ .x = 0, .y = 1, .z = 0 } });
+    sprite.advance(&world, &store, 0.05);
+    const moving = try projectSprites(gpa, &world, view, &store, &atlas);
+    defer gpa.free(moving);
+    try testing.expectApproxEqAbs(down_uv, moving[0].uv_min[0], 1e-6);
+
+    // Momentary stop at an intersection: velocity 0 for a frame. The latch RETAINS the
+    // down heading, so the facing does NOT flip back to the default pose (#125 fixed).
+    try world.setVelocity(e, .{ .v = .{ .x = 0, .y = 0, .z = 0 } });
+    sprite.advance(&world, &store, 0.05);
+    const stopped = try projectSprites(gpa, &world, view, &store, &atlas);
+    defer gpa.free(stopped);
+    try testing.expectApproxEqAbs(down_uv, stopped[0].uv_min[0], 1e-6);
 }
 
 test "projectSprites → captureFrame: the animation cursor selects the frame rendered headlessly" {
@@ -357,7 +510,7 @@ test "projectSprites → captureFrame: the animation cursor selects the frame re
     try world.setTransform(e, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
     try world.setAppearance(e, .{ .color = .{ 1, 1, 1 }, .size = 0.5 }); // fills the tiny frame
     try world.setSprite(e, .{ .sheet = "s.msf", .clip = "chomp" });
-    try world.setVelocity(e, .{ .v = .{ .x = 1, .y = 0, .z = 0 } }); // face +x → angle 0, axis-aligned
+    // Non-directional clip (no facings) + zero heading ⇒ the base frame list is used.
 
     // view 16x16, scale 32 → size 0.5 ⇒ half 8px = NDC 1.0 (a full-frame quad).
     const view: View = .{ .width = 16, .height = 16, .projection = .{ .orthographic = .{ .scale = 32 } } };
@@ -382,7 +535,7 @@ test "projectSprites → captureFrame: the animation cursor selects the frame re
     try testing.expectEqual(@as(u8, 255), px1[center + 2]); // blue
 }
 
-test "projectSprites: a stationary entity keeps angle 0; an unloaded sheet is skipped" {
+test "projectSprites: a loaded stationary entity yields one quad; an unloaded sheet is skipped" {
     const gpa = testing.allocator;
     var px: [1 * 1 * 4]u8 = .{ 9, 9, 9, 255 };
     var store = try spriteStoreWith(gpa, "s.msf", .{
@@ -410,9 +563,9 @@ test "projectSprites: a stationary entity keeps angle 0; an unloaded sheet is sk
     const quads = try projectSprites(gpa, &world, view, &store, &atlas);
     defer gpa.free(quads);
 
-    // Only the loaded, stationary entity yields a quad, at angle 0.
+    // Only the loaded, stationary entity yields a quad (non-directional, unmirrored).
     try testing.expectEqual(@as(usize, 1), quads.len);
-    try testing.expectApproxEqAbs(@as(f32, 0), quads[0].angle, 1e-6);
+    try testing.expect(quads[0].uv_min[0] <= quads[0].uv_max[0]);
 }
 
 test "project: a sprite whose sheet is loaded suppresses its flat quad; a missing sheet keeps it (issue #121)" {
