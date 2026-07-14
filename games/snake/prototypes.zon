@@ -1,13 +1,40 @@
 // Entity prototypes (ADR 0016) mana.spawn instantiates. Genre lives here in content,
-// never in src/. Positions are supplied by the spawn call; templates carry only the
-// non-spatial component defaults (here, none beyond an implicit transform).
+// never in src/. Positions are supplied by the spawn call; templates carry the
+// non-spatial component defaults — here, a render appearance (ADR 0030) plus an
+// animated sprite (ADR 0031/0033, issue #107): `tools/spritegen` + the sprite/
+// animation component retrofitted onto Snake to prove they are genre-neutral, not
+// Pac-Man-specific. `appearance` stays as the flat-quad fallback (the headless SVG
+// path and, until the Vulkan textured pipeline lands, a missing/ungenerated sheet);
+// its color is the sprite tint.
 .{
     .prototypes = .{
+        // The head — the single body cell `rules.lua` spawns at `reset()` for
+        // `body[1]`, distinct from `segment` below so only it carries the DIRECTIONAL
+        // `head.msf` sheet. `rules.lua` gives it a tiny (magnitude-negligible)
+        // `Velocity` on every turn purely so the engine's directional-sprite facing
+        // latch (ADR 0033 §3, driven off `Velocity`) picks up the travel heading —
+        // see `rules.lua`'s `face` helper for why the magnitude cannot perturb the
+        // grid-snapped position.
+        .{
+            .name = "head",
+            .appearance = .{ .color = .{ 0.2, 0.75, 0.35 }, .size = 0.85, .shape = .circle },
+            .sprite = .{ .sheet = "sprites/head.msf", .clip = "idle", .loop = .loop },
+        },
         // One body cell of the snake. Spawned per growth step at the tail cell.
-        .{ .name = "segment" },
+        .{
+            .name = "segment",
+            .appearance = .{ .color = .{ 0.25, 0.7, 0.4 }, .size = 0.85, .shape = .circle },
+            .sprite = .{ .sheet = "sprites/segment.msf", .clip = "idle", .loop = .loop },
+        },
         // The pickup. Spawned once at start and re-spawned on each eat.
-        .{ .name = "food" },
-        // A static boundary cell — the wall ring the snake dies hitting.
+        .{
+            .name = "food",
+            .appearance = .{ .color = .{ 0.85, 0.25, 0.25 }, .size = 0.55, .shape = .circle },
+            .sprite = .{ .sheet = "sprites/food.msf", .clip = "idle", .loop = .loop },
+        },
+        // A static boundary cell — the wall ring the snake dies hitting. No sprite
+        // (issue #107 scope is segment/head/food): a flat quad is the right look for
+        // an inert boundary.
         .{ .name = "wall" },
     },
 }

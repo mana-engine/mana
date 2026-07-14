@@ -1,0 +1,75 @@
+// head — a sprite recipe for `tools/spritegen` (ADR 0031, ADR 0033), proving the
+// genre-neutral generator + sprite/animation component are reusable outside Pac-Man
+// (issue #107). This ZON file is the SOURCE OF TRUTH (invariant #1); the sheet +
+// preview it generates are DERIVED artifacts, never committed (see `.gitignore`).
+// Regenerate + view with:
+//
+//   mise run assets              # generates into games/snake/sprites/generated/ (gitignored)
+//   <open> games/snake/sprites/generated/head_preview.png
+//
+// Genre lives HERE in content, never in the tool (invariant #6): `spritegen` knows only
+// generic primitives (rounded_rect, eyes, line, …). "head" is this data file.
+//
+// A rounded green head with a pair of eyes and a flicking tongue. DIRECTIONAL (ADR
+// 0033): eyes/tongue reposition to the travel direction. Two phases per facing (tongue
+// in / tongue out) for right, up, and down. LEFT is omitted on purpose: the engine
+// mirrors it from `right` by X-flipping the UVs ("absence is the signal", ADR 0033 §2),
+// so the head faces all four travel directions from three authored sets, exactly like
+// `games/pacman/sprites/pac.zon`'s chomp.
+.{
+    .size = 32,
+    .palette = .{
+        .{ .name = "head", .rgba = .{ 45, 165, 70, 255 } },
+        .{ .name = "eye", .rgba = .{ 255, 255, 255, 255 } },
+        .{ .name = "pupil", .rgba = .{ 25, 25, 25, 255 } },
+        .{ .name = "tongue", .rgba = .{ 200, 35, 35, 255 } },
+    },
+    // Transparent background so the sprite composites cleanly onto the board.
+    .background = null,
+    .frames = .{
+        // --- Right-facing (eyes/tongue toward +x), frames 0..1 ---
+        .{ .name = "tongue_in_r", .ops = .{
+            .{ .rounded_rect = .{ .x = 0.06, .y = 0.10, .w = 0.80, .h = 0.80, .radius = 0.22, .color = "head" } },
+            .{ .eyes = .{ .cx = 0.58, .cy = 0.34, .spacing = 0.20, .r = 0.095, .pupil_r = 0.045, .look_x = 0.03, .look_y = 0, .white = "eye", .pupil = "pupil" } },
+            .{ .line = .{ .x0 = 0.82, .y0 = 0.58, .x1 = 0.90, .y1 = 0.58, .thickness = 0.05, .color = "tongue" } },
+        } },
+        .{ .name = "tongue_out_r", .ops = .{
+            .{ .rounded_rect = .{ .x = 0.06, .y = 0.10, .w = 0.80, .h = 0.80, .radius = 0.22, .color = "head" } },
+            .{ .eyes = .{ .cx = 0.58, .cy = 0.34, .spacing = 0.20, .r = 0.095, .pupil_r = 0.045, .look_x = 0.03, .look_y = 0, .white = "eye", .pupil = "pupil" } },
+            .{ .line = .{ .x0 = 0.82, .y0 = 0.58, .x1 = 1.00, .y1 = 0.58, .thickness = 0.05, .color = "tongue" } },
+        } },
+        // --- Up-facing (eyes/tongue toward −y / screen top), frames 2..3 ---
+        .{ .name = "tongue_in_u", .ops = .{
+            .{ .rounded_rect = .{ .x = 0.06, .y = 0.10, .w = 0.80, .h = 0.80, .radius = 0.22, .color = "head" } },
+            .{ .eyes = .{ .cx = 0.50, .cy = 0.30, .spacing = 0.22, .r = 0.095, .pupil_r = 0.045, .look_x = 0, .look_y = -0.03, .white = "eye", .pupil = "pupil" } },
+            .{ .line = .{ .x0 = 0.50, .y0 = 0.12, .x1 = 0.50, .y1 = 0.04, .thickness = 0.05, .color = "tongue" } },
+        } },
+        .{ .name = "tongue_out_u", .ops = .{
+            .{ .rounded_rect = .{ .x = 0.06, .y = 0.10, .w = 0.80, .h = 0.80, .radius = 0.22, .color = "head" } },
+            .{ .eyes = .{ .cx = 0.50, .cy = 0.30, .spacing = 0.22, .r = 0.095, .pupil_r = 0.045, .look_x = 0, .look_y = -0.03, .white = "eye", .pupil = "pupil" } },
+            .{ .line = .{ .x0 = 0.50, .y0 = 0.12, .x1 = 0.50, .y1 = -0.04, .thickness = 0.05, .color = "tongue" } },
+        } },
+        // --- Down-facing (eyes/tongue toward +y / screen bottom), frames 4..5 ---
+        .{ .name = "tongue_in_d", .ops = .{
+            .{ .rounded_rect = .{ .x = 0.06, .y = 0.10, .w = 0.80, .h = 0.80, .radius = 0.22, .color = "head" } },
+            .{ .eyes = .{ .cx = 0.50, .cy = 0.66, .spacing = 0.22, .r = 0.095, .pupil_r = 0.045, .look_x = 0, .look_y = 0.03, .white = "eye", .pupil = "pupil" } },
+            .{ .line = .{ .x0 = 0.50, .y0 = 0.86, .x1 = 0.50, .y1 = 0.94, .thickness = 0.05, .color = "tongue" } },
+        } },
+        .{ .name = "tongue_out_d", .ops = .{
+            .{ .rounded_rect = .{ .x = 0.06, .y = 0.10, .w = 0.80, .h = 0.80, .radius = 0.22, .color = "head" } },
+            .{ .eyes = .{ .cx = 0.50, .cy = 0.66, .spacing = 0.22, .r = 0.095, .pupil_r = 0.045, .look_x = 0, .look_y = 0.03, .white = "eye", .pupil = "pupil" } },
+            .{ .line = .{ .x0 = 0.50, .y0 = 0.86, .x1 = 0.50, .y1 = 1.04, .thickness = 0.05, .color = "tongue" } },
+        } },
+    },
+    .animations = .{
+        // A slow tongue flick per facing (in → out → in). `left` is omitted — the
+        // engine renders it by X-flipping `right` (ADR 0033 §2).
+        .{
+            .name = "idle",
+            .fps = 3,
+            .right = .{ 0, 1, 0 },
+            .up = .{ 2, 3, 2 },
+            .down = .{ 4, 5, 4 },
+        },
+    },
+}
