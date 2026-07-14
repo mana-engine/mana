@@ -2,6 +2,12 @@
 //! script `_ENV` receives (`lua.zig`'s `State.pushSandboxEnv` installs it).
 //! Compiled only under `-Denable-lua`.
 //!
+//! Over the ~500-line soft limit by design: this file IS the whole ADR 0003 §2
+//! surface — one small `zlua.wrap` shim per `mana.*` member, registered in one
+//! `pushManaTable`, with each member's behavior test beside it. Splitting the table
+//! across files would scatter the single versioned API and its shape test for no
+//! gain; it grows only when an ADR adds a member (this one added `is_walkable`).
+//!
 //! Members that need no live Sim — `version`, `log` — are implemented directly.
 //! The live-Sim members reach the world/clock/command-buffer/RNG through the ADR
 //! 0015 host seam (`host.zig`): the engine installs a `Host` on the owning `State`
@@ -367,11 +373,23 @@ fn manaSet(l: *Lua) !i32 {
 /// for a wall cell, a cell outside the grid, or when no Sim is dispatching (no
 /// tilemap to query) — the same graceful degradation `mana.get`'s `nil` and
 /// `mana.random`'s `0` use, so a script can call this unconditionally.
+///
+/// Lua integers are `i64`; a coordinate outside `i32` range narrows to `false` via
+/// `std.math.cast` rather than a checked `@intCast` (which would panic → abort the
+/// engine on a content bug, violating ADR 0003 §9). Any out-of-`i32` value is off any
+/// real grid anyway, so `false` is the correct answer, not an error.
 fn manaIsWalkable(l: *Lua) !i32 {
-    const col: i32 = @intCast(l.checkInteger(1));
-    const row: i32 = @intCast(l.checkInteger(2));
+    const col = std.math.cast(i32, l.checkInteger(1)) orelse return pushFalse(l);
+    const row = std.math.cast(i32, l.checkInteger(2)) orelse return pushFalse(l);
     const walkable = if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.isWalkable(col, row) else false;
     l.pushBoolean(walkable);
+    return 1;
+}
+
+/// Push a Lua `false` and report one return value — the `mana.is_walkable` degraded
+/// answer for an out-of-`i32`-range coordinate (see `manaIsWalkable`).
+fn pushFalse(l: *Lua) i32 {
+    l.pushBoolean(false);
     return 1;
 }
 
@@ -628,4 +646,27 @@ test "mana.is_walkable: true for a walkable cell, false for a wall cell, false o
     try testing.expect(!l.toBoolean(-2)); // (1,1): the wall
     try testing.expect(!l.toBoolean(-1)); // (-1,0): off-grid
     l.pop(3);
+}
+
+test "mana.is_walkable: an out-of-i32-range coordinate returns false, never a panic" {
+    // A Lua integer (i64) past i32's range must NOT reach a checked @intCast — that
+    // would abort the engine on a content bug (ADR 0003 §9). It narrows to false: any
+    // such coordinate is off any real grid. (99999999999 is outside FakeGridHost's 2x2
+    // walkable square anyway, so the answer is false whether or not the guard fires;
+    // the point of this test is that reaching that answer never panics.)
+    var l = try Lua.init(testing.allocator);
+    defer l.deinit();
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+    var fake_ctx: u8 = 0;
+    var host: ?Host = .{ .ctx = &fake_ctx, .vtable = &FakeGridHost.vtable };
+
+    pushManaTable(l, &registry, &host);
+    l.setGlobal("mana");
+
+    // 99999999999 (the reviewer's value) and i32-min-minus-one, on either coordinate.
+    try l.doString("return mana.is_walkable(99999999999, 0), mana.is_walkable(0, -2147483649)");
+    try testing.expect(!l.toBoolean(-2));
+    try testing.expect(!l.toBoolean(-1));
+    l.pop(2);
 }

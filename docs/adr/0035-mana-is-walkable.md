@@ -47,11 +47,16 @@ Added to the ADR 0003 §2 `mana` table, following its existing conventions:
 - **No new handle, no new event.** It takes plain integers, not an opaque handle —
   there is no entity here, only a grid coordinate — so ADR 0003 §4's handle-safety
   rules are moot for this accessor.
-- **Graceful degradation.** `false` when no Sim is dispatching (no host installed)
-  or the sim has no tilemap — the same "safe default, never raise" pattern
-  `mana.get` (`nil`) and `mana.random` (`0`) already use. `false` is the correct
-  safe default here specifically: "unknown" and "not walkable" collapse to the same
-  answer a caller needs (don't path through an unqueryable cell).
+- **Graceful degradation.** `false` when no Sim is dispatching (no host installed),
+  the sim has no tilemap, the cell is off-grid, **or a coordinate is outside `i32`
+  range** — the same "safe default, never raise" pattern `mana.get` (`nil`) and
+  `mana.random` (`0`) already use. `false` is the correct safe default here
+  specifically: "unknown" and "not walkable" collapse to the same answer a caller
+  needs (don't path through an unqueryable cell). Never a raised error and, per ADR
+  0003 §9, **never a panic**: Lua integers are `i64`, so the `i64→i32` narrowing uses
+  `std.math.cast` (out-of-range ⇒ `false`), not a checked `@intCast` that would abort
+  the engine on a content bug. An out-of-`i32` coordinate is off any real grid, so
+  `false` is also the *correct* answer, not just a safe one.
 - **Delegates, never re-derives.** The host-side implementation is a direct call to
   `Tilemap.isWalkable` — the exact function `nav`'s BFS already paths over
   (`src/engine/nav.zig`). No walkability logic is duplicated at the script seam;
