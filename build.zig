@@ -182,6 +182,21 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    // The game-UI subsystem (ADR 0034; issue #132): a `core + gpu + platform` port
+    // module that interprets a declarative widget/layout tree (ZON) into layout rects +
+    // hit-testing. It imports NO `ecs`/`data` (a `ui → ecs` edge is a build error by
+    // design) and names no Vulkan type — gameplay state is reached through an
+    // engine-filled host seam (ADR 0015 pattern), never a direct World import. `engine`
+    // is its sole importer.
+    const ui = b.createModule(.{
+        .root_source_file = b.path("src/ui/ui.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ui.addImport("core", core);
+    ui.addImport("gpu", gpu);
+    ui.addImport("platform", platform);
+
     const engine = b.createModule(.{
         .root_source_file = b.path("src/engine/engine.zig"),
         .target = target,
@@ -193,6 +208,9 @@ pub fn build(b: *std.Build) void {
     engine.addImport("gpu", gpu);
     engine.addImport("platform", platform);
     engine.addImport("physics", physics);
+    // The data-driven game-UI subsystem (ADR 0034). `engine` is the sole importer of
+    // `ui`; `runtime`/`tools` reach it through `engine`, as they already reach the ports.
+    engine.addImport("ui", ui);
     // Scripting (ADR 0003, accepted): the engine dispatches Sim events to a
     // Lua handler table. `script` compiles as a stub without `-Denable-lua`, so
     // this import adds no Lua to a default build — the dispatch path is a
@@ -289,7 +307,7 @@ pub fn build(b: *std.Build) void {
     // Zig tests one module (compilation unit) at a time, so we add a test run
     // per module. Each module's root file pulls in its sibling files' tests.
     const test_step = b.step("test", "Run all unit + integration tests");
-    const tested = [_]*std.Build.Module{ core, data, ecs, gpu, platform, physics, script, engine };
+    const tested = [_]*std.Build.Module{ core, data, ecs, gpu, platform, physics, script, ui, engine };
     for (tested) |m| {
         const unit = b.addTest(.{ .root_module = m });
         test_step.dependOn(&b.addRunArtifact(unit).step);

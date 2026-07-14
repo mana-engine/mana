@@ -25,6 +25,11 @@ pub const gpu = @import("gpu");
 /// sim-side, and deterministic.
 pub const physics = @import("physics");
 
+/// The data-driven game-UI subsystem (ADR 0034; issue #132). Re-exported so the runtime
+/// can parse a ZON widget tree and compute its layout/hit-test; it is a `core + gpu +
+/// platform` port module (no `ecs`/`data`, no Vulkan type), cosmetic and hash-excluded.
+pub const ui = @import("ui");
+
 pub const components = @import("components.zig");
 pub const data_components = @import("data_components.zig");
 pub const world = @import("world.zig");
@@ -75,7 +80,7 @@ pub const Timers = timer.Timers;
 /// Marker verifying the module is wired into the build graph and can see every port
 /// it assembles.
 pub const ready =
-    core.ready and data.ready and ecs.ready and gpu.ready and platform.ready and physics.ready;
+    core.ready and data.ready and ecs.ready and gpu.ready and platform.ready and physics.ready and ui.ready;
 
 test {
     std.testing.refAllDecls(@This());
