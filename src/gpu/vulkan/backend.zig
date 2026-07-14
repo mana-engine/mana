@@ -225,6 +225,21 @@ pub const CommandList = struct {
 
     /// Transition `target` to colour-attachment layout and begin dynamic rendering,
     /// clearing to `clear` (RGBA, 0..1); also sets a full-image viewport and scissor.
+    ///
+    /// The viewport is **Y-flipped** (origin at `y = height`, negative `height`) on
+    /// purpose (issue #148). The engine emits NDC with **Y pointing down**: `screen.y = 0`
+    /// maps to `ndc.y = -1` (`render.projectPoint`/`projectSprites`), which the null CPU
+    /// rasterizer honours directly (`ndcToPxF`: `ndc.y = -1` → pixel row 0 = top). naga,
+    /// however, compiles our WGSL under the WebGPU clip-space convention (Y up) and injects
+    /// `position.y = -position.y` into every vertex shader (present in both `scene.spv` and
+    /// `sprite.spv`) to retarget it to Vulkan's Y-down clip space. Applied to our
+    /// already-Y-down NDC that is a *second* flip, so a positive-height viewport rendered
+    /// the whole frame vertically inverted vs. the null/headless capture — invisible on the
+    /// near-symmetric maze and on pac, obvious on the V-asymmetric ghost (dome at the
+    /// bottom). A negative-height viewport (core since Vulkan 1.1; we target 1.3) cancels
+    /// naga's flip, so the live Vulkan image matches the authored, null-rasterized
+    /// orientation. Culling is disabled on both pipelines, so the winding change a Y-flip
+    /// implies is a no-op.
     pub fn beginRendering(self: *CommandList, target: *Texture, clear: [4]f32) void {
         const d = self.dev.device();
         transition(d, self.cmd, target.image, .undefined, .color_attachment_optimal, .{}, .{ .color_attachment_write_bit = true }, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true });
@@ -244,7 +259,8 @@ pub const CommandList = struct {
             .color_attachment_count = 1,
             .p_color_attachments = @ptrCast(&attachment),
         });
-        d.cmdSetViewport(self.cmd, 0, &.{.{ .x = 0, .y = 0, .width = @floatFromInt(target.width), .height = @floatFromInt(target.height), .min_depth = 0, .max_depth = 1 }});
+        const h: f32 = @floatFromInt(target.height);
+        d.cmdSetViewport(self.cmd, 0, &.{.{ .x = 0, .y = h, .width = @floatFromInt(target.width), .height = -h, .min_depth = 0, .max_depth = 1 }});
         d.cmdSetScissor(self.cmd, 0, &.{.{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = target.width, .height = target.height } }});
     }
 
