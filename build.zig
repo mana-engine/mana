@@ -100,6 +100,13 @@ pub fn build(b: *std.Build) void {
     // build never *compiles* them. (`.lazy` defers compilation, not the source
     // fetch — zig still fetches the tarball into zig-pkg/ on a plain build.)
     if (enable_vulkan) {
+        // libc is required here even without SDL3: at runtime the backend loads the
+        // Vulkan loader via `std.DynLib.open("libvulkan.so.1")`. Without libc, Zig
+        // falls back to its pure-Zig `ElfDynLib`, which only searches `/lib` and
+        // `/usr/lib` and ignores `LD_LIBRARY_PATH`/ld.so.cache — so it fails to find
+        // the loader on any real device (issue #181). Linking libc routes `DynLib`
+        // through the system's `dlopen`, which does the full ld.so.cache lookup.
+        gpu.link_libc = true;
         if (b.lazyDependency("vulkan_headers", .{})) |vk_headers| {
             const registry = vk_headers.path("registry/vk.xml");
             if (b.lazyDependency("vulkan_zig", .{ .registry = registry })) |vulkan_zig| {
@@ -115,10 +122,10 @@ pub fn build(b: *std.Build) void {
     // (ADR 0012, "Vulkan surface creation"). This is a build-level *link*, not a module
     // import, so the DAG (`gpu → core`, never `gpu → platform`) is unchanged, and SDL +
     // Vulkan stay out of the default/CI build. `lazyDependency` returns the same `sdl`
-    // dep the platform block uses; libc is required for the C symbols.
+    // dep the platform block uses; libc (already set above under `enable_vulkan`) is
+    // required for the C symbols.
     if (enable_vulkan and enable_sdl3) {
         if (b.lazyDependency("sdl", .{ .target = target, .optimize = optimize })) |sdl| {
-            gpu.link_libc = true;
             gpu.linkLibrary(sdl.artifact("SDL3"));
         }
     }

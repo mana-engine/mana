@@ -20,3 +20,24 @@ jobs:
       - run: hk check --all
       - run: mise run check
       - run: mise run cross-win
+
+  # Additive to `check` above (which never passes `-Denable-vulkan`, so the Vulkan
+  # backend and its cross-backend orientation test — gpu.zig, "captureFrame: atlas
+  # top row composites to the output top" — never actually execute in the main
+  # gate, only compile). The test logic lives in the `test-vulkan` mise task (runnable
+  # on any forge or a dev box with a Vulkan ICD); this job only provisions the
+  # runner-specific bits that legitimately belong in the workflow: Mesa lavapipe (a
+  # software Vulkan ICD, no GPU hardware required) and the ICD env var pointing the
+  # loader at it. So the invariant is verified on every push/PR, not just locally
+  # (issue #157; the `link_libc` fix this job depends on is issue #181).
+  vulkan-lavapipe:
+    runs-on: ubuntu-latest
+    env:
+      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: mise install
+      - name: Install Mesa lavapipe (software Vulkan ICD)
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+      - run: mise run test-vulkan
