@@ -4,20 +4,19 @@
 // index 1): in chase mode he targets pac's own cell directly; in scatter he retreats to
 // his corner (1,1).
 //
-// This checks the *second* flip (scatter -> chase, at tick 840), not the first, since
-// #108: pac's nav target is now the next cell in its heading rather than a far one, so
-// it covers ground a little slower (the 0.1s retarget cadence occasionally catches it
-// mid-cell) — pushing back the tick it eats the power pellet (04_eat.zon/
-// 06_frightened_catch.zon: dot at tick 43, pellet at tick 80, was 32/55). That in turn
-// pushes `begin_fright`'s 6s (360-tick) frightened window out to tick ~440, which now
-// overlaps the *first* mode flip at tick 420: `retarget`'s `if frightened or
-// mode == "scatter"` branch is true either way, so the first flip is invisible (every
-// ghost is already scattering for the frightened reason). By the second flip at tick
-// 840 the frightened window is long over, so the transition is observable again: at
-// tick 841 (just before the flip lands on its next retarget pass) Blinky is still
-// scattering to (1,1); by tick 848 (the first retarget pass after the flip) he has been
-// reassigned to chase pac's cell directly (1,9) — both axes moved, deterministically,
-// at these exact ticks, with zero input.
+// This checks the *second* flip (scatter -> chase, at tick 840), not the first. Since
+// #126 nav is axis-aligned/grid-locked, so pac eats the power pellet at tick 65
+// (04_eat.zon/06_frightened_catch.zon: dot at tick 35, pellet at tick 65). That means
+// `begin_fright`'s 6s (360-tick) frightened window runs to tick ~425, which overlaps the
+// *first* mode flip at tick 420: `retarget`'s `if frightened or mode == "scatter"`
+// branch is true either way, so the first flip is invisible (every ghost is already
+// scattering for the frightened reason). By the second flip at tick 840 the frightened
+// window is long over, so the transition is observable again: at tick 841 (just before
+// the flip lands on its next retarget pass) Blinky is still scattering to (1,1); by tick
+// 848 (the first retarget pass after the flip) he has been reassigned to chase pac's
+// cell directly (1,9 — pac now parks flush at world (-8,4)) — both axes moved,
+// deterministically, at these exact ticks, with zero input. The #126 steering also moved
+// Blinky's own world position at these ticks (the locator coords below).
 .{
     .steps = 848,
     .input_trace = .{
@@ -27,22 +26,22 @@
         .{
             .label = "mode: in scatter mode (still, post-frightened) Blinky targets his own corner (1,1)",
             .at_tick = 841,
-            .check = .{ .data_at = .{ .pos = .{ .x = -3.36251, .y = -3.97318, .eps = 0.02 }, .name = "nav_target_col", .value = 1 } },
+            .check = .{ .data_at = .{ .pos = .{ .x = -4.4167, .y = -4.0, .eps = 0.02 }, .name = "nav_target_col", .value = 1 } },
         },
         .{
             .label = "mode: (row half of the same checkpoint)",
             .at_tick = 841,
-            .check = .{ .data_at = .{ .pos = .{ .x = -3.36251, .y = -3.97318, .eps = 0.02 }, .name = "nav_target_row", .value = 1 } },
+            .check = .{ .data_at = .{ .pos = .{ .x = -4.4167, .y = -4.0, .eps = 0.02 }, .name = "nav_target_row", .value = 1 } },
         },
         .{
             .label = "mode: the timer flips to chase — Blinky now targets pac's own cell (1,9), both axes moved",
             .at_tick = 848,
-            .check = .{ .data_at = .{ .pos = .{ .x = -3.23816, .y = -3.52182, .eps = 0.02 }, .name = "nav_target_col", .value = 1 } },
+            .check = .{ .data_at = .{ .pos = .{ .x = -5.0, .y = -4.0, .eps = 0.02 }, .name = "nav_target_col", .value = 1 } },
         },
         .{
             .label = "mode: (row half of the same checkpoint)",
             .at_tick = 848,
-            .check = .{ .data_at = .{ .pos = .{ .x = -3.23816, .y = -3.52182, .eps = 0.02 }, .name = "nav_target_row", .value = 9 } },
+            .check = .{ .data_at = .{ .pos = .{ .x = -5.0, .y = -4.0, .eps = 0.02 }, .name = "nav_target_row", .value = 9 } },
         },
     },
 }

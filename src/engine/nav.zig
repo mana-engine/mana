@@ -4,10 +4,11 @@
 //! system executes *how*, every tick, for every `NavAgent`: a deterministic
 //! breadth-first search over the tilemap's walkable cells (ADR 0026) from the agent's
 //! current cell to its target, whose first step steers the agent by setting its
-//! `Velocity` toward the next cell's centre. The existing `movement` system then
-//! integrates that velocity (register `nav` before `movement`). No pathfinder runs in
-//! Lua and there is no per-entity-per-frame Lua callback — CLAUDE.md's "native
-//! steering, Lua selection" seam.
+//! `Velocity` toward the next cell's centre — **axis-aligned and grid-locked** (`steer`):
+//! one axis at a time, turning only at cell centres, stopping flush at walls, never a
+//! diagonal slide. The existing `movement` system then integrates that velocity (register
+//! `nav` before `movement`). No pathfinder runs in Lua and there is no
+//! per-entity-per-frame Lua callback — CLAUDE.md's "native steering, Lua selection" seam.
 //!
 //! Deterministic: agents are visited in NavAgent-insertion order; BFS explores
 //! neighbours in a fixed order (up, down, left, right) and keeps the first parent to
@@ -107,15 +108,69 @@ pub fn nextStep(tm: Tilemap, start: Cell, target: Cell) ?Cell {
     return cellOf(@intCast(step_idx), cols);
 }
 
+/// Axis-aligned, grid-locked steering velocity for an agent at world `pos` moving at
+/// `speed`, given its current cell `start` and the next cell `step` on its path (`null`
+/// when it is at, or blocked from, its target). This is what keeps grid movement true to
+/// the maze — it never emits a diagonal velocity and never halts mid-cell:
+///   * **One axis at a time.** The agent advances toward a single waypoint along the
+///     dominant axis only, so a corridor keeps it lane-centred and a turn can never cut
+///     diagonally across a wall corner.
+///   * **Turns happen at cell centres.** Before turning onto a perpendicular `step`, the
+///     waypoint stays the *current* cell centre until the agent is lane-aligned on the
+///     step's perpendicular axis — so the agent first finishes crossing into the
+///     intersection, then turns, instead of sliding diagonally into the new lane.
+///   * **Flush stops.** With no onward `step` the waypoint is the current cell centre, so
+///     a blocked agent glides to that centre and stops flush against the wall (or on its
+///     target cell) rather than freezing wherever it happened to be.
+///   * **No overshoot.** The per-tick step is capped to the remaining distance (`speed`
+///     bounded by `dist/dt`), so the agent lands exactly on a centre and holds — never
+///     oscillating around it. Pure and deterministic (a fixed float sequence).
+fn steer(tm: Tilemap, pos: core.Vec3, speed: f32, dt: f32, start: Cell, step: ?Cell) core.Vec3 {
+    const center = tm.cellToWorld(@intCast(start.col), @intCast(start.row));
+    // Alignment tolerance, scaled to the grid so it is meaningful at any `cell_size`:
+    // an agent within this of its lane centre may turn. Capped arrivals land exactly on
+    // a centre, so this only absorbs float residue. Fixed ratio ⇒ deterministic.
+    const eps = tm.cell_size * 1e-3;
+
+    // Waypoint: the next cell's centre once lane-aligned for a turn, else the current
+    // cell's centre (finish crossing into it before turning, or to stop flush).
+    var wx = center.x;
+    var wy = center.y;
+    if (step) |s| {
+        const s_center = tm.cellToWorld(@intCast(s.col), @intCast(s.row));
+        if (s.col != start.col) {
+            // Horizontal step: require lane (Y) alignment before moving along X.
+            if (@abs(pos.y - center.y) <= eps) wx = s_center.x;
+        } else {
+            // Vertical step: require lane (X) alignment before moving along Y.
+            if (@abs(pos.x - center.x) <= eps) wy = s_center.y;
+        }
+    }
+
+    // Move along the dominant axis toward the waypoint — strictly one axis, never both
+    // (no diagonal) — capping the step so it cannot pass the waypoint this tick.
+    const dx = wx - pos.x;
+    const dy = wy - pos.y;
+    var v = core.Vec3.zero;
+    if (@abs(dx) >= @abs(dy)) {
+        if (@abs(dx) > eps) v.x = std.math.sign(dx) * @min(speed, @abs(dx) / dt);
+    } else {
+        if (@abs(dy) > eps) v.y = std.math.sign(dy) * @min(speed, @abs(dy) / dt);
+    }
+    return v;
+}
+
 /// Frame system (ADR 0027): steer every `NavAgent` one step along the shortest path to
 /// its selected target cell. For each agent (in NavAgent-insertion order) with a
 /// `Transform` on the sim's tilemap and both target data components set, run `nextStep`
-/// and set the agent's `Velocity` toward that cell's centre at `NavAgent.speed`; an
-/// agent already at (or with no path to) its target is stopped (zero velocity), so it
-/// stays put deterministically. No-op when the sim has no tilemap, no agents, or the
-/// target components are undeclared. Never allocates in the steady state and never
-/// reports `error.SystemFailed`; only `error.OutOfMemory` — and only the first time a
-/// steered agent that lacks a `Velocity` column needs its slot created.
+/// and set the agent's `Velocity` by `steer` — axis-aligned toward the next cell's
+/// centre at `NavAgent.speed`, turning only at cell centres and stopping flush when
+/// blocked (never a diagonal slide or a mid-cell halt). An agent already at (or with no
+/// path to) its target glides to its cell centre and stops, so it settles
+/// deterministically. No-op when the sim has no tilemap, no agents, or the target
+/// components are undeclared. Never allocates in the steady state and never reports
+/// `error.SystemFailed`; only `error.OutOfMemory` — and only the first time a steered
+/// agent that lacks a `Velocity` column needs its slot created.
 pub fn navSystem(ctx: *Context) SystemError!void {
     const tm_ptr = ctx.tilemap orelse return;
     const tm = tm_ptr.*;
@@ -136,14 +191,8 @@ pub fn navSystem(ctx: *Context) SystemError!void {
         const tr = world.data.get(row_c, ei) orelse continue;
         const target: Cell = .{ .col = @intFromFloat(tc), .row = @intFromFloat(tr) };
 
-        var vel: core.Vec3 = core.Vec3.zero;
-        if (nextStep(tm, start, target)) |step| {
-            const dest = tm.cellToWorld(@intCast(step.col), @intCast(step.row));
-            const dx = dest.x - t.pos.x;
-            const dy = dest.y - t.pos.y;
-            const len = @sqrt(dx * dx + dy * dy);
-            if (len > 0) vel = .{ .x = dx / len * agent.speed, .y = dy / len * agent.speed, .z = 0 };
-        }
+        const step = nextStep(tm, start, target);
+        const vel = steer(tm, t.pos, agent.speed, ctx.dt, start, step);
 
         // A value write on an existing column (like `movement`/`regen` do), not a
         // structural change — so it goes straight to the world for `movement` to
@@ -240,6 +289,56 @@ test "nav: an agent with no path (walled off) stays put" {
     // Target sealed behind walls on every side is unreachable.
     const tm = wallGrid(&.{ "#####", "#.#.#", "#####" });
     try testing.expect(nextStep(tm, .{ .col = 1, .row = 1 }, .{ .col = 3, .row = 1 }) == null);
+}
+
+test "nav: steer is axis-aligned — a horizontal or vertical step yields a single-axis velocity" {
+    const tm = wallGrid(&.{"....."}); // cell_size 1, origin 0
+    const speed: f32 = 8;
+    const dt: f32 = 1.0 / 60.0;
+    // Lane-aligned agent at cell (1,0) centre stepping right → pure +X, zero Y.
+    const right = steer(tm, .{ .x = 1, .y = 0, .z = 0 }, speed, dt, .{ .col = 1, .row = 0 }, .{ .col = 2, .row = 0 });
+    try testing.expect(right.x > 0 and right.y == 0);
+    // Lane-aligned agent stepping left → pure -X, zero Y.
+    const left = steer(tm, .{ .x = 1, .y = 0, .z = 0 }, speed, dt, .{ .col = 1, .row = 0 }, .{ .col = 0, .row = 0 });
+    try testing.expect(left.x < 0 and left.y == 0);
+}
+
+test "nav: steer finishes crossing to the cell centre before turning — no diagonal on a corner" {
+    // A 2-row grid so a vertical step is walkable. Agent is in cell (1,1) but off-centre
+    // in X (mid horizontal traverse, came from the right), asked to step UP to (1,0).
+    // It must first move along X back to the cell centre — never a diagonal X+Y velocity.
+    const tm = wallGrid(&.{ ".....", "....." });
+    const off_center: core.Vec3 = .{ .x = 1.3, .y = 1, .z = 0 };
+    const v = steer(tm, off_center, 8, 1.0 / 60.0, .{ .col = 1, .row = 1 }, .{ .col = 1, .row = 0 });
+    try testing.expect(v.x < 0); // steering back toward the column centre (x=1)
+    try testing.expectEqual(@as(f32, 0), v.y); // strictly no vertical motion yet: not diagonal
+    // Once lane-aligned in X, the same up-step turns into pure vertical motion.
+    const turned = steer(tm, .{ .x = 1, .y = 1, .z = 0 }, 8, 1.0 / 60.0, .{ .col = 1, .row = 1 }, .{ .col = 1, .row = 0 });
+    try testing.expectEqual(@as(f32, 0), turned.x);
+    try testing.expect(turned.y < 0); // row 0 centre is below (−Y) row 1's
+}
+
+test "nav: steer glides a blocked agent to its cell centre and stops flush" {
+    const tm = wallGrid(&.{"....."});
+    // No onward step (blocked/at target). Agent sits past cell (2,0)'s centre.
+    const approaching = steer(tm, .{ .x = 2.3, .y = 0, .z = 0 }, 8, 1.0 / 60.0, .{ .col = 2, .row = 0 }, null);
+    try testing.expect(approaching.x < 0 and approaching.y == 0); // heads back to the centre
+    // Exactly on the centre: fully stopped (flush), no residual velocity.
+    const settled = steer(tm, .{ .x = 2, .y = 0, .z = 0 }, 8, 1.0 / 60.0, .{ .col = 2, .row = 0 }, null);
+    try testing.expect(settled.approxEql(core.Vec3.zero, 1e-6));
+}
+
+test "nav: steer caps the step so the agent lands exactly on the centre, not past it" {
+    const tm = wallGrid(&.{"....."});
+    const dt: f32 = 1.0 / 60.0;
+    // Blocked (step null) so the waypoint is the agent's own cell centre (x=2), only 0.01
+    // units away. An uncapped step (8·dt ≈ 0.133) would overshoot; the cap lands it
+    // exactly on the centre this tick, so it settles instead of oscillating.
+    const pos: core.Vec3 = .{ .x = 1.99, .y = 0, .z = 0 };
+    const v = steer(tm, pos, 8, dt, .{ .col = 2, .row = 0 }, null);
+    const landed_x = pos.x + v.x * dt;
+    try testing.expectApproxEqAbs(@as(f32, 2.0), landed_x, 1e-5); // lands on the centre, not past
+    try testing.expectEqual(@as(f32, 0), v.y);
 }
 
 test "nav: through the Sim, an agent steps one cell toward its target and reaches it" {

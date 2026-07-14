@@ -4,9 +4,10 @@
 // intersection pac's straight-down heading crosses without turning onto it, unlike the
 // pre-#108 bug where a far nav target made the BFS auto-route pac sideways through
 // exactly this kind of crossing). Column 8's row-6 cell is a wall, so pac's next-cell
-// nav target becomes unwalkable there and pac stops dead — mid-cell, not at the row's
-// exact centre, because the 0.1s retarget cadence does not divide evenly into the time
-// pac takes to cross a cell; the stop is still fully deterministic.
+// nav target becomes unwalkable there and pac stops dead. Since #126 nav is axis-aligned
+// and grid-locked: a blocked agent glides to its current cell centre and stops flush
+// against the wall, so pac lands exactly on row 7's centre (world y = 2) rather than the
+// pre-#126 stop-short mid-cell halt (~2.4) — deterministically, and flush to the wall.
 //
 // Two ordered, single-fundamental checkpoints (ADR 0028 "one fundamental per
 // assertion"): the first isolates the *successful open turn* — at tick 10 pac is still
@@ -14,8 +15,8 @@
 // moved partway down it (y dropped from 4 to 3.6), which fails iff an open on_key press
 // does not change pac's heading (the isolated turn proof `03_turn.zon`'s blocked case
 // cannot give). The second isolates the #108 *stop at a wall, no auto-detour* — by tick
-// 40 pac has stopped dead at (-1, 2.4), still on column 8, inside the long window (tick
-// ~21 to ~60) where pac sits undisturbed before a ghost eventually finds it.
+// 40 pac has stopped dead flush at (-1, 2.0), still on column 8, inside the long window
+// (tick ~22 to ~60) where pac sits undisturbed before a ghost eventually finds it.
 .{
     .steps = 40,
     .input_trace = .{
@@ -29,9 +30,9 @@
             .check = .{ .occupied = .{ .x = -1, .y = 3.6, .eps = 0.02 } },
         },
         .{
-            .label = "straight (stop): pac crosses the row-7 intersection without detouring onto it and stops dead at the row-6 wall",
+            .label = "straight (stop): pac crosses the row-7 intersection without detouring onto it and stops flush at the row-6 wall (row-7 centre)",
             .at_tick = 40,
-            .check = .{ .occupied = .{ .x = -1, .y = 2.4, .eps = 0.02 } },
+            .check = .{ .occupied = .{ .x = -1, .y = 2.0, .eps = 0.02 } },
         },
     },
 }

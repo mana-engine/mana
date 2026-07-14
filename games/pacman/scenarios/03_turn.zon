@@ -6,10 +6,12 @@
 // pre-#108 bug this regresses). Holding DOWN from tick 10 changes the heading to
 // vertical while pac is still a few cells short of column 8's row-8 gap, so the very
 // first "down" retarget picks a wall cell; by tick 50 pac has NOT moved off row 9 at
-// all (y is still 4) and has stopped advancing (x is frozen at the value it reached
-// right when the heading changed) — proof nav does not auto-route around the block.
-// `08_straight_through.zon` is the companion case where the pressed direction *is*
-// open: pac turns, crosses an intersection, and stops only at a real wall.
+// all (y is still 4). Since #126 nav is axis-aligned and grid-locked, a blocked agent
+// glides to its current cell centre and stops flush there instead of freezing mid-cell:
+// pac finishes reaching column 7's centre (world x = -2) and holds — proof nav neither
+// auto-routes around the block nor slides diagonally. `08_straight_through.zon` is the
+// companion case where the pressed direction *is* open: pac turns, crosses an
+// intersection, and stops only at a real wall.
 .{
     .steps = 50,
     .input_trace = .{
@@ -20,7 +22,7 @@
         .{
             .label = "turn: on_key(down) while blocked holds pac in place — no auto-detour around the wall",
             .at_tick = 50,
-            .check = .{ .occupied = .{ .x = -1.533, .y = 4, .eps = 0.02 } },
+            .check = .{ .occupied = .{ .x = -2.0, .y = 4, .eps = 0.02 } },
         },
     },
 }
