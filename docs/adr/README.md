@@ -42,7 +42,8 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0028 | Acceptance / scenario tests: a behavioral oracle atop the deterministic sim | proposed |
 | 0029 | Headless SVG render output: a GPU-free way to see a level | proposed |
 | 0030 | Entity appearance as data: `.appearance` in the scene/prototype schema | accepted |
-| 0031 | Sprite rendering: cosmetic sprite/animation component, dependency-free sheet asset, gpu texture path | proposed |
-| 0032 | Animated-sprite interchange: no existing format fits — evolve MSF, don't replace it | proposed |
-| 0033 | Directional + mirrored sprite animation: facing-selected clips replace wedge rotation | proposed |
+| 0031 | Sprite rendering: cosmetic sprite/animation component, dependency-free sheet asset, gpu texture path | accepted |
+| 0032 | Animated-sprite interchange: no existing format fits — evolve MSF, don't replace it | accepted |
+| 0033 | Directional + mirrored sprite animation: facing-selected clips replace wedge rotation | accepted |
+| 0034 | Data-driven game-UI subsystem: direction | proposed |
 | 0035 | `mana.is_walkable`: a read-only tilemap-walkability query | accepted |
