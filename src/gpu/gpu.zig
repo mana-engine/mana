@@ -325,18 +325,29 @@ fn buildVertices(quads: []const Quad, out: []Vertex) void {
 /// sprite faces its travel direction (UVs stay unrotated). `out.len` must be
 /// `quads.len * 6`. Pure; the same geometry feeds every backend. Winding matches
 /// `buildVertices` (TL, TR, BL, BL, TR, BR).
+///
+/// The rotation is done in ISOTROPIC (square, pixel-space) coordinates — a unit corner
+/// `(±1, ±1)` is rotated, then scaled per-axis by the NDC half-extents `(hx, hy)`. Since
+/// `hx = half_px/half_w` and `hy = half_px/half_h`, the on-screen quad is `half_px` square
+/// regardless of viewport aspect; scaling AFTER the rotation keeps it square. Rotating the
+/// already-anisotropic NDC offsets instead (the old bug, issue #121) let a 90° turn swap
+/// `hx`↔`hy`, squashing Pac into a flat sideways oval on a non-square `--play` window.
 fn buildTexturedVertices(quads: []const SpriteQuad, out: []TexturedVertex) void {
     for (quads, 0..) |q, i| {
         const cos = @cos(q.angle);
         const sin = @sin(q.angle);
         const cx = q.center[0];
         const cy = q.center[1];
-        // A corner offset (dx, dy) from the centre, rotated then translated to NDC.
+        const hx = q.half[0];
+        const hy = q.half[1];
+        // A unit corner (sx, sy) ∈ {-1,+1}²: rotate it in square pixel space, THEN scale
+        // by the NDC half-extents. `hx`/`hy` are the common factor of x/y, never mixed
+        // into the other axis's rotation term — so a non-square viewport can't squash it.
         const corner = struct {
-            fn at(dx: f32, dy: f32, c: f32, s: f32, ox: f32, oy: f32, u: f32, v: f32, tint: [3]f32) TexturedVertex {
+            fn at(sx: f32, sy: f32, c: f32, s: f32, ox: f32, oy: f32, ehx: f32, ehy: f32, u: f32, v: f32, tint: [3]f32) TexturedVertex {
                 return .{
-                    .x = ox + (dx * c - dy * s),
-                    .y = oy + (dx * s + dy * c),
+                    .x = ox + ehx * (sx * c - sy * s),
+                    .y = oy + ehy * (sx * s + sy * c),
                     .u = u,
                     .v = v,
                     .r = tint[0],
@@ -345,20 +356,52 @@ fn buildTexturedVertices(quads: []const SpriteQuad, out: []TexturedVertex) void 
                 };
             }
         }.at;
-        const hx = q.half[0];
-        const hy = q.half[1];
         const umin = q.uv_min[0];
         const vmin = q.uv_min[1];
         const umax = q.uv_max[0];
         const vmax = q.uv_max[1];
         const base = i * 6;
-        out[base + 0] = corner(-hx, -hy, cos, sin, cx, cy, umin, vmin, q.tint); // TL
-        out[base + 1] = corner(hx, -hy, cos, sin, cx, cy, umax, vmin, q.tint); // TR
-        out[base + 2] = corner(-hx, hy, cos, sin, cx, cy, umin, vmax, q.tint); // BL
-        out[base + 3] = corner(-hx, hy, cos, sin, cx, cy, umin, vmax, q.tint); // BL
-        out[base + 4] = corner(hx, -hy, cos, sin, cx, cy, umax, vmin, q.tint); // TR
-        out[base + 5] = corner(hx, hy, cos, sin, cx, cy, umax, vmax, q.tint); // BR
+        out[base + 0] = corner(-1, -1, cos, sin, cx, cy, hx, hy, umin, vmin, q.tint); // TL
+        out[base + 1] = corner(1, -1, cos, sin, cx, cy, hx, hy, umax, vmin, q.tint); // TR
+        out[base + 2] = corner(-1, 1, cos, sin, cx, cy, hx, hy, umin, vmax, q.tint); // BL
+        out[base + 3] = corner(-1, 1, cos, sin, cx, cy, hx, hy, umin, vmax, q.tint); // BL
+        out[base + 4] = corner(1, -1, cos, sin, cx, cy, hx, hy, umax, vmin, q.tint); // TR
+        out[base + 5] = corner(1, 1, cos, sin, cx, cy, hx, hy, umax, vmax, q.tint); // BR
     }
+}
+
+test "buildTexturedVertices: a 90° facing turn preserves the quad's NDC footprint (no oval on a non-square viewport)" {
+    // Issue #121: on a wide `--play` window the sprite's NDC half-extents are anisotropic
+    // (hx != hy). A correct facing rotation keeps the on-screen quad square, so its NDC
+    // bounding box stays hx wide × hy tall at any angle — only the TEXTURE turns. The old
+    // code rotated the NDC offsets directly, swapping hx↔hy at 90° and squashing it.
+    const hx: f32 = 0.4; // wide (world unit spans more screen-x than screen-y here)
+    const hy: f32 = 0.1;
+    const q = [_]SpriteQuad{.{
+        .center = .{ 0, 0 },
+        .half = .{ hx, hy },
+        .uv_min = .{ 0, 0 },
+        .uv_max = .{ 1, 1 },
+        .angle = std.math.pi / 2.0, // facing up/down: the case that used to collapse
+    }};
+    var v: [6]TexturedVertex = undefined;
+    buildTexturedVertices(&q, &v);
+
+    // NDC bounding box is unchanged from the axis-aligned quad: ±hx in x, ±hy in y.
+    var max_x: f32 = 0;
+    var max_y: f32 = 0;
+    for (v) |vert| {
+        max_x = @max(max_x, @abs(vert.x));
+        max_y = @max(max_y, @abs(vert.y));
+    }
+    try std.testing.expectApproxEqAbs(hx, max_x, 1e-6); // NOT squashed to hy
+    try std.testing.expectApproxEqAbs(hy, max_y, 1e-6); // NOT stretched to hx
+    // The texture really turned 90°: the frame's top-left texel (uv 0,0 → vertex 0) now
+    // sits at the quad's top-right corner (+hx, -hy) rather than the top-left (-hx, -hy).
+    try std.testing.expectApproxEqAbs(hx, v[0].x, 1e-6);
+    try std.testing.expectApproxEqAbs(-hy, v[0].y, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), v[0].u, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), v[0].v, 1e-6);
 }
 
 test "gpu backend matches the build flag" {

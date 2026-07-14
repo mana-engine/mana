@@ -26,12 +26,13 @@ const SystemError = @import("sim.zig").SystemError;
 pub const move_speed: f32 = 4.0;
 
 /// Translate this tick's held arrow keys into a `Velocity`, queued for every entity
-/// that already has one (overwriting it — a no-op for the deferred write itself, but
-/// deterministic: the resulting value is the same regardless of what was set the
-/// previous tick). No keys held ⇒ zero velocity, so the demo path with no
-/// `setInput` call ever made is identical to before input delivery existed
-/// (`ctx.input` defaults to all-empty). Errors: only `error.OutOfMemory`, propagated
-/// from queuing the command; never reports `error.SystemFailed`.
+/// that already has one AND is not steered by a `NavAgent` (input yields to autonomous
+/// nav — see the loop body; issue #121). Overwriting is a no-op for the deferred write
+/// itself, but deterministic: the resulting value is the same regardless of what was set
+/// the previous tick. No keys held ⇒ zero velocity, so the demo path with no `setInput`
+/// call ever made is identical to before input delivery existed (`ctx.input` defaults to
+/// all-empty). Errors: only `error.OutOfMemory`, propagated from queuing the command;
+/// never reports `error.SystemFailed`.
 pub fn inputMoveSystem(ctx: *Context) SystemError!void {
     var x: f32 = 0;
     var y: f32 = 0;
@@ -42,6 +43,14 @@ pub fn inputMoveSystem(ctx: *Context) SystemError!void {
 
     const v: components.Velocity = .{ .v = .{ .x = x * move_speed, .y = y * move_speed, .z = 0 } };
     for (ctx.world.velocities.entities()) |ei| {
+        // Input yields to an autonomous nav agent (issue #121): a NavAgent already owns
+        // its entity's velocity each tick (`navSystem` steers it toward its target). If
+        // this system queued a velocity for it too, the deferred write would flush AFTER
+        // nav's direct write and clobber it — leaving the velocity zero at render, so a
+        // directional sprite (Pac's wedge) could never face its travel direction. Skipping
+        // nav-controlled entities is movement-neutral (nav re-writes before `movementSystem`
+        // integrates either way) and hash-neutral (velocity is not in the state hash).
+        if (ctx.world.nav_agents.get(ei) != null) continue;
         try ctx.commands.setVelocity(ctx.gpa, ctx.world.entityAt(ei), v);
     }
 }
@@ -90,6 +99,42 @@ test "inputMoveSystem: no keys held leaves velocity at zero, matching the pre-in
 
     try testing.expect(sim.world.getTransform(e).?.pos.approxEql(.{ .x = 1, .y = 1, .z = 1 }, 1e-6));
     try testing.expect(sim.world.getVelocity(e).?.v.approxEql(.{ .x = 0, .y = 0, .z = 0 }, 1e-6));
+}
+
+test "inputMoveSystem: a nav-controlled entity's velocity is left for nav, not clobbered (issue #121)" {
+    // A NavAgent owns its entity's velocity; input must not queue a competing (here zero)
+    // velocity that would flush over nav's heading, which would zero the velocity at render
+    // and stop a directional sprite from ever facing its travel direction.
+    var sim = Sim.init(testing.allocator, 1.0 / 60.0);
+    defer sim.deinit();
+
+    const nav = try sim.world.spawn();
+    try sim.world.setTransform(nav, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try sim.world.setVelocity(nav, .{ .v = .{ .x = 0, .y = 0, .z = 0 } });
+    try sim.world.setNavAgent(nav, .{ .speed = 4 });
+    // A plain velocity entity alongside it still gets the (no-keys) zero from input.
+    const plain = try sim.world.spawn();
+    try sim.world.setTransform(plain, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try sim.world.setVelocity(plain, .{ .v = .{ .x = 9, .y = 0, .z = 0 } });
+
+    try sim.addSystem(inputMoveSystem);
+    // Stand in for navSystem: like the real `navSystem`, it writes the heading DIRECTLY
+    // into the velocity column (not via a deferred command), and runs AFTER input, so the
+    // flush order (input command → nav direct write → end-of-tick flush) matches the real
+    // stack. If input queued a competing write, the flush would clobber this value.
+    const NavStub = struct {
+        fn sys(ctx: *Context) SystemError!void {
+            for (ctx.world.velocities.entities()) |ei| {
+                if (ctx.world.nav_agents.get(ei)) |_| ctx.world.velocities.get(ei).?.v = .{ .x = -3, .y = 0, .z = 0 };
+            }
+        }
+    };
+    try sim.addSystem(NavStub.sys);
+    try sim.tick();
+
+    // Nav's heading survived on the nav entity; input's zero landed on the plain one.
+    try testing.expect(sim.world.getVelocity(nav).?.v.approxEql(.{ .x = -3, .y = 0, .z = 0 }, 1e-6));
+    try testing.expect(sim.world.getVelocity(plain).?.v.approxEql(.{ .x = 0, .y = 0, .z = 0 }, 1e-6));
 }
 
 /// A fixed per-tick trace of held keys, replayed one entry per tick via `Sim.setInput`

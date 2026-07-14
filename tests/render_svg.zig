@@ -25,7 +25,7 @@ fn renderScene(gpa: std.mem.Allocator, io: std.Io, scene_path: []const u8, scale
     defer world.deinit();
 
     const view: engine.render.View = .{ .width = 512, .height = 512, .projection = .{ .orthographic = .{ .scale = scale } } };
-    const quads = try engine.render.project(gpa, &world, view, &engine.render.default_palette);
+    const quads = try engine.render.project(gpa, &world, view, &engine.render.default_palette, null);
     defer gpa.free(quads);
     return engine.render_svg.toSvg(gpa, quads, view, engine.render_svg.default_background);
 }

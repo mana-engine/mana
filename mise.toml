@@ -40,6 +40,12 @@ depends = ["fmt-check", "build", "test"]
 
 [tasks.run]
 description = "Run the runner headless: mise run run -- games/sandbox"
+# Depends on `assets` so a game's declared sprite sheets (DERIVED, gitignored) always
+# exist on disk before the runner loads them — a fresh checkout that never ran `mise run
+# assets` otherwise renders a sprited entity with no sheet (issue #121). The engine also
+# falls back to the flat Appearance quad for a missing sheet, so a direct `zig build run`
+# stays visible too; this just makes the normal path show the correct sprite.
+depends = ["assets"]
 run = "zig build run --"
 
 [tasks.cross-win]

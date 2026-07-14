@@ -121,8 +121,14 @@ fn lessThanDepth(_: void, a: DepthEntry, b: DepthEntry) bool {
 /// wall on a one-unit grid cell fills its cell and a dot stays small and round,
 /// regardless of the projection's pixel scale. An entity with no `Appearance` keeps
 /// the legacy fallback: `palette[entity_index % palette.len]`, the fixed
-/// `view.quad_half_px`, and `.rect`. Caller owns the returned slice. Pure/deterministic.
-pub fn project(gpa: Allocator, world: *World, view: View, palette: []const [3]f32) Allocator.Error![]gpu.Quad {
+/// `view.quad_half_px`, and `.rect`. An entity whose `Sprite` will actually draw — its
+/// sheet is loaded in `sheets`, so `projectSprites` emits a textured quad — is skipped
+/// here, since emitting its flat `Appearance` quad too would mask the sprite's transparent
+/// regions behind a solid box (issue #121). If its sheet is missing (or `sheets` is null,
+/// e.g. the SVG / non-sprite render paths that never composite a texture) the flat quad is
+/// kept, so the entity stays VISIBLE (a box) instead of vanishing. Caller owns the returned
+/// slice. Pure/deterministic.
+pub fn project(gpa: Allocator, world: *World, view: View, palette: []const [3]f32, sheets: ?*const sprite.SheetStore) Allocator.Error![]gpu.Quad {
     const half_w = @as(f32, @floatFromInt(view.width)) / 2;
     const half_h = @as(f32, @floatFromInt(view.height)) / 2;
     const origin: core.Vec2 = .{ .x = half_w, .y = half_h };
@@ -130,6 +136,18 @@ pub fn project(gpa: Allocator, world: *World, view: View, palette: []const [3]f3
     var entries: std.ArrayList(DepthEntry) = .empty;
     defer entries.deinit(gpa);
     for (world.transforms.entities(), world.transforms.slice()) |entity_index, t| {
+        // Suppress this flat `Appearance` quad only when the entity's sprite WILL draw —
+        // its sheet is loaded, so `projectSprites` emits a textured quad that would be
+        // masked by the opaque flat quad filling its transparent regions (Pac's mouth
+        // wedge), issue #121. If the sheet is missing (a checkout that skipped `mise run
+        // assets`) or `sheets` is null (non-sprite render paths), fall through and draw
+        // the flat quad so the entity stays visible (a box beats vanishing). Tint/size
+        // still come from the `Appearance`.
+        if (sheets) |store| {
+            if (world.sprites.get(entity_index)) |spr| {
+                if (store.get(spr.sheet) != null) continue;
+            }
+        }
         const p = projectPoint(view.projection, t.pos, origin);
         const appearance = world.appearances.get(entity_index);
         const color = if (appearance) |a| a.color else palette[entity_index % palette.len];
@@ -178,9 +196,12 @@ fn lessThanSpriteDepth(_: void, a: SpriteDepthEntry, b: SpriteDepthEntry) bool {
 /// sprite (Pac's wedge) turns to face where it moves; a stationary entity keeps `angle`
 /// 0 (its default/right-facing pose). Results are painter-sorted far-to-near like
 /// `project`. An entity whose sheet is unloaded, or whose current frame is not in the
-/// atlas, is skipped (it falls back to its flat `Appearance` quad from `project`). Pure
-/// and deterministic; reads only cosmetic columns, never sim state. Caller owns the
-/// returned slice. Errors: `error.OutOfMemory`.
+/// atlas, is skipped here — and because `project` suppresses the flat quad only for a
+/// sprite that DOES draw (issue #121), such an entity still gets its flat `Appearance`
+/// quad from `project` and stays visible (a box), rather than vanishing. A missing sheet
+/// is a content/setup issue the sheet loader already warns about at load (`mise run
+/// assets` regenerates it); it is not fatal. Pure and deterministic; reads only cosmetic
+/// columns, never sim state. Caller owns the returned slice. Errors: `error.OutOfMemory`.
 pub fn projectSprites(
     gpa: Allocator,
     world: *World,
@@ -394,6 +415,50 @@ test "projectSprites: a stationary entity keeps angle 0; an unloaded sheet is sk
     try testing.expectApproxEqAbs(@as(f32, 0), quads[0].angle, 1e-6);
 }
 
+test "project: a sprite whose sheet is loaded suppresses its flat quad; a missing sheet keeps it (issue #121)" {
+    const gpa = testing.allocator;
+    // A one-frame sheet loaded under "s.msf"; nothing is loaded under the missing ref.
+    var px: [1 * 1 * 4]u8 = .{ 9, 9, 9, 255 };
+    var store = try spriteStoreWith(gpa, "s.msf", .{
+        .width = 1,
+        .height = 1,
+        .frames = &.{&px},
+        .clips = &.{.{ .name = "idle", .fps = 1, .frames = &.{0} }},
+    });
+    defer store.deinit();
+
+    var world = World.init(gpa);
+    defer world.deinit();
+    // A sprited entity (like pac): Appearance for tint/size AND a Sprite whose sheet is
+    // loaded ⇒ `projectSprites` will draw it ⇒ `project` must NOT add a masking flat quad.
+    const drawn = try world.spawn();
+    try world.setTransform(drawn, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try world.setAppearance(drawn, .{ .color = .{ 1, 0.9, 0.2 }, .size = 0.7, .shape = .circle });
+    try world.setSprite(drawn, .{ .sheet = "s.msf", .clip = "idle" });
+    // A sprited entity whose sheet is NOT loaded (a checkout without `mise run assets`):
+    // `projectSprites` skips it, so `project` MUST keep its flat quad — a visible box
+    // beats an invisible entity.
+    const missing = try world.spawn();
+    try world.setTransform(missing, .{ .pos = .{ .x = 1, .y = 0, .z = 0 } });
+    try world.setAppearance(missing, .{ .color = .{ 0.2, 0.2, 0.2 }, .size = 0.7 });
+    try world.setSprite(missing, .{ .sheet = "absent.msf", .clip = "idle" });
+
+    const view: View = .{ .width = 256, .height = 256, .projection = .{ .orthographic = .{ .scale = 32 } } };
+    const quads = try project(gpa, &world, view, &default_palette, &store);
+    defer gpa.free(quads);
+
+    // Exactly one flat quad — the missing-sheet entity's fallback box; the loaded one was
+    // suppressed (its sprite draws instead).
+    try testing.expectEqual(@as(usize, 1), quads.len);
+    try testing.expect(std.mem.eql(f32, &.{ 0.2, 0.2, 0.2 }, &quads[0].color));
+
+    // With no store at all (SVG / non-sprite render paths), neither sprite can draw, so
+    // BOTH keep their flat quad — nothing vanishes.
+    const quads_no_store = try project(gpa, &world, view, &default_palette, null);
+    defer gpa.free(quads_no_store);
+    try testing.expectEqual(@as(usize, 2), quads_no_store.len);
+}
+
 test "project: isometric — an entity at the origin maps to the NDC centre" {
     var world = World.init(testing.allocator);
     defer world.deinit();
@@ -401,7 +466,7 @@ test "project: isometric — an entity at the origin maps to the NDC centre" {
     try world.setTransform(e, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
 
     const view: View = .{ .width = 256, .height = 256, .projection = .{ .isometric = .{ .half_w = 32, .half_h = 16, .z_height = 16 } } };
-    const quads = try project(testing.allocator, &world, view, &default_palette);
+    const quads = try project(testing.allocator, &world, view, &default_palette, null);
     defer testing.allocator.free(quads);
 
     try testing.expectEqual(@as(usize, 1), quads.len);
@@ -418,7 +483,7 @@ test "project: +X and +Y move a quad the iso way (deterministic layout)" {
     try world.setTransform(b, .{ .pos = .{ .x = 1, .y = 0, .z = 0 } });
 
     const view: View = .{ .width = 256, .height = 256, .projection = .{ .isometric = .{ .half_w = 32, .half_h = 16, .z_height = 16 } } };
-    const quads = try project(testing.allocator, &world, view, &default_palette);
+    const quads = try project(testing.allocator, &world, view, &default_palette, null);
     defer testing.allocator.free(quads);
 
     // +X of one tile = +32px x, +16px y from centre → +0.25, +0.125 in NDC.
@@ -441,7 +506,7 @@ test "project: quads come out far-to-near ordered by iso depth (x+y+z)" {
     try world.setTransform(mid, .{ .pos = .{ .x = 2, .y = 2, .z = 0 } });
 
     const view: View = .{ .width = 256, .height = 256, .projection = .{ .isometric = .{ .half_w = 32, .half_h = 16, .z_height = 16 } } };
-    const quads = try project(testing.allocator, &world, view, &default_palette);
+    const quads = try project(testing.allocator, &world, view, &default_palette, null);
     defer testing.allocator.free(quads);
 
     // Output must be far -> mid -> near (ascending depth), identified by each
@@ -464,7 +529,7 @@ test "project: equal-depth quads tie-break deterministically by entity index" {
     try world.setTransform(a, .{ .pos = .{ .x = 5, .y = 0, .z = 0 } }); // depth 5
 
     const view: View = .{ .width = 256, .height = 256, .projection = .{ .isometric = .{ .half_w = 32, .half_h = 16, .z_height = 16 } } };
-    const quads = try project(testing.allocator, &world, view, &default_palette);
+    const quads = try project(testing.allocator, &world, view, &default_palette, null);
     defer testing.allocator.free(quads);
 
     try testing.expectEqual(@as(usize, 2), quads.len);
@@ -480,7 +545,7 @@ test "project: an entity with an Appearance uses its color, not the palette" {
     try world.setAppearance(e, .{ .color = .{ 0.1, 0.2, 0.3 } });
 
     const view: View = .{ .width = 256, .height = 256, .projection = .{ .orthographic = .{ .scale = 32 } } };
-    const quads = try project(testing.allocator, &world, view, &default_palette);
+    const quads = try project(testing.allocator, &world, view, &default_palette, null);
     defer testing.allocator.free(quads);
 
     try testing.expect(std.mem.eql(f32, &.{ 0.1, 0.2, 0.3 }, &quads[0].color));
@@ -499,7 +564,7 @@ test "project: an entity's Appearance.size scales the quad by world-scale, not v
 
     // scale = 24px/unit ⇒ Appearance.size=1 ⇒ half-extent 12px, not the 16px default.
     const view: View = .{ .width = 256, .height = 256, .projection = .{ .orthographic = .{ .scale = 24 } } };
-    const quads = try project(testing.allocator, &world, view, &default_palette);
+    const quads = try project(testing.allocator, &world, view, &default_palette, null);
     defer testing.allocator.free(quads);
 
     const half_w: f32 = 128;
@@ -516,7 +581,7 @@ test "project: pxPerWorldUnit uses half_w under isometric to scale an Appearance
     try world.setAppearance(e, .{ .color = .{ 1, 1, 1 }, .size = 2 }); // 2 world units wide
 
     const view: View = .{ .width = 256, .height = 256, .projection = .{ .isometric = .{ .half_w = 32, .half_h = 16, .z_height = 16 } } };
-    const quads = try project(testing.allocator, &world, view, &default_palette);
+    const quads = try project(testing.allocator, &world, view, &default_palette, null);
     defer testing.allocator.free(quads);
 
     // half-extent = (size/2) * half_w = 1 * 32 = 32px.
@@ -536,7 +601,7 @@ test "project: an entity's Appearance.shape carries through to the quad; absent 
     try world.setTransform(no_appearance, .{ .pos = .{ .x = 2, .y = 0, .z = 0 } });
 
     const view: View = .{ .width = 256, .height = 256, .projection = .{ .orthographic = .{ .scale = 32 } } };
-    const quads = try project(testing.allocator, &world, view, &default_palette);
+    const quads = try project(testing.allocator, &world, view, &default_palette, null);
     defer testing.allocator.free(quads);
 
     try testing.expectEqual(gpu.Shape.circle, quads[0].shape);
@@ -562,7 +627,7 @@ test "project: orthographic maps world axes straight to screen (identity/edge/ne
         try world.setTransform(e, .{ .pos = c.pos });
 
         const view: View = .{ .width = 256, .height = 256, .projection = .{ .orthographic = .{ .scale = 32 } } };
-        const quads = try project(testing.allocator, &world, view, &default_palette);
+        const quads = try project(testing.allocator, &world, view, &default_palette, null);
         defer testing.allocator.free(quads);
 
         try testing.expectApproxEqAbs(c.want[0], quads[0].center[0], 1e-6);
@@ -582,7 +647,7 @@ test "project: orthographic sorts by world Z (higher draws in front)" {
     try world.setTransform(mid, .{ .pos = .{ .x = 0, .y = 0, .z = 1 } });
 
     const view: View = .{ .width = 256, .height = 256, .projection = .{ .orthographic = .{ .scale = 32 } } };
-    const quads = try project(testing.allocator, &world, view, &default_palette);
+    const quads = try project(testing.allocator, &world, view, &default_palette, null);
     defer testing.allocator.free(quads);
 
     // Ascending depth (far→near): low → mid → high, so high lands on top.
