@@ -39,6 +39,14 @@ pub const Context = struct {
     /// steering system paths over it; every other system ignores it. Null for a sim
     /// that never sets `Sim.tilemap`, so nav no-ops and existing sims are unaffected.
     tilemap: ?*const Tilemap = null,
+    /// Per-tick scratch allocator (issue #153): backed by `Sim.scratch_arena`, reset
+    /// (capacity retained) once per tick before systems run. For system-local working
+    /// memory that never survives past this tick's return — e.g. `collision`'s
+    /// positioned bodies and spatial-hash — so a system needing per-tick scratch
+    /// space never inits/deinits its own arena from `gpa` (CLAUDE.md: no per-frame
+    /// heap alloc in the hot loop). Never for state read next tick; use `gpa` for
+    /// anything that must outlive the tick.
+    scratch: Allocator,
 };
 
 /// A system's own reported failure — the native-system analogue of a Lua handler
@@ -109,11 +117,17 @@ pub const Sim = struct {
     /// seeds). Advancing it is the *only* effect `mana.random`/`random_int` have —
     /// they never touch `world`/`commands`, so they need no command-buffer entry.
     rng: core.Rng = core.Rng.init(default_rng_seed),
+    /// Backing store for `Context.scratch` (issue #153): one arena reused every tick
+    /// via `reset(.retain_capacity)` in `tick`, instead of a system `init`/`deinit`ing
+    /// its own arena from `gpa` each call — the sanctioned reusable-arena pattern
+    /// `runtime.playLoop`'s `frame_arena` already uses for render scratch. Owned by
+    /// `Sim`, freed exactly once in `deinit`.
+    scratch_arena: std.heap.ArenaAllocator,
 
     /// A sim with an empty world at fixed step `dt`. Populate `world` (e.g. via
     /// `engine.scene.load`) and register systems, then `run`/`tick`.
     pub fn init(gpa: Allocator, dt: f32) Sim {
-        return .{ .gpa = gpa, .world = World.init(gpa), .dt = dt };
+        return .{ .gpa = gpa, .world = World.init(gpa), .dt = dt, .scratch_arena = std.heap.ArenaAllocator.init(gpa) };
     }
 
     pub fn deinit(self: *Sim) void {
@@ -123,6 +137,7 @@ pub const Sim = struct {
         self.events.deinit(self.gpa);
         self.commands.deinit(self.gpa);
         self.timers.deinit(self.gpa);
+        self.scratch_arena.deinit();
         self.world.deinit();
         self.* = undefined;
     }
@@ -202,6 +217,10 @@ pub const Sim = struct {
     /// consistent with how flushed spawns/despawns land before the next tick reads
     /// them.
     pub fn tick(self: *Sim) !void {
+        // Retain capacity, drop contents: `Context.scratch` starts each tick empty
+        // but never re-syscalls for memory a prior tick already grew it to (issue
+        // #153) — no per-frame heap alloc in the hot loop.
+        _ = self.scratch_arena.reset(.retain_capacity);
         var ctx: Context = .{
             .world = &self.world,
             .commands = &self.commands,
@@ -211,6 +230,7 @@ pub const Sim = struct {
             .tick = self.tick_count,
             .input = self.input,
             .tilemap = self.tilemap,
+            .scratch = self.scratch_arena.allocator(),
         };
         {
             const z = tracy.zone(@src(), "sim.systems");
