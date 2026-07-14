@@ -58,6 +58,12 @@ pub const target_api_version: u32 = @bitCast(vk.API_VERSION_1_3);
 /// so it can be handed to Vulkan directly.
 const scene_spv align(@alignOf(u32)) = @embedFile("shaders/scene.spv").*;
 
+/// Sprite (textured-quad) shaders, compiled from `shaders/sprite.wgsl` by naga
+/// (`mise run shaders`; ADR 0031 §4). Aligned to u32 so it can be handed to Vulkan
+/// directly. This file is a DERIVED artifact committed alongside the WGSL source, like
+/// `scene.spv`; a build under `-Denable-vulkan` fails until it is generated.
+const sprite_spv align(@alignOf(u32)) = @embedFile("shaders/sprite.spv").*;
+
 /// Full colour subresource range (single mip, single layer) used by every image op.
 const full_range: vk.ImageSubresourceRange = .{
     .aspect_mask = .{ .color_bit = true },
@@ -181,6 +187,34 @@ pub const Pipeline = struct {
     }
 };
 
+/// The textured sprite pipeline (ADR 0031 §4): a blend-enabled graphics pipeline whose
+/// fragment stage samples a bound atlas via a combined `texture_2d` + `sampler`, plus
+/// the descriptor machinery that binds that atlas. naga emits the WGSL `texture_2d` and
+/// `sampler` as **two** distinct descriptors, so the set layout has binding 0 =
+/// sampled image and binding 1 = sampler. One descriptor set is allocated up front and
+/// re-pointed at the current atlas by `CommandList.bindTexture` — safe because the
+/// backend renders synchronously (`submit` waits idle), so the set is never updated
+/// while a submission using it is in flight.
+pub const TexturedPipeline = struct {
+    pipeline: vk.Pipeline,
+    layout: vk.PipelineLayout,
+    set_layout: vk.DescriptorSetLayout,
+    sampler: vk.Sampler,
+    pool: vk.DescriptorPool,
+    set: vk.DescriptorSet,
+
+    /// Destroy the pipeline, layout, descriptor pool (freeing its set), set layout, and
+    /// sampler. `dev` owns the GPU objects.
+    pub fn deinit(self: *TexturedPipeline, dev: *Device) void {
+        const d = dev.device();
+        d.destroyPipeline(self.pipeline, null);
+        d.destroyPipelineLayout(self.layout, null);
+        d.destroyDescriptorPool(self.pool, null);
+        d.destroyDescriptorSetLayout(self.set_layout, null);
+        d.destroySampler(self.sampler, null);
+    }
+};
+
 /// Records one submission's worth of commands into a primary command buffer, owning
 /// the pool it was allocated from. Method shapes mirror the null backend so
 /// `gpu.renderScene` is backend-agnostic.
@@ -222,6 +256,54 @@ pub const CommandList = struct {
     /// Bind `buffer` as vertex input at binding 0.
     pub fn bindVertexBuffer(self: *CommandList, buffer: *Buffer) void {
         self.dev.device().cmdBindVertexBuffers(self.cmd, 0, &.{buffer.buffer}, &.{0});
+    }
+
+    /// Bind the textured sprite pipeline for subsequent draws (ADR 0031 §4).
+    pub fn bindTexturedPipeline(self: *CommandList, pipeline: *TexturedPipeline) void {
+        self.dev.device().cmdBindPipeline(self.cmd, .graphics, pipeline.pipeline);
+    }
+
+    /// Point `pipeline`'s descriptor set at `tex` (the sprite atlas, in
+    /// shader-read-only layout after `uploadTexture`) and bind it for subsequent draws.
+    /// Updates binding 0 (sampled image = `tex.view`) and binding 1 (`pipeline.sampler`).
+    /// Safe to update in-place here: the backend submits synchronously (`submit` waits
+    /// idle), so no prior submission still references the set.
+    pub fn bindTexture(self: *CommandList, pipeline: *TexturedPipeline, tex: *Texture) void {
+        const d = self.dev.device();
+        const image_info: vk.DescriptorImageInfo = .{
+            .sampler = .null_handle,
+            .image_view = tex.view,
+            .image_layout = .shader_read_only_optimal,
+        };
+        const sampler_info: vk.DescriptorImageInfo = .{
+            .sampler = pipeline.sampler,
+            .image_view = .null_handle,
+            .image_layout = .undefined,
+        };
+        const writes = [_]vk.WriteDescriptorSet{
+            .{
+                .dst_set = pipeline.set,
+                .dst_binding = 0,
+                .dst_array_element = 0,
+                .descriptor_count = 1,
+                .descriptor_type = .sampled_image,
+                .p_image_info = @ptrCast(&image_info),
+                .p_buffer_info = undefined,
+                .p_texel_buffer_view = undefined,
+            },
+            .{
+                .dst_set = pipeline.set,
+                .dst_binding = 1,
+                .dst_array_element = 0,
+                .descriptor_count = 1,
+                .descriptor_type = .sampler,
+                .p_image_info = @ptrCast(&sampler_info),
+                .p_buffer_info = undefined,
+                .p_texel_buffer_view = undefined,
+            },
+        };
+        d.updateDescriptorSets(&writes, &.{});
+        d.cmdBindDescriptorSets(self.cmd, .graphics, pipeline.layout, 0, &.{pipeline.set}, &.{});
     }
 
     /// Draw `vertex_count` vertices (one instance) from the bound vertex buffer.
@@ -376,6 +458,9 @@ pub const Device = struct {
         var usage: vk.ImageUsageFlags = .{};
         if (desc.usage.color_attachment) usage.color_attachment_bit = true;
         if (desc.usage.transfer_src) usage.transfer_src_bit = true;
+        // ADR 0031 §4: a sprite atlas is uploaded (transfer dst) then sampled (sampled).
+        if (desc.usage.transfer_dst) usage.transfer_dst_bit = true;
+        if (desc.usage.sampled) usage.sampled_bit = true;
 
         const image = try d.createImage(&.{
             .image_type = .@"2d",
@@ -517,6 +602,181 @@ pub const Device = struct {
         var pipelines = [_]vk.Pipeline{.null_handle};
         _ = try d.createGraphicsPipelines(.null_handle, &.{pipeline_ci}, null, &pipelines);
         return .{ .pipeline = pipelines[0], .layout = layout };
+    }
+
+    /// Upload tightly-packed RGBA8 `rgba` into `tex` (ADR 0031 §4: a decoded sprite
+    /// atlas reaching the GPU): stage the bytes in a host-visible buffer, copy them into
+    /// the device-local image with `vkCmdCopyBufferToImage`, and leave the image in
+    /// shader-read-only layout ready for the sprite pipeline to sample. `tex` must have
+    /// been created with `transfer_dst` + `sampled` usage; `rgba.len` must equal
+    /// `tex.width*tex.height*4`. Synchronous (submits and waits idle, like `submit`).
+    /// Errors: buffer/memory creation, map failure, command/submit failures,
+    /// `error.OutOfMemory`.
+    pub fn uploadTexture(self: *Device, tex: *Texture, rgba: []const u8) !void {
+        const d = self.device();
+        const byte_len: u64 = @intCast(rgba.len);
+        const staging = try d.createBuffer(&.{ .size = byte_len, .usage = .{ .transfer_src_bit = true }, .sharing_mode = .exclusive }, null);
+        defer d.destroyBuffer(staging, null);
+        const reqs = d.getBufferMemoryRequirements(staging);
+        const memory = try d.allocateMemory(&.{
+            .allocation_size = reqs.size,
+            .memory_type_index = try memoryType(self.mem_props, reqs.memory_type_bits, .{ .host_visible_bit = true, .host_coherent_bit = true }),
+        }, null);
+        defer d.freeMemory(memory, null);
+        try d.bindBufferMemory(staging, memory, 0);
+        {
+            const mapped = try d.mapMemory(memory, 0, byte_len, .{});
+            defer d.unmapMemory(memory);
+            const dst: [*]u8 = @ptrCast(mapped.?);
+            @memcpy(dst[0..rgba.len], rgba);
+        }
+
+        var cmd = try self.beginCommands();
+        defer cmd.deinit(self);
+        transition(d, cmd.cmd, tex.image, .undefined, .transfer_dst_optimal, .{}, .{ .transfer_write_bit = true }, .{ .top_of_pipe_bit = true }, .{ .transfer_bit = true });
+        d.cmdCopyBufferToImage(cmd.cmd, staging, tex.image, .transfer_dst_optimal, &.{.{
+            .buffer_offset = 0,
+            .buffer_row_length = 0,
+            .buffer_image_height = 0,
+            .image_subresource = .{ .aspect_mask = .{ .color_bit = true }, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
+            .image_offset = .{ .x = 0, .y = 0, .z = 0 },
+            .image_extent = .{ .width = tex.width, .height = tex.height, .depth = 1 },
+        }});
+        transition(d, cmd.cmd, tex.image, .transfer_dst_optimal, .shader_read_only_optimal, .{ .transfer_write_bit = true }, .{ .shader_read_bit = true }, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true });
+        try self.submit(&cmd);
+    }
+
+    /// Build the textured sprite pipeline (ADR 0031 §4): a blend-enabled graphics
+    /// pipeline (`port.TexturedVertex` input, dynamic rendering) whose fragment stage
+    /// samples the bound atlas, plus its descriptor set layout (binding 0 = sampled
+    /// image, binding 1 = sampler — how naga splits the WGSL), a nearest-filter sampler
+    /// (pixel-art sheets), and one descriptor set allocated up front for
+    /// `CommandList.bindTexture` to re-point. Caller frees via `TexturedPipeline.deinit`.
+    /// Errors: shader/layout/sampler/pool/descriptor/pipeline creation.
+    // Over the ~60-line soft limit by design: like `createScenePipeline`, the body is
+    // one flat pipeline description plus the descriptor/sampler objects it needs, all
+    // inherent Vulkan boilerplate; splitting it would only fragment one atomic setup.
+    pub fn createTexturedPipeline(self: *Device, format: port.TextureFormat) !TexturedPipeline {
+        const d = self.device();
+        const module = try d.createShaderModule(&.{ .code_size = sprite_spv.len, .p_code = @ptrCast(&sprite_spv) }, null);
+        defer d.destroyShaderModule(module, null);
+        const stages = [_]vk.PipelineShaderStageCreateInfo{
+            .{ .stage = .{ .vertex_bit = true }, .module = module, .p_name = "vs_main" },
+            .{ .stage = .{ .fragment_bit = true }, .module = module, .p_name = "fs_main" },
+        };
+
+        const bindings = [_]vk.DescriptorSetLayoutBinding{
+            .{ .binding = 0, .descriptor_type = .sampled_image, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true } },
+            .{ .binding = 1, .descriptor_type = .sampler, .descriptor_count = 1, .stage_flags = .{ .fragment_bit = true } },
+        };
+        const set_layout = try d.createDescriptorSetLayout(&.{ .binding_count = bindings.len, .p_bindings = &bindings }, null);
+        errdefer d.destroyDescriptorSetLayout(set_layout, null);
+
+        const sampler = try d.createSampler(&.{
+            .mag_filter = .nearest,
+            .min_filter = .nearest,
+            .mipmap_mode = .nearest,
+            .address_mode_u = .clamp_to_edge,
+            .address_mode_v = .clamp_to_edge,
+            .address_mode_w = .clamp_to_edge,
+            .mip_lod_bias = 0,
+            .anisotropy_enable = .false,
+            .max_anisotropy = 1,
+            .compare_enable = .false,
+            .compare_op = .always,
+            .min_lod = 0,
+            .max_lod = 0,
+            .border_color = .int_opaque_black,
+            .unnormalized_coordinates = .false,
+        }, null);
+        errdefer d.destroySampler(sampler, null);
+
+        const pool_sizes = [_]vk.DescriptorPoolSize{
+            .{ .type = .sampled_image, .descriptor_count = 1 },
+            .{ .type = .sampler, .descriptor_count = 1 },
+        };
+        const pool = try d.createDescriptorPool(&.{ .max_sets = 1, .pool_size_count = pool_sizes.len, .p_pool_sizes = &pool_sizes }, null);
+        errdefer d.destroyDescriptorPool(pool, null);
+        var set: vk.DescriptorSet = .null_handle;
+        try d.allocateDescriptorSets(&.{ .descriptor_pool = pool, .descriptor_set_count = 1, .p_set_layouts = @ptrCast(&set_layout) }, @ptrCast(&set));
+
+        const layout = try d.createPipelineLayout(&.{ .set_layout_count = 1, .p_set_layouts = @ptrCast(&set_layout) }, null);
+        errdefer d.destroyPipelineLayout(layout, null);
+
+        const binding: vk.VertexInputBindingDescription = .{ .binding = 0, .stride = @sizeOf(port.TexturedVertex), .input_rate = .vertex };
+        const attributes = [_]vk.VertexInputAttributeDescription{
+            .{ .location = 0, .binding = 0, .format = .r32g32_sfloat, .offset = 0 },
+            .{ .location = 1, .binding = 0, .format = .r32g32_sfloat, .offset = @offsetOf(port.TexturedVertex, "u") },
+            .{ .location = 2, .binding = 0, .format = .r32g32b32_sfloat, .offset = @offsetOf(port.TexturedVertex, "r") },
+        };
+        const dynamic_states = [_]vk.DynamicState{ .viewport, .scissor };
+        // Straight-alpha "over" blend (ADR 0031 §2): sprites carry transparency.
+        const blend_attachment: vk.PipelineColorBlendAttachmentState = .{
+            .blend_enable = .true,
+            .src_color_blend_factor = .src_alpha,
+            .dst_color_blend_factor = .one_minus_src_alpha,
+            .color_blend_op = .add,
+            .src_alpha_blend_factor = .one,
+            .dst_alpha_blend_factor = .one_minus_src_alpha,
+            .alpha_blend_op = .add,
+            .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+        };
+        var color_format = formatToVk(format);
+        var rendering_info: vk.PipelineRenderingCreateInfo = .{
+            .s_type = .pipeline_rendering_create_info,
+            .view_mask = 0,
+            .color_attachment_count = 1,
+            .p_color_attachment_formats = @ptrCast(&color_format),
+            .depth_attachment_format = .undefined,
+            .stencil_attachment_format = .undefined,
+        };
+        const pipeline_ci: vk.GraphicsPipelineCreateInfo = .{
+            .p_next = &rendering_info,
+            .stage_count = stages.len,
+            .p_stages = &stages,
+            .p_vertex_input_state = &.{
+                .vertex_binding_description_count = 1,
+                .p_vertex_binding_descriptions = @ptrCast(&binding),
+                .vertex_attribute_description_count = attributes.len,
+                .p_vertex_attribute_descriptions = &attributes,
+            },
+            .p_input_assembly_state = &.{ .topology = .triangle_list, .primitive_restart_enable = .false },
+            .p_viewport_state = &.{ .viewport_count = 1, .scissor_count = 1 },
+            .p_rasterization_state = &.{
+                .depth_clamp_enable = .false,
+                .rasterizer_discard_enable = .false,
+                .polygon_mode = .fill,
+                .cull_mode = .{},
+                .front_face = .counter_clockwise,
+                .depth_bias_enable = .false,
+                .depth_bias_constant_factor = 0,
+                .depth_bias_clamp = 0,
+                .depth_bias_slope_factor = 0,
+                .line_width = 1,
+            },
+            .p_multisample_state = &.{
+                .rasterization_samples = .{ .@"1_bit" = true },
+                .sample_shading_enable = .false,
+                .min_sample_shading = 0,
+                .alpha_to_coverage_enable = .false,
+                .alpha_to_one_enable = .false,
+            },
+            .p_color_blend_state = &.{
+                .logic_op_enable = .false,
+                .logic_op = .copy,
+                .attachment_count = 1,
+                .p_attachments = @ptrCast(&blend_attachment),
+                .blend_constants = .{ 0, 0, 0, 0 },
+            },
+            .p_dynamic_state = &.{ .dynamic_state_count = dynamic_states.len, .p_dynamic_states = &dynamic_states },
+            .layout = layout,
+            .render_pass = .null_handle,
+            .subpass = 0,
+            .base_pipeline_index = -1,
+        };
+        var pipelines = [_]vk.Pipeline{.null_handle};
+        _ = try d.createGraphicsPipelines(.null_handle, &.{pipeline_ci}, null, &pipelines);
+        return .{ .pipeline = pipelines[0], .layout = layout, .set_layout = set_layout, .sampler = sampler, .pool = pool, .set = set };
     }
 
     /// Allocate a primary command buffer (in its own pool) and begin recording it.
@@ -870,9 +1130,15 @@ pub const Swapchain = struct {
 // referenced bodies, so this stays a cheap, GPU-free assertion.
 const null_backend = @import("../null/backend.zig");
 comptime {
-    for (.{"createSwapchain"}) |name| {
+    for (.{ "createSwapchain", "createTexturedPipeline", "uploadTexture" }) |name| {
         if (!@hasDecl(Device, name) or !@hasDecl(null_backend.Device, name))
-            @compileError("swapchain surface drift: Device." ++ name);
+            @compileError("gpu surface drift: Device." ++ name);
+    }
+    // Sprite draw surface (ADR 0031 §4): both backends' command lists must offer the
+    // textured-pipeline and texture binds `gpu.renderFrame` records.
+    for (.{ "bindTexturedPipeline", "bindTexture" }) |name| {
+        if (!@hasDecl(CommandList, name) or !@hasDecl(null_backend.CommandList, name))
+            @compileError("sprite surface drift: CommandList." ++ name);
     }
     for (.{ "acquire", "present", "resize", "deinit" }) |name| {
         if (!@hasDecl(Swapchain, name) or !@hasDecl(null_backend.Swapchain, name))

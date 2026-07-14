@@ -468,6 +468,30 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     var pipeline = try dev.createScenePipeline(.rgba8_unorm);
     defer pipeline.deinit(&dev);
 
+    // Sprite path (issue #113 phase 2b; ADR 0031 §4): pack every loaded sheet's frames
+    // into one atlas, upload it to a single GPU texture once, and build the textured
+    // pipeline that samples it. `--play` then draws each sprited entity as a textured,
+    // direction-facing quad over the flat scene quads (see the render zone below). A scene
+    // with no (generated) sheets yields a zero-sized atlas: no texture, no sprite pass —
+    // every entity keeps its flat `Appearance` quad.
+    var atlas = try engine.sprite.buildAtlas(gpa, &sheets);
+    defer atlas.deinit();
+    var sprite_pipeline = try dev.createTexturedPipeline(.rgba8_unorm);
+    defer sprite_pipeline.deinit(&dev);
+    var atlas_tex: ?engine.gpu.Texture = null;
+    defer if (atlas_tex) |*t| t.deinit(&dev);
+    if (atlas.width > 0) {
+        var t = try dev.createTexture(.{
+            .width = atlas.width,
+            .height = atlas.height,
+            .format = .rgba8_unorm,
+            .usage = .{ .transfer_dst = true, .sampled = true },
+        });
+        errdefer t.deinit(&dev);
+        try dev.uploadTexture(&t, atlas.pixels);
+        atlas_tex = t;
+    }
+
     try out.print("mana: playing '{s}' — {d} entities; close the window to exit\n", .{ manifest.name, sim.world.count() });
     try out.flush();
 
@@ -531,7 +555,11 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
             const size = window.size();
             const view: engine.render.View = .{ .width = size[0], .height = size[1], .projection = manifest.projection };
             const quads = try engine.render.project(fa, &sim.world, view, &engine.render.default_palette);
-            try engine.gpu.renderQuads(fa, &dev, &pipeline, frame.target, quads, clear);
+            // Textured sprite quads (ADR 0031 §4): the current animation frame's atlas
+            // sub-rect, tinted and rotated to face travel; drawn over the flat quads.
+            const sprite_quads = try engine.render.projectSprites(fa, &sim.world, view, &sheets, &atlas);
+            const atlas_ptr: ?*engine.gpu.Texture = if (atlas_tex) |*t| t else null;
+            try engine.gpu.renderFrame(fa, &dev, &pipeline, &sprite_pipeline, atlas_ptr, frame.target, quads, sprite_quads, clear);
         }
         {
             const z = tracy.zone(@src(), "present");

@@ -18,6 +18,8 @@ pub const Quad = @import("types.zig").Quad;
 /// The silhouette a `Quad` draws as (ADR 0030 shape addendum): `rect` (default) or
 /// `circle`.
 pub const Shape = @import("types.zig").Shape;
+/// A textured, tinted sprite quad addressing a sub-rect of the bound atlas (ADR 0031).
+pub const SpriteQuad = @import("types.zig").SpriteQuad;
 
 // --- Port vocabulary (engine-owned, backend-free) --------------------------------
 pub const TextureFormat = port.TextureFormat;
@@ -26,6 +28,7 @@ pub const BufferUsage = port.BufferUsage;
 pub const TextureDesc = port.TextureDesc;
 pub const BufferDesc = port.BufferDesc;
 pub const Vertex = port.Vertex;
+pub const TexturedVertex = port.TexturedVertex;
 // Presentation-surface vocabulary (ADR 0012).
 pub const SurfaceHandle = port.SurfaceHandle;
 pub const PresentMode = port.PresentMode;
@@ -52,6 +55,9 @@ pub const Texture = impl.Texture;
 pub const Buffer = impl.Buffer;
 /// The scene graphics pipeline. Backend-owned.
 pub const Pipeline = impl.Pipeline;
+/// The textured sprite pipeline (ADR 0031 §4): samples a bound atlas texture at
+/// per-vertex UVs and multiplies by a tint. Backend-owned.
+pub const TexturedPipeline = impl.TexturedPipeline;
 /// Records rendering + copy commands for one submission. Backend-owned.
 pub const CommandList = impl.CommandList;
 /// A presentation swapchain over a window surface: acquire → render → present, with
@@ -163,6 +169,72 @@ pub fn renderQuads(gpa: Allocator, dev: *Device, pipeline: *Pipeline, target: *T
     try dev.submit(&cmd);
 }
 
+/// Draw one live frame into an already-acquired `target`: clear to `clear`, rasterize
+/// the flat `quads` through `scene_pipeline`, then composite the textured `sprites` over
+/// them through `sprite_pipeline` sampling `atlas` (ADR 0031 §4). One command list, one
+/// submit, no readback — the sprite-aware analogue of `renderQuads` for the `--play`
+/// present loop (ADR 0012 §6). Sprites are drawn *after* (on top of) the flat quads in
+/// the same render pass so the alpha-blended sprite composites over the scene. If
+/// `sprites` is empty or `atlas` is null the sprite pass is skipped (an all-flat frame,
+/// identical to `renderQuads`). `target` is left colour-attachment-ready for `present`,
+/// exactly like `renderQuads`. `gpa` backs two temporary vertex uploads freed before
+/// return (a reset per-frame arena in the loop). Errors: `error.OutOfMemory` plus any
+/// backend device/allocation error.
+pub fn renderFrame(
+    gpa: Allocator,
+    dev: *Device,
+    scene_pipeline: *Pipeline,
+    sprite_pipeline: *TexturedPipeline,
+    atlas: ?*Texture,
+    target: *Texture,
+    quads: []const Quad,
+    sprites: []const SpriteQuad,
+    clear: [4]f32,
+) !void {
+    const flat_count: u32 = @intCast(quads.len * 6);
+    var vbuf: ?Buffer = null;
+    defer if (vbuf) |*b| b.deinit(dev);
+    if (flat_count > 0) {
+        const verts = try gpa.alloc(Vertex, flat_count);
+        defer gpa.free(verts);
+        buildVertices(quads, verts);
+        var b = try dev.createBuffer(.{ .size = @as(u64, flat_count) * @sizeOf(Vertex), .usage = .{ .vertex = true } });
+        try b.write(dev, std.mem.sliceAsBytes(verts));
+        vbuf = b;
+    }
+
+    // The sprite pass draws only when there is an atlas to sample and quads to place.
+    const draw_sprites = atlas != null and sprites.len > 0;
+    const sprite_count: u32 = if (draw_sprites) @intCast(sprites.len * 6) else 0;
+    var sbuf: ?Buffer = null;
+    defer if (sbuf) |*b| b.deinit(dev);
+    if (sprite_count > 0) {
+        const verts = try gpa.alloc(TexturedVertex, sprite_count);
+        defer gpa.free(verts);
+        buildTexturedVertices(sprites, verts);
+        var b = try dev.createBuffer(.{ .size = @as(u64, sprite_count) * @sizeOf(TexturedVertex), .usage = .{ .vertex = true } });
+        try b.write(dev, std.mem.sliceAsBytes(verts));
+        sbuf = b;
+    }
+
+    var cmd = try dev.beginCommands();
+    defer cmd.deinit(dev);
+    cmd.beginRendering(target, clear);
+    if (vbuf) |*b| {
+        cmd.bindPipeline(scene_pipeline);
+        cmd.bindVertexBuffer(b);
+        cmd.draw(flat_count);
+    }
+    if (sbuf) |*b| {
+        cmd.bindTexturedPipeline(sprite_pipeline);
+        cmd.bindTexture(sprite_pipeline, atlas.?);
+        cmd.bindVertexBuffer(b);
+        cmd.draw(sprite_count);
+    }
+    cmd.endRendering();
+    try dev.submit(&cmd);
+}
+
 /// Expand each quad into 6 vertices (two triangles) in the shared `Vertex` layout.
 /// `out.len` must be `quads.len * 6`. Pure; the same geometry feeds every backend.
 fn buildVertices(quads: []const Quad, out: []Vertex) void {
@@ -179,6 +251,49 @@ fn buildVertices(quads: []const Quad, out: []Vertex) void {
         out[base + 3] = .{ .x = x0, .y = y1, .r = c[0], .g = c[1], .b = c[2] };
         out[base + 4] = .{ .x = x1, .y = y0, .r = c[0], .g = c[1], .b = c[2] };
         out[base + 5] = .{ .x = x1, .y = y1, .r = c[0], .g = c[1], .b = c[2] };
+    }
+}
+
+/// Expand each sprite quad into 6 textured vertices (two triangles) in the shared
+/// `TexturedVertex` layout: each corner carries the quad's tint and the frame's UV
+/// (top-left `uv_min` → bottom-right `uv_max`, matching the atlas's top-to-bottom row
+/// order), and its position is rotated about the quad centre by `angle` so a directional
+/// sprite faces its travel direction (UVs stay unrotated). `out.len` must be
+/// `quads.len * 6`. Pure; the same geometry feeds every backend. Winding matches
+/// `buildVertices` (TL, TR, BL, BL, TR, BR).
+fn buildTexturedVertices(quads: []const SpriteQuad, out: []TexturedVertex) void {
+    for (quads, 0..) |q, i| {
+        const cos = @cos(q.angle);
+        const sin = @sin(q.angle);
+        const cx = q.center[0];
+        const cy = q.center[1];
+        // A corner offset (dx, dy) from the centre, rotated then translated to NDC.
+        const corner = struct {
+            fn at(dx: f32, dy: f32, c: f32, s: f32, ox: f32, oy: f32, u: f32, v: f32, tint: [3]f32) TexturedVertex {
+                return .{
+                    .x = ox + (dx * c - dy * s),
+                    .y = oy + (dx * s + dy * c),
+                    .u = u,
+                    .v = v,
+                    .r = tint[0],
+                    .g = tint[1],
+                    .b = tint[2],
+                };
+            }
+        }.at;
+        const hx = q.half[0];
+        const hy = q.half[1];
+        const umin = q.uv_min[0];
+        const vmin = q.uv_min[1];
+        const umax = q.uv_max[0];
+        const vmax = q.uv_max[1];
+        const base = i * 6;
+        out[base + 0] = corner(-hx, -hy, cos, sin, cx, cy, umin, vmin, q.tint); // TL
+        out[base + 1] = corner(hx, -hy, cos, sin, cx, cy, umax, vmin, q.tint); // TR
+        out[base + 2] = corner(-hx, hy, cos, sin, cx, cy, umin, vmax, q.tint); // BL
+        out[base + 3] = corner(-hx, hy, cos, sin, cx, cy, umin, vmax, q.tint); // BL
+        out[base + 4] = corner(hx, -hy, cos, sin, cx, cy, umax, vmin, q.tint); // TR
+        out[base + 5] = corner(hx, hy, cos, sin, cx, cy, umax, vmax, q.tint); // BR
     }
 }
 
@@ -232,6 +347,38 @@ test "renderQuads: draws into an acquired swapchain frame, then presents it" {
         const last = (7 * 8 + 7) * 4;
         try std.testing.expectEqual(@as(u8, 0), sc.presented[last + 0]); // (7,7) R stayed clear
         try std.testing.expectEqual(@as(u8, 255), sc.presented[last + 3]); // (7,7) A
+    }
+}
+
+test "renderFrame: composites a flat quad, then a textured sprite over it" {
+    // Exercises the sprite-aware present-loop draw path (clear → flat quads → textured
+    // sprites) on the null backend — the backend headless CI can run. The null backend
+    // fills a sprite quad with its flat tint (it is not a texel sampler), so the sprite
+    // pass is observable as its tint overwriting the flat quad beneath it.
+    var dev = try Device.init(std.testing.allocator);
+    defer dev.deinit();
+    var target = try dev.createTexture(.{ .width = 8, .height = 8, .format = .rgba8_unorm, .usage = .{ .color_attachment = true, .transfer_src = true } });
+    defer target.deinit(&dev);
+    var scene = try dev.createScenePipeline(.rgba8_unorm);
+    defer scene.deinit(&dev);
+    var sprite = try dev.createTexturedPipeline(.rgba8_unorm);
+    defer sprite.deinit(&dev);
+    var atlas = try dev.createTexture(.{ .width = 2, .height = 2, .format = .rgba8_unorm, .usage = .{ .transfer_dst = true, .sampled = true } });
+    defer atlas.deinit(&dev);
+
+    // A blue flat quad over the whole frame, then a red sprite over the top-left quadrant.
+    const quads = [_]Quad{.{ .center = .{ 0, 0 }, .half = .{ 1, 1 }, .color = .{ 0, 0, 1 } }};
+    const sprites = [_]SpriteQuad{.{ .center = .{ -0.5, -0.5 }, .half = .{ 0.5, 0.5 }, .uv_min = .{ 0, 0 }, .uv_max = .{ 1, 1 }, .tint = .{ 1, 0, 0 } }};
+    try renderFrame(std.testing.allocator, &dev, &scene, &sprite, &atlas, &target, &quads, &sprites, .{ 0, 0, 0, 1 });
+
+    if (backend == .null_backend) {
+        // (0,0) is under the red sprite: red tint overwrote the blue flat quad.
+        try std.testing.expectEqual(@as(u8, 255), target.pixels[0]); // R
+        try std.testing.expectEqual(@as(u8, 0), target.pixels[2]); // B (sprite has none)
+        // (7,7) is outside the sprite: only the blue flat quad shows through.
+        const last = (7 * 8 + 7) * 4;
+        try std.testing.expectEqual(@as(u8, 0), target.pixels[last + 0]); // R
+        try std.testing.expectEqual(@as(u8, 255), target.pixels[last + 2]); // B
     }
 }
 

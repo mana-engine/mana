@@ -62,4 +62,7 @@ run = "zig build spritegen -- games/pacman/sprites/pac.zon games/pacman/sprites/
 
 [tasks.shaders]
 description = "Recompile WGSL shaders to committed SPIR-V via mise-pinned naga."
-run = "mise x cargo:naga-cli@30.0.0 -- naga src/gpu/vulkan/shaders/scene.wgsl src/gpu/vulkan/shaders/scene.spv"
+run = [
+    "mise x cargo:naga-cli@30.0.0 -- naga src/gpu/vulkan/shaders/scene.wgsl src/gpu/vulkan/shaders/scene.spv",
+    "mise x cargo:naga-cli@30.0.0 -- naga src/gpu/vulkan/shaders/sprite.wgsl src/gpu/vulkan/shaders/sprite.spv",
+]

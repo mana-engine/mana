@@ -67,11 +67,27 @@ pub const Pipeline = struct {
     }
 };
 
+/// The textured sprite pipeline (ADR 0031 §4). Like `Pipeline`, an empty handle: the
+/// null rasterizer fills a sprite quad with its flat tint rather than sampling the
+/// atlas (it is a real, testable no-op — not a texel sampler), so no pipeline state is
+/// needed. Present for surface parity with the Vulkan backend's textured pipeline.
+pub const TexturedPipeline = struct {
+    /// No-op release; present for surface parity with the Vulkan backend.
+    pub fn deinit(self: *TexturedPipeline, dev: *Device) void {
+        _ = self;
+        _ = dev;
+    }
+};
+
 /// Records rendering work. The null backend is immediate-mode: each call mutates the
 /// bound target's pixels right away, so `submit` has nothing left to flush.
 pub const CommandList = struct {
     target: ?*Texture = null,
     vertices: []const u8 = &.{},
+    /// Whether the bound pipeline is the textured sprite pipeline (ADR 0031): when set,
+    /// `draw` interprets `vertices` as `port.TexturedVertex` and fills each quad with
+    /// its tint. `bindPipeline` (flat) clears it; `bindTexturedPipeline` sets it.
+    textured: bool = false,
 
     /// Begin rendering into `target`, clearing it to `clear` (RGBA, 0..1).
     pub fn beginRendering(self: *CommandList, target: *Texture, clear: [4]f32) void {
@@ -86,10 +102,28 @@ pub const CommandList = struct {
         }
     }
 
-    /// Bind the scene pipeline. No-op: the rasterizer is fixed-function.
+    /// Bind the scene pipeline. Clears the textured flag: the next `draw` rasterizes
+    /// flat `port.Vertex` quads. The rasterizer itself is fixed-function.
     pub fn bindPipeline(self: *CommandList, pipeline: *Pipeline) void {
+        _ = pipeline;
+        self.textured = false;
+    }
+
+    /// Bind the textured sprite pipeline (ADR 0031 §4): the next `draw` interprets its
+    /// vertices as `port.TexturedVertex` and fills each quad with its tint. `pipeline`
+    /// carries no state on the null backend.
+    pub fn bindTexturedPipeline(self: *CommandList, pipeline: *TexturedPipeline) void {
+        _ = pipeline;
+        self.textured = true;
+    }
+
+    /// Bind `tex` as the sampled atlas for the textured pipeline. No-op: the null
+    /// backend does not sample texels (it fills the quad's tint); `pipeline`/`tex` are
+    /// accepted only for surface parity with the Vulkan backend's descriptor bind.
+    pub fn bindTexture(self: *CommandList, pipeline: *TexturedPipeline, tex: *Texture) void {
         _ = self;
         _ = pipeline;
+        _ = tex;
     }
 
     /// Bind the vertex buffer the next `draw` rasterizes.
@@ -101,6 +135,7 @@ pub const CommandList = struct {
     /// target. Each quad's screen rect is filled with its flat colour; NDC maps to
     /// pixels with y increasing downward, matching the Vulkan backend's framebuffer.
     pub fn draw(self: *CommandList, vertex_count: u32) void {
+        if (self.textured) return self.drawTextured(vertex_count);
         const target = self.target orelse return;
         const verts = std.mem.bytesAsSlice(port.Vertex, self.vertices);
         const w: f32 = @floatFromInt(target.width);
@@ -122,6 +157,44 @@ pub const CommandList = struct {
             const x1 = clampPx(ndcToPx(max_x, w), target.width);
             const y0 = clampPx(ndcToPx(min_y, h), target.height);
             const y1 = clampPx(ndcToPx(max_y, h), target.height);
+            var y = y0;
+            while (y < y1) : (y += 1) {
+                var x = x0;
+                while (x < x1) : (x += 1) {
+                    const i = (@as(usize, y) * target.width + x) * 4;
+                    target.pixels[i + 0] = c[0];
+                    target.pixels[i + 1] = c[1];
+                    target.pixels[i + 2] = c[2];
+                    target.pixels[i + 3] = 255;
+                }
+            }
+        }
+    }
+
+    /// Rasterize `vertex_count` textured vertices (6 per quad) as their bounding box
+    /// filled with the tint colour (ADR 0031 §4). The null backend does not sample the
+    /// atlas — it is a flat-fill test double — so a sprite quad draws as its tint over
+    /// its (possibly rotated) footprint. Vertices are `port.TexturedVertex`.
+    fn drawTextured(self: *CommandList, vertex_count: u32) void {
+        const target = self.target orelse return;
+        const verts = std.mem.bytesAsSlice(port.TexturedVertex, self.vertices);
+        var base: usize = 0;
+        while (base + 6 <= vertex_count) : (base += 6) {
+            var min_x: f32 = verts[base].x;
+            var max_x: f32 = verts[base].x;
+            var min_y: f32 = verts[base].y;
+            var max_y: f32 = verts[base].y;
+            for (verts[base .. base + 6]) |v| {
+                min_x = @min(min_x, v.x);
+                max_x = @max(max_x, v.x);
+                min_y = @min(min_y, v.y);
+                max_y = @max(max_y, v.y);
+            }
+            const c = [3]u8{ toU8(verts[base].r), toU8(verts[base].g), toU8(verts[base].b) };
+            const x0 = clampPx(ndcToPx(min_x, @floatFromInt(target.width)), target.width);
+            const x1 = clampPx(ndcToPx(max_x, @floatFromInt(target.width)), target.width);
+            const y0 = clampPx(ndcToPx(min_y, @floatFromInt(target.height)), target.height);
+            const y1 = clampPx(ndcToPx(max_y, @floatFromInt(target.height)), target.height);
             var y = y0;
             while (y < y1) : (y += 1) {
                 var x = x0;
@@ -202,6 +275,15 @@ pub const Device = struct {
     /// Create the scene pipeline. Trivial for the null backend. `format` is accepted
     /// for surface parity. Never fails.
     pub fn createScenePipeline(self: *Device, format: port.TextureFormat) !Pipeline {
+        _ = self;
+        _ = format;
+        return .{};
+    }
+
+    /// Create the textured sprite pipeline (ADR 0031 §4). Trivial for the null backend
+    /// (it fills flat tint rather than sampling); `format` is accepted for surface
+    /// parity with the Vulkan backend. Never fails.
+    pub fn createTexturedPipeline(self: *Device, format: port.TextureFormat) !TexturedPipeline {
         _ = self;
         _ = format;
         return .{};
