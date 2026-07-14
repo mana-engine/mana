@@ -66,6 +66,21 @@ pub const Vertex = extern struct {
     b: f32,
 };
 
+/// One vertex as consumed by the **textured** sprite pipeline (ADR 0031 §4): an NDC
+/// position, an atlas UV, and an RGB tint, tightly packed. `extern` so its layout is
+/// stable for GPU vertex input. Distinct from `Vertex` (the flat scene pipeline) — the
+/// sprite pipeline binds this format; the shared textured-vertex builder and both
+/// backends agree on it.
+pub const TexturedVertex = extern struct {
+    x: f32,
+    y: f32,
+    u: f32,
+    v: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+};
+
 // --- Presentation surface (ADR 0012) ---------------------------------------------
 // A windowed present path: the `platform` port owns an OS window and hands `gpu` an
 // OPAQUE native handle; `gpu` builds a `Swapchain` from it and drives

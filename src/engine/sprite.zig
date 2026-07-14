@@ -135,11 +135,114 @@ pub fn advance(world: *World, store: *const SheetStore, dt_s: f32) void {
 
 /// The clip named `name` in `sheet`, or null if none matches (an empty `name` never
 /// matches, so a `Sprite` with no clip holds frame 0). Linear scan: clip counts are tiny.
-fn findClip(sheet: *const msf.Sheet, name: []const u8) ?*const msf.Clip {
+pub fn findClip(sheet: *const msf.Sheet, name: []const u8) ?*const msf.Clip {
     for (sheet.clips) |*c| {
         if (std.mem.eql(u8, c.name, name)) return c;
     }
     return null;
+}
+
+/// The atlas sub-rect one sheet frame occupies (issue #113 phase 2b; ADR 0031 §4).
+/// `ref` is the owning sheet's `Sprite.sheet` key (borrowed from the `SheetStore`, which
+/// borrows it from the world); `frame` is the index into that sheet's `frames`; `uv_*`
+/// are the frame's top-left/bottom-right corners in atlas UV space (0..1).
+pub const Region = struct {
+    ref: []const u8,
+    frame: u16,
+    uv_min: [2]f32,
+    uv_max: [2]f32,
+};
+
+/// A CPU-assembled sprite atlas (ADR 0031 §4): every frame of every loaded sheet packed
+/// into ONE RGBA8 image, plus a lookup from (sheet ref, frame index) → UV sub-rect.
+/// Built once per world load from a `SheetStore` and uploaded to a single GPU texture the
+/// sprite pipeline samples, so a whole scene's sprites draw from one bound texture. Owns
+/// its `pixels` and `regions` (freed by `deinit`); `Region.ref` keys are borrowed from
+/// the store. An empty store yields a zero-sized atlas (`width == 0`), which the caller
+/// skips uploading/drawing.
+pub const Atlas = struct {
+    gpa: Allocator,
+    width: u32,
+    height: u32,
+    /// Tightly-packed RGBA8, `width*height*4` bytes (empty when `width == 0`), owned.
+    pixels: []u8,
+    /// One entry per packed frame, owned. `ref` keys are borrowed (see above).
+    regions: []Region,
+
+    /// Free the atlas pixels and region table. `ref` keys are borrowed and not freed.
+    pub fn deinit(self: *Atlas) void {
+        self.gpa.free(self.pixels);
+        self.gpa.free(self.regions);
+    }
+
+    /// The UV sub-rect for sheet `ref`'s frame index `frame`, or null if not packed.
+    /// Borrowed values (plain floats); valid until `deinit`. Linear scan: frame counts
+    /// are tiny (one small atlas per scene).
+    pub fn uv(self: *const Atlas, ref: []const u8, frame: u16) ?struct { min: [2]f32, max: [2]f32 } {
+        for (self.regions) |r| {
+            if (r.frame == frame and std.mem.eql(u8, r.ref, ref)) return .{ .min = r.uv_min, .max = r.uv_max };
+        }
+        return null;
+    }
+};
+
+/// Assemble every frame of every sheet in `store` into a single `Atlas` (issue #113
+/// phase 2b; ADR 0031 §4). Frames are placed in a square-ish, uniform-cell grid (each
+/// cell sized to the largest frame across all sheets; a smaller frame sits in its cell's
+/// top-left with the remainder left transparent), in store then frame order — a
+/// deterministic layout. Frame pixels are RGBA8 row-major top-to-bottom (the MSF layout,
+/// ADR 0031 §2), copied row-by-row so the atlas UVs address them the same way. Caller
+/// owns the atlas (`deinit`). Errors: `error.OutOfMemory`.
+pub fn buildAtlas(gpa: Allocator, store: *const SheetStore) Allocator.Error!Atlas {
+    var total: usize = 0;
+    var cell_w: u32 = 0;
+    var cell_h: u32 = 0;
+    for (store.entries.items) |*e| {
+        total += e.sheet.frames.len;
+        cell_w = @max(cell_w, e.sheet.width);
+        cell_h = @max(cell_h, e.sheet.height);
+    }
+    if (total == 0) return .{ .gpa = gpa, .width = 0, .height = 0, .pixels = try gpa.alloc(u8, 0), .regions = try gpa.alloc(Region, 0) };
+
+    // ceil(sqrt(total)) columns → a roughly square atlas; rows follow.
+    const cols: u32 = @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(total)))));
+    const rows: u32 = @intCast((total + cols - 1) / cols);
+    const aw = cols * cell_w;
+    const ah = rows * cell_h;
+
+    const pixels = try gpa.alloc(u8, @as(usize, aw) * ah * 4);
+    @memset(pixels, 0);
+    errdefer gpa.free(pixels);
+    const regions = try gpa.alloc(Region, total);
+    errdefer gpa.free(regions);
+
+    const awf: f32 = @floatFromInt(aw);
+    const ahf: f32 = @floatFromInt(ah);
+    var slot: usize = 0;
+    for (store.entries.items) |*e| {
+        const fw = e.sheet.width;
+        const fh = e.sheet.height;
+        for (e.sheet.frames, 0..) |frame_px, fi| {
+            const col: u32 = @intCast(slot % cols);
+            const row: u32 = @intCast(slot / cols);
+            const x0 = col * cell_w;
+            const y0 = row * cell_h;
+            var y: u32 = 0;
+            while (y < fh) : (y += 1) {
+                const src = frame_px[@as(usize, y) * fw * 4 ..][0 .. @as(usize, fw) * 4];
+                const dst_off = (@as(usize, y0 + y) * aw + x0) * 4;
+                @memcpy(pixels[dst_off .. dst_off + @as(usize, fw) * 4], src);
+            }
+            regions[slot] = .{
+                .ref = e.ref,
+                .frame = @intCast(fi),
+                .uv_min = .{ @as(f32, @floatFromInt(x0)) / awf, @as(f32, @floatFromInt(y0)) / ahf },
+                .uv_max = .{ @as(f32, @floatFromInt(x0 + fw)) / awf, @as(f32, @floatFromInt(y0 + fh)) / ahf },
+            };
+            slot += 1;
+        }
+    }
+    return .{ .gpa = gpa, .width = aw, .height = ah, .pixels = pixels, .regions = regions };
 }
 
 // --- Tests ------------------------------------------------------------------------
@@ -155,6 +258,55 @@ fn storeWith(gpa: Allocator, ref: []const u8, sheet: msf.Sheet) !SheetStore {
     var store: SheetStore = .{ .gpa = gpa };
     try store.entries.append(gpa, .{ .ref = ref, .sheet = owned });
     return store;
+}
+
+test "sprite: buildAtlas packs frames into a grid with per-frame UVs" {
+    const gpa = testing.allocator;
+    // Two distinct 2x2 RGBA frames.
+    var f0: [2 * 2 * 4]u8 = undefined;
+    var f1: [2 * 2 * 4]u8 = undefined;
+    for (&f0, 0..) |*b, i| b.* = @intCast(i & 0xff);
+    for (&f1, 0..) |*b, i| b.* = @intCast((200 + i) & 0xff);
+    var store = try storeWith(gpa, "s.msf", .{
+        .width = 2,
+        .height = 2,
+        .frames = &.{ &f0, &f1 },
+        .clips = &.{},
+    });
+    defer store.deinit();
+
+    var atlas = try buildAtlas(gpa, &store);
+    defer atlas.deinit();
+
+    // 2 frames → cols = ceil(sqrt 2) = 2, rows = 1 → a 4x2 atlas of two 2x2 cells.
+    try testing.expectEqual(@as(u32, 4), atlas.width);
+    try testing.expectEqual(@as(u32, 2), atlas.height);
+
+    // Frame 0 occupies the left cell [0,0.5); frame 1 the right cell [0.5,1].
+    const uv0 = atlas.uv("s.msf", 0).?;
+    try testing.expectApproxEqAbs(@as(f32, 0), uv0.min[0], 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), uv0.max[0], 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 1.0), uv0.max[1], 1e-6);
+    const uv1 = atlas.uv("s.msf", 1).?;
+    try testing.expectApproxEqAbs(@as(f32, 0.5), uv1.min[0], 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 1.0), uv1.max[0], 1e-6);
+
+    // Frame 0's first texel lands at atlas (0,0); frame 1's at atlas (2,0) → byte 8.
+    try testing.expectEqual(f0[0], atlas.pixels[0]);
+    try testing.expectEqual(f1[0], atlas.pixels[2 * 4]);
+    // An unknown sheet/frame is absent.
+    try testing.expect(atlas.uv("nope.msf", 0) == null);
+    try testing.expect(atlas.uv("s.msf", 9) == null);
+}
+
+test "sprite: buildAtlas on an empty store yields a zero-sized atlas" {
+    const gpa = testing.allocator;
+    var store: SheetStore = .{ .gpa = gpa };
+    defer store.deinit();
+    var atlas = try buildAtlas(gpa, &store);
+    defer atlas.deinit();
+    try testing.expectEqual(@as(u32, 0), atlas.width);
+    try testing.expectEqual(@as(usize, 0), atlas.regions.len);
 }
 
 test "sprite: resolvePath maps a sheet ref to its generated artifact" {

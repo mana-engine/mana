@@ -8,6 +8,8 @@
 const std = @import("std");
 const core = @import("core");
 const gpu = @import("gpu");
+const data = @import("data");
+const sprite = @import("sprite.zig");
 const World = @import("world.zig").World;
 
 const Allocator = std.mem.Allocator;
@@ -152,7 +154,185 @@ pub fn project(gpa: Allocator, world: *World, view: View, palette: []const [3]f3
     return quads.toOwnedSlice(gpa);
 }
 
+/// A sprite quad plus its depth sort key, kept only for `projectSprites`'s sort.
+const SpriteDepthEntry = struct {
+    quad: gpu.SpriteQuad,
+    depth: f32,
+    entity_index: u32,
+};
+
+/// Ascending by depth (far to near), ties broken by entity index — the same painter's
+/// order `project` uses, so sprites composite in the same front-to-back sense.
+fn lessThanSpriteDepth(_: void, a: SpriteDepthEntry, b: SpriteDepthEntry) bool {
+    if (a.depth != b.depth) return a.depth < b.depth;
+    return a.entity_index < b.entity_index;
+}
+
+/// Project every `Sprite` entity in `world` into a textured `gpu.SpriteQuad` (issue #113
+/// phase 2b; ADR 0031 §4): resolve the entity's current sheet frame (`AnimationState`'s
+/// clip cursor → the clip's frame list → a sheet frame index), look that frame's UV
+/// sub-rect up in `atlas`, and place the quad at the entity's projected screen footprint
+/// (same centre/half-size math as `project`, `Appearance`-aware). The quad's `tint` is
+/// the entity's `Appearance.color` (white if none), and its `angle` faces the entity's
+/// travel direction — the screen-space direction of its `Velocity`, so a directional
+/// sprite (Pac's wedge) turns to face where it moves; a stationary entity keeps `angle`
+/// 0 (its default/right-facing pose). Results are painter-sorted far-to-near like
+/// `project`. An entity whose sheet is unloaded, or whose current frame is not in the
+/// atlas, is skipped (it falls back to its flat `Appearance` quad from `project`). Pure
+/// and deterministic; reads only cosmetic columns, never sim state. Caller owns the
+/// returned slice. Errors: `error.OutOfMemory`.
+pub fn projectSprites(
+    gpa: Allocator,
+    world: *World,
+    view: View,
+    store: *const sprite.SheetStore,
+    atlas: *const sprite.Atlas,
+) Allocator.Error![]gpu.SpriteQuad {
+    const half_w = @as(f32, @floatFromInt(view.width)) / 2;
+    const half_h = @as(f32, @floatFromInt(view.height)) / 2;
+    const origin: core.Vec2 = .{ .x = half_w, .y = half_h };
+
+    var entries: std.ArrayList(SpriteDepthEntry) = .empty;
+    defer entries.deinit(gpa);
+    for (world.sprites.entities(), world.sprites.slice()) |entity_index, spr| {
+        const t = world.transforms.get(entity_index) orelse continue;
+        const sheet = store.get(spr.sheet) orelse continue;
+
+        // Resolve the sheet frame the animation cursor currently points at: the clip's
+        // frame list indexed by `AnimationState.frame` (its clip position), clamped so a
+        // stale cursor after a clip swap can't read past the list. No/empty clip ⇒ the
+        // sheet's frame 0.
+        var sheet_frame: u16 = 0;
+        if (sprite.findClip(sheet, spr.clip)) |clip| {
+            if (clip.frames.len > 0) {
+                const pos: usize = if (world.animations.get(entity_index)) |a|
+                    @min(@as(usize, a.frame), clip.frames.len - 1)
+                else
+                    0;
+                sheet_frame = clip.frames[pos];
+            }
+        }
+        const region = atlas.uv(spr.sheet, sheet_frame) orelse continue;
+
+        const p = projectPoint(view.projection, t.pos, origin);
+        const appearance = world.appearances.get(entity_index);
+        const half_px = if (appearance) |a| (a.size / 2) * pxPerWorldUnit(view.projection) else view.quad_half_px;
+        const tint = if (appearance) |a| a.color else [3]f32{ 1, 1, 1 };
+
+        // Face the travel direction: the screen-space angle of the velocity, found by
+        // projecting a point one velocity-step ahead and taking the delta (works for any
+        // projection). Zero velocity leaves the quad at angle 0 (its default pose).
+        var angle: f32 = 0;
+        if (world.velocities.get(entity_index)) |vel| {
+            if (vel.v.x != 0 or vel.v.y != 0) {
+                const ahead = projectPoint(view.projection, .{ .x = t.pos.x + vel.v.x, .y = t.pos.y + vel.v.y, .z = t.pos.z }, origin);
+                angle = std.math.atan2(ahead.screen.y - p.screen.y, ahead.screen.x - p.screen.x);
+            }
+        }
+
+        try entries.append(gpa, .{
+            .quad = .{
+                .center = .{ p.screen.x / half_w - 1, p.screen.y / half_h - 1 },
+                .half = .{ half_px / half_w, half_px / half_h },
+                .uv_min = region.min,
+                .uv_max = region.max,
+                .tint = tint,
+                .angle = angle,
+            },
+            .depth = p.depth,
+            .entity_index = entity_index,
+        });
+    }
+    std.sort.block(SpriteDepthEntry, entries.items, {}, lessThanSpriteDepth);
+
+    var quads: std.ArrayList(gpu.SpriteQuad) = .empty;
+    errdefer quads.deinit(gpa);
+    for (entries.items) |e| try quads.append(gpa, e.quad);
+    return quads.toOwnedSlice(gpa);
+}
+
 const testing = std.testing;
+
+/// Build a `SheetStore` owning one decoded sheet under `ref` (encode→decode so the store
+/// owns freeable slices, matching `sprite.loadForWorld`). Caller `deinit`s the store.
+fn spriteStoreWith(gpa: Allocator, ref: []const u8, sheet: data.msf.Sheet) !sprite.SheetStore {
+    const bytes = try data.msf.encode(gpa, sheet);
+    defer gpa.free(bytes);
+    const owned = try data.msf.decode(gpa, bytes);
+    var store: sprite.SheetStore = .{ .gpa = gpa };
+    try store.entries.append(gpa, .{ .ref = ref, .sheet = owned });
+    return store;
+}
+
+test "projectSprites: places a textured quad and faces its velocity" {
+    const gpa = testing.allocator;
+    // A 2x2, single-frame sheet with a one-position clip.
+    var px: [2 * 2 * 4]u8 = undefined;
+    for (&px, 0..) |*b, i| b.* = @intCast(i & 0xff);
+    var store = try spriteStoreWith(gpa, "s.msf", .{
+        .width = 2,
+        .height = 2,
+        .frames = &.{&px},
+        .clips = &.{.{ .name = "walk", .fps = 10, .frames = &.{0} }},
+    });
+    defer store.deinit();
+    var atlas = try sprite.buildAtlas(gpa, &store);
+    defer atlas.deinit();
+
+    var world = World.init(gpa);
+    defer world.deinit();
+    const e = try world.spawn();
+    try world.setTransform(e, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try world.setSprite(e, .{ .sheet = "s.msf", .clip = "walk" });
+    try world.setVelocity(e, .{ .v = .{ .x = 0, .y = 1, .z = 0 } }); // moving +Y (screen-down)
+
+    const view: View = .{ .width = 256, .height = 256, .projection = .{ .orthographic = .{ .scale = 32 } } };
+    const quads = try projectSprites(gpa, &world, view, &store, &atlas);
+    defer gpa.free(quads);
+
+    try testing.expectEqual(@as(usize, 1), quads.len);
+    // Entity at the origin projects to the NDC centre.
+    try testing.expectApproxEqAbs(@as(f32, 0), quads[0].center[0], 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0), quads[0].center[1], 1e-6);
+    // The single frame fills the whole atlas → full UV span.
+    try testing.expectApproxEqAbs(@as(f32, 0), quads[0].uv_min[0], 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 1), quads[0].uv_max[0], 1e-6);
+    // +Y world velocity is screen-down under orthographic ⇒ angle +pi/2 (atan2(+dy, 0)).
+    try testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), quads[0].angle, 1e-5);
+}
+
+test "projectSprites: a stationary entity keeps angle 0; an unloaded sheet is skipped" {
+    const gpa = testing.allocator;
+    var px: [1 * 1 * 4]u8 = .{ 9, 9, 9, 255 };
+    var store = try spriteStoreWith(gpa, "s.msf", .{
+        .width = 1,
+        .height = 1,
+        .frames = &.{&px},
+        .clips = &.{.{ .name = "idle", .fps = 1, .frames = &.{0} }},
+    });
+    defer store.deinit();
+    var atlas = try sprite.buildAtlas(gpa, &store);
+    defer atlas.deinit();
+
+    var world = World.init(gpa);
+    defer world.deinit();
+    // Stationary sprited entity (no velocity component).
+    const still = try world.spawn();
+    try world.setTransform(still, .{ .pos = .{ .x = 0, .y = 0, .z = 0 } });
+    try world.setSprite(still, .{ .sheet = "s.msf", .clip = "idle" });
+    // A second entity references a sheet absent from the store → no sprite quad.
+    const absent = try world.spawn();
+    try world.setTransform(absent, .{ .pos = .{ .x = 1, .y = 0, .z = 0 } });
+    try world.setSprite(absent, .{ .sheet = "absent.msf", .clip = "idle" });
+
+    const view: View = .{ .width = 256, .height = 256, .projection = .{ .orthographic = .{ .scale = 32 } } };
+    const quads = try projectSprites(gpa, &world, view, &store, &atlas);
+    defer gpa.free(quads);
+
+    // Only the loaded, stationary entity yields a quad, at angle 0.
+    try testing.expectEqual(@as(usize, 1), quads.len);
+    try testing.expectApproxEqAbs(@as(f32, 0), quads[0].angle, 1e-6);
+}
 
 test "project: isometric — an entity at the origin maps to the NDC centre" {
     var world = World.init(testing.allocator);
