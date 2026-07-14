@@ -44,3 +44,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0030 | Entity appearance as data: `.appearance` in the scene/prototype schema | accepted |
 | 0031 | Sprite rendering: cosmetic sprite/animation component, dependency-free sheet asset, gpu texture path | proposed |
 | 0032 | Animated-sprite interchange: no existing format fits — evolve MSF, don't replace it | proposed |
+| 0033 | Directional + mirrored sprite animation: facing-selected clips replace wedge rotation | proposed |

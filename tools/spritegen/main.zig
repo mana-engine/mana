@@ -3,7 +3,7 @@
 //! Reads a ZON **sprite recipe** (a palette, per-frame lists of generic primitives —
 //! disc, wedge, dome, eyes, rect, rounded-rect, line — and named animation clips) and
 //! deterministically rasterizes it into two DERIVED artifacts in an output dir:
-//!   - `<name>.msf`         — the MSF1 sprite-sheet asset (Lane B's engine decodes it)
+//!   - `<name>.msf`         — the MSF2 sprite-sheet asset (the engine decodes it)
 //!   - `<name>_preview.png` — a human-viewable montage of the frames over a checkerboard
 //!
 //! Neither is committed (they are pure functions of the recipe — invariant #1; the
@@ -95,15 +95,39 @@ fn generate(out: *Io.Writer, io: Io, gpa: Allocator, arena: Allocator, recipe_pa
 }
 
 /// Narrow the recipe's clips (`fps`/frame indices as `u32`) to the MSF wire types
-/// (`u16`). Allocated in `arena` (freed with the whole arena at exit).
+/// (`u16`), carrying the per-facing phase lists through (ADR 0033). A directional clip
+/// that names no base `frames` derives one from the first present facing (order right,
+/// down, up, left) so a never-moved entity has a sensible default pose. Allocated in
+/// `arena` (freed with the whole arena at exit).
 fn toFormatClips(arena: Allocator, clips: []const recipe_mod.Clip) Allocator.Error![]format.Clip {
     const out = try arena.alloc(format.Clip, clips.len);
     for (clips, out) |c, *o| {
-        const idxs = try arena.alloc(u16, c.frames.len);
-        for (c.frames, idxs) |src, *dst| dst.* = @intCast(src);
-        o.* = .{ .name = c.name, .fps = @intCast(c.fps), .frames = idxs };
+        // MSF facing order is up, down, left, right (data.msf.Facing); the recipe names
+        // them individually. null ⇒ that facing is absent (mirrored/fallback at render).
+        const facings: [4]?[]const u16 = .{
+            try narrow(arena, c.up),
+            try narrow(arena, c.down),
+            try narrow(arena, c.left),
+            try narrow(arena, c.right),
+        };
+        // Base = the explicit `frames`, else the first authored facing in a fixed
+        // preference (right, down, up, left) so its phase length drives the cursor.
+        const base = if (c.frames.len > 0)
+            (try narrow(arena, c.frames)).?
+        else
+            facings[3] orelse facings[1] orelse facings[0] orelse facings[2] orelse &.{};
+        o.* = .{ .name = c.name, .fps = @intCast(c.fps), .frames = base, .facings = facings };
     }
     return out;
+}
+
+/// Narrow an optional `u32` frame-index list to `u16`, allocated in `arena`; null stays
+/// null (an absent facing). Used by `toFormatClips`.
+fn narrow(arena: Allocator, list: ?[]const u32) Allocator.Error!?[]const u16 {
+    const src = list orelse return null;
+    const dst = try arena.alloc(u16, src.len);
+    for (src, dst) |s, *d| d.* = @intCast(s);
+    return dst;
 }
 
 test {
@@ -114,4 +138,25 @@ test {
     _ = @import("montage.zig");
     // The MSF format tests now live with the codec in `data.msf` (run by the `data`
     // module's test binary), so they are not re-pulled here.
+}
+
+const testing = std.testing;
+
+test "toFormatClips: carries facings through and derives the base from the first present facing" {
+    const clips = [_]recipe_mod.Clip{
+        // Directional, no explicit base: up/down/right authored, left omitted.
+        .{ .name = "chomp", .fps = 12, .up = &.{ 4, 5 }, .down = &.{ 8, 9 }, .right = &.{ 0, 1 } },
+    };
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const out = try toFormatClips(arena_state.allocator(), &clips);
+
+    try testing.expectEqual(@as(usize, 1), out.len);
+    // Base derived from `right` (preference order right, down, up, left).
+    try testing.expectEqualSlices(u16, &.{ 0, 1 }, out[0].frames);
+    // Facings land in MSF order (up, down, left, right); left stays absent (mirrored).
+    try testing.expectEqualSlices(u16, &.{ 4, 5 }, out[0].facings[@intFromEnum(format.Facing.up)].?);
+    try testing.expectEqualSlices(u16, &.{ 8, 9 }, out[0].facings[@intFromEnum(format.Facing.down)].?);
+    try testing.expect(out[0].facings[@intFromEnum(format.Facing.left)] == null);
+    try testing.expectEqualSlices(u16, &.{ 0, 1 }, out[0].facings[@intFromEnum(format.Facing.right)].?);
 }

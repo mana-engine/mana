@@ -37,18 +37,15 @@ pub const Quad = struct {
 pub const SpriteQuad = struct {
     /// Centre in NDC.
     center: [2]f32,
-    /// Half-extent in NDC (x, y) *before* rotation.
+    /// Half-extent in NDC (x, y).
     half: [2]f32,
-    /// Atlas UV of the frame's top-left corner (u, v in 0..1).
+    /// Atlas UV of the frame's top-left corner (u, v in 0..1). To render a horizontally
+    /// mirrored frame (ADR 0033's inferred facing) the engine swaps this `u` with
+    /// `uv_max`'s so the vertex builder samples the frame X-flipped — no shader change.
     uv_min: [2]f32,
     /// Atlas UV of the frame's bottom-right corner (u, v in 0..1).
     uv_max: [2]f32,
     /// RGB tint multiplied with the sampled texel (white = untinted). Sourced from the
     /// entity's `Appearance.color` (ADR 0031 §1) so a frightened ghost can re-tint.
     tint: [3]f32 = .{ 1, 1, 1 },
-    /// Rotation of the quad about its `center`, in radians (screen space, +x toward
-    /// +y). `0` leaves the quad axis-aligned; used to face a directional sprite (Pac's
-    /// wedge) along its travel direction. UVs are unrotated — only the corner positions
-    /// rotate, so the sampled frame turns with the quad.
-    angle: f32 = 0,
 };
