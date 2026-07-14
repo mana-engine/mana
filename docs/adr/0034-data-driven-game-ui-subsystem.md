@@ -1,6 +1,6 @@
 # 0034. Data-driven game-UI subsystem: direction
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-14
 
 ## Context

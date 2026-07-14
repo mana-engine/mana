@@ -1,6 +1,6 @@
 # 0029. Headless SVG render output: a GPU-free way to *see* a level
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-13
 
 ## Context
