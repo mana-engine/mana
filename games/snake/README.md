@@ -50,3 +50,20 @@ Snake teleports via `mana.set_position` rather than moving by velocity integrati
 drive the engine's directional-facing latch — see its doc comment for why the
 magnitude cannot perturb the grid-snapped position (or the acceptance staircase
 above, which pins the exact grid cells).
+
+## Data-bound score/length HUD (ADR 0034, issue #177)
+
+`hud.zon` is a `ui.Screen` widget tree (the #132 widget/layout format) — a score label
+and a length label, display-only — declared as CONTENT and wired in `game.zon` via
+`.hud`, mirroring `games/pacman`'s HUD (#133) exactly. Each label `bind`s a data
+component (ADR 0024) declared on the `head` prototype: `score` (incremented 10 per
+food eaten, mirrored by `rules.lua`'s `sync_hud`) and `length` (`#body`, the snake's
+live segment count — no separate counter). Because `rules.lua` respawns a fresh `head`
+handle on every `reset()`, `sync_hud` is only ever called later, from `step`'s eat
+branch — never right after a spawn, before the engine has flushed the spawn command
+and registered the columns; a fresh head's HUD values fall back to the `head`
+prototype's own defaults (`score = 0`, `length = 1`) instead. The engine fills the
+`ui.Host` seam from the live world (`render_ui.worldHost`) and composites the HUD over
+the game frame in both `--play` and the headless `--render-play-frame`. The HUD reads
+gameplay state one-way and writes nothing, so it is cosmetic and cannot perturb the
+state hash.

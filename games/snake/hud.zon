@@ -1,0 +1,50 @@
+// Snake HUD (issue #177; mirrors games/pacman/hud.zon, ADR 0034; #133/#174) — the game's
+// data-bound score/length readout, authored as a ui.Screen widget tree (the #132
+// widget/layout format). This is CONTENT: it lives in the game package, never in src/. The
+// engine interprets it headlessly and composites it (display-only, no input) over the live
+// frame in --play and --render-play-frame.
+//
+// Each label's `bind` names a data component (ADR 0024) the engine reads one-way through
+// the ui.Host seam — `score` and `length` are set on the head entity by rules.lua /
+// prototypes.zon. A caption label (static `text`) sits beside each bound value in a flex
+// row; the two rows are anchored top-left / top-right in the root anchor container.
+// Colours are cosmetic (never hashed): a warm gold score (contrasts the green snake) and a
+// leaf green length (echoes the snake body/head color in prototypes.zon).
+.{
+    .name = "snake-hud",
+    .root = .{
+        .kind = .container,
+        .layout = .anchor,
+        .padding = 12,
+        .children = .{
+            // SCORE, top-left: caption + bound value.
+            .{
+                .kind = .container,
+                .anchor = .top_left,
+                .width = 230,
+                .height = 22,
+                .layout = .flex,
+                .direction = .row,
+                .gap = 10,
+                .children = .{
+                    .{ .kind = .label, .width = 108, .height = 22, .text = "SCORE", .color = .{ 1.0, 1.0, 1.0, 1.0 } },
+                    .{ .kind = .label, .width = 110, .height = 22, .bind = "score", .text = "0", .color = .{ 0.95, 0.75, 0.2, 1.0 } },
+                },
+            },
+            // LENGTH, top-right: caption + bound value.
+            .{
+                .kind = .container,
+                .anchor = .top_right,
+                .width = 190,
+                .height = 22,
+                .layout = .flex,
+                .direction = .row,
+                .gap = 10,
+                .children = .{
+                    .{ .kind = .label, .width = 130, .height = 22, .text = "LENGTH", .color = .{ 1.0, 1.0, 1.0, 1.0 } },
+                    .{ .kind = .label, .width = 50, .height = 22, .bind = "length", .text = "1", .color = .{ 0.3, 0.9, 0.4, 1.0 } },
+                },
+            },
+        },
+    },
+}
