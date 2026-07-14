@@ -1,32 +1,42 @@
-// Pac-Man staircase, step 8: the #108 fix, pinned. Pressing DOWN before pac has left
+// Pac-Man staircase, step 8: the #108 fix, pinned. Pressing UP before pac has left
 // its start cell (col 8, row 9) is a *legal* turn — row 8's column-8 cell is open — so
-// nav steers pac straight down column 8. Row 7 is a full east-west corridor (an
-// intersection pac's straight-down heading crosses without turning onto it). Since #139
-// pac targets the farthest walkable cell in its heading — here (8,7), because column 8's
-// row-6 cell is a wall — and because that target is a pure-axis scan (same column), the
-// BFS shortest path IS the straight line down column 8 with no room to corner-cut sideways
-// (the pre-#108 far-target bug required a target OFF the axis; this one never is). Pac
-// glides down and, since #126 nav is axis-aligned and grid-locked, a blocked agent stops
-// flush at its target cell's centre: pac lands exactly on row 7's centre (world y = 2),
-// not the pre-#126 stop-short mid-cell halt (~2.4) — deterministically, flush to the wall.
+// nav steers pac straight up column 8 (toward row 0, the maze's top). Row 7 is a full
+// east-west corridor (an intersection pac's straight heading crosses without turning
+// onto it). Since #139 pac targets the farthest walkable cell in its heading — here
+// (8,7), because column 8's row-6 cell is a wall — and because that target is a pure-axis
+// scan (same column), the BFS shortest path IS the straight line up column 8 with no room
+// to corner-cut sideways (the pre-#108 far-target bug required a target OFF the axis;
+// this one never is). Pac glides up and, since #126 nav is axis-aligned and grid-locked, a
+// blocked agent stops flush at its target cell's centre: pac lands exactly on row 7's
+// centre (world y = 2), not the pre-#126 stop-short mid-cell halt (~2.4) —
+// deterministically, flush to the wall.
 //
 // Two ordered, single-fundamental checkpoints (ADR 0028 "one fundamental per
 // assertion"): the first isolates the *successful open turn* — at tick 10 pac is still
 // on column 8 (x still -1, so it did NOT continue its default leftward heading) but has
-// moved partway down it (y dropped from 4 to 3.6), which fails iff an open on_key press
+// moved partway up it (y dropped from 4 to 3.6), which fails iff an open on_key press
 // does not change pac's heading (the isolated turn proof `03_turn.zon`'s blocked case
 // cannot give). The second isolates the #108 *stop at a wall, no auto-detour* — by tick
 // 40 pac has stopped dead flush at (-1, 2.0), still on column 8, inside the long window
 // (tick ~22 to ~60) where pac sits undisturbed before a ghost eventually finds it.
+//
+// Issue #159: this scenario presses UP, not DOWN. Row 9 (pac's start row) sits one cell
+// above the maze's bottom border (row 10, a solid wall the full width), so a "down"
+// press here would always block one cell later regardless of column — it would collapse
+// into `03_turn.zon`'s blocked case and lose this scenario's distinct "open turn, cross
+// an intersection, stop flush at a real wall" proof. "up" (row-, the corrected on_key
+// mapping's up-on-screen direction) walks the column-8 gap this scenario was written to
+// exercise; the expected numbers are unchanged because they were always the `dr = -1`
+// trajectory, just reached (pre-fix) by the wrongly-labeled "down" key.
 .{
     .steps = 40,
     .input_trace = .{
         .{ .ticks = 1, .keys = .{} },
-        .{ .ticks = 39, .keys = .{"down"} },
+        .{ .ticks = 39, .keys = .{"up"} },
     },
     .expect = .{
         .{
-            .label = "straight (turn): an open on_key(down) turns pac onto column 8 heading down (still x=-1, y past its start row)",
+            .label = "straight (turn): an open on_key(up) turns pac onto column 8 heading up (still x=-1, y past its start row)",
             .at_tick = 10,
             .check = .{ .occupied = .{ .x = -1, .y = 3.6, .eps = 0.02 } },
         },

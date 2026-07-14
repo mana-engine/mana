@@ -282,11 +282,14 @@ return {
     end,
 
     -- Directional input (ADR 0021): a key press sets pac's heading; the next selection
-    -- pass turns that into a nav target. +y (row+) is up on screen.
+    -- pass turns that into a nav target. Issue #159: `cell_to_world` puts row+ at
+    -- higher world y, and post-#155 (the live Vulkan vertical-flip fix) higher world y
+    -- renders LOWER on screen, so row- (toward row 0, the top of the maze's ASCII art)
+    -- is up on screen, not row+.
     on_key = function(ev)
         if not ev.pressed then return end
-        if ev.key == "up" then pac_dir = { dc = 0, dr = 1 } end
-        if ev.key == "down" then pac_dir = { dc = 0, dr = -1 } end
+        if ev.key == "up" then pac_dir = { dc = 0, dr = -1 } end
+        if ev.key == "down" then pac_dir = { dc = 0, dr = 1 } end
         if ev.key == "left" then pac_dir = { dc = -1, dr = 0 } end
         if ev.key == "right" then pac_dir = { dc = 1, dr = 0 } end
     end,
