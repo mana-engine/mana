@@ -18,6 +18,8 @@ const NavAgent = components.NavAgent;
 const Appearance = components.Appearance;
 const Sprite = components.Sprite;
 const AnimationState = components.AnimationState;
+const TintCue = components.TintCue;
+const TintCursor = components.TintCursor;
 const Entity = ecs.Entity;
 const Allocator = std.mem.Allocator;
 
@@ -48,6 +50,15 @@ pub const World = struct {
     /// `Sprite` by `setSprite` and advanced by the render-time animation system from
     /// wall-clock time. Excluded from `stateHash` (cosmetic; a tick never touches it).
     animations: ecs.SparseSet(AnimationState) = .{},
+    /// Tint + blink cues (issue #128): content-declared named override states a script
+    /// selects via an existing data component. Empty until a scene/prototype declares a
+    /// `tint_cue`; excluded from `stateHash` (cosmetic, never read by sim systems).
+    tint_cues: ecs.SparseSet(TintCue) = .{},
+    /// Live resolved tint cursors (issue #128), one per cued entity — attached alongside
+    /// a `TintCue` by `setTintCue` and advanced by the render-time `tint.advance` system
+    /// from wall-clock time. Excluded from `stateHash` (cosmetic; a tick never touches
+    /// it).
+    tint_cursors: ecs.SparseSet(TintCursor) = .{},
     /// Named scalar data components (ADR 0024): game-declared per-entity `f64`
     /// attributes `mana.get`/`mana.set` read and write. Empty until a scene/prototype
     /// declares a `data` component; part of the state hash (`stateHash`).
@@ -68,6 +79,8 @@ pub const World = struct {
         self.appearances.deinit(self.gpa);
         self.sprites.deinit(self.gpa);
         self.animations.deinit(self.gpa);
+        self.tint_cues.deinit(self.gpa);
+        self.tint_cursors.deinit(self.gpa);
         self.data.deinit(self.gpa);
         self.entities.deinit(self.gpa);
         self.* = undefined;
@@ -90,6 +103,8 @@ pub const World = struct {
         self.appearances.remove(e.index);
         self.sprites.remove(e.index);
         self.animations.remove(e.index);
+        self.tint_cues.remove(e.index);
+        self.tint_cursors.remove(e.index);
         self.data.removeEntity(e.index);
         try self.entities.free_entity(self.gpa, e);
     }
@@ -241,6 +256,41 @@ pub const World = struct {
         return self.animations.get(e.index);
     }
 
+    /// Attach/overwrite `e`'s `TintCue` (issue #128) and ensure it has a `TintCursor`: a
+    /// fresh default cursor is attached only if the entity has none, so re-declaring the
+    /// cue mid-run does not reset an in-progress blink phase. Errors:
+    /// `error.InvalidEntity` for a stale handle, `error.OutOfMemory` on allocation
+    /// failure.
+    pub fn setTintCue(self: *World, e: Entity, tc: TintCue) Error!void {
+        if (!self.entities.isValid(e)) return error.InvalidEntity;
+        try self.tint_cues.put(self.gpa, e.index, tc);
+        if (self.tint_cursors.get(e.index) == null)
+            try self.tint_cursors.put(self.gpa, e.index, .{});
+    }
+
+    /// Mutable pointer to `e`'s `TintCue`, or null if absent/stale. Invalidated by
+    /// subsequent component adds/removes.
+    pub fn getTintCue(self: *World, e: Entity) ?*TintCue {
+        if (!self.entities.isValid(e)) return null;
+        return self.tint_cues.get(e.index);
+    }
+
+    /// Attach/overwrite `e`'s `TintCursor` directly (issue #128). Normally the
+    /// render-time `tint.advance` system owns this column; exposed so that system (and
+    /// tests) can write a resolved cursor. Errors: `error.InvalidEntity` for a stale
+    /// handle, `error.OutOfMemory` on allocation failure.
+    pub fn setTintCursor(self: *World, e: Entity, tc: TintCursor) Error!void {
+        if (!self.entities.isValid(e)) return error.InvalidEntity;
+        try self.tint_cursors.put(self.gpa, e.index, tc);
+    }
+
+    /// Mutable pointer to `e`'s `TintCursor`, or null if absent/stale. Invalidated by
+    /// subsequent component adds/removes.
+    pub fn getTintCursor(self: *World, e: Entity) ?*TintCursor {
+        if (!self.entities.isValid(e)) return null;
+        return self.tint_cursors.get(e.index);
+    }
+
     /// The column id for the named data component `name` (ADR 0024), or `null` if no
     /// scene/prototype has declared it. `mana.get`/`mana.set` resolve a name to a
     /// column through this; an unknown name is the "undeclared" case.
@@ -290,7 +340,10 @@ pub const World = struct {
     /// `Sprite` and `AnimationState` (ADR 0031) are excluded for the same reason and one
     /// more: the animation cursor is advanced from WALL-CLOCK time by a render-time
     /// system, never a sim tick, so folding it in would make the hash depend on real
-    /// elapsed time — the exact non-determinism the exclusion prevents.
+    /// elapsed time — the exact non-determinism the exclusion prevents. `TintCue` and
+    /// `TintCursor` (issue #128) are excluded for the identical reason (the blink phase
+    /// is wall-clock, cosmetic); the discrete data component a `TintCue.selector` reads
+    /// is itself a named data component and so already folded in below.
     /// Named data components (ADR 0024) are authoritative sim state and are folded in
     /// last, in registration/dense order; an empty store adds zero bytes, so a scene
     /// with no data components hashes bit-identically to before the store existed.

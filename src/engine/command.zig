@@ -109,6 +109,7 @@ pub const CommandBuffer = struct {
                 if (a.bundle.nav_agent) |na| try ignoreInvalid(world.setNavAgent(a.entity, na));
                 if (a.bundle.appearance) |ap| try ignoreInvalid(world.setAppearance(a.entity, ap));
                 if (a.bundle.sprite) |sp| try ignoreInvalid(world.setSprite(a.entity, sp));
+                if (a.bundle.tint_cue) |tc| try ignoreInvalid(world.setTintCue(a.entity, tc));
                 for (a.bundle.data) |nv| try ignoreInvalid(world.setDataByName(a.entity, nv.name, nv.value));
             },
             .set_transform => |s| try ignoreInvalid(world.setTransform(s.entity, s.value)),

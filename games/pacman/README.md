@@ -51,6 +51,22 @@ genre-neutral engine features, and this package is now migrated onto them:
   target); `retarget` reuses that existing selection state. Scatter and frightened
   targeting are unchanged (every ghost's own corner / flee-to-corner).
 
+- **Runtime tint + blink cues — CLOSED (ADR 0033 phase 2, issue #128; subsumes the
+  frightened-blue half of #106).** Pac and the four ghosts each declare a `.tint_cue`
+  (`prototypes.zon`): a named list of override colors, some blinking. A script selects
+  the active state by writing a **1-based index** to an EXISTING ADR 0024 data
+  component — no new `mana` API. Ghosts reuse their existing `frightened` flag, widened
+  from 0/1 to a 0/1/2 tri-state: 1 = solid frightened blue, 2 = blinking blue/white,
+  which `begin_fright` flips to `BLINK_LEAD` (2s) before the window closes — the classic
+  "frightened is about to end" warning. Pac gets a new `flash` data component that
+  `on_collision_begin`'s fruit branch sets to 1 (a 12 Hz dim/bright strobe — pac's sprite
+  tint MULTIPLIES its texel, so darkening is the reliable direction, not brightening past
+  the texture's own color) then back to 0 a beat later (`mana.after`). The engine's
+  `tint.advance` (cosmetic, wall-clock,
+  hash-excluded — mirrors `sprite.advance`) resolves the displayed color every frame;
+  `render.project`/`projectSprites` read it ahead of `Appearance.color`. A single fruit
+  pickup (`scenes/maze.zon`, `kind` 5) exists solely to exercise the pac-flash cue.
+
 What was **never** a gap and is unchanged: chase/scatter/frightened mode *timing*
 (`mana.after`/`mana.every` + `mana.set`), per-entity data (`score`, `frightened`, ADR
 0024), and the input→heading path (`on_key`) Snake proved.

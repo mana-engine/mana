@@ -163,6 +163,56 @@ test "world: setSprite on a stale handle errors" {
     try testing.expectEqual(@as(usize, 0), w.animations.count());
 }
 
+test "world: a tint cue round-trips, attaches a default cursor, and drops both on despawn" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+
+    const e = try w.spawn();
+    try w.setTintCue(e, .{ .selector = "frightened", .states = &.{.{ .color = .{ 0.2, 0.3, 1.0 } }} });
+    try testing.expectEqualStrings("frightened", w.getTintCue(e).?.selector);
+    // Attaching a TintCue also attaches a default cursor (no override yet, time 0).
+    try testing.expect(w.getTintCursor(e) != null);
+    try testing.expectEqual(@as(f32, 0), w.getTintCursor(e).?.time_s);
+    try testing.expectEqual(@as(?[3]f32, null), w.getTintCursor(e).?.color);
+    try testing.expectEqual(@as(usize, 1), w.tint_cues.count());
+    try testing.expectEqual(@as(usize, 1), w.tint_cursors.count());
+
+    try w.despawn(e);
+    try testing.expect(w.getTintCue(e) == null);
+    try testing.expect(w.getTintCursor(e) == null);
+    try testing.expectEqual(@as(usize, 0), w.tint_cues.count());
+    try testing.expectEqual(@as(usize, 0), w.tint_cursors.count());
+}
+
+test "world: setTintCue on a stale handle errors" {
+    var w = World.init(testing.allocator);
+    defer w.deinit();
+    const e = try w.spawn();
+    try w.despawn(e);
+    try testing.expectError(error.InvalidEntity, w.setTintCue(e, .{ .selector = "x" }));
+    // A rejected setTintCue must not leave a dangling cursor behind.
+    try testing.expectEqual(@as(usize, 0), w.tint_cursors.count());
+}
+
+test "world: a tint cue and its cursor do not perturb the state hash (cosmetic, excluded)" {
+    var with = World.init(testing.allocator);
+    defer with.deinit();
+    var without = World.init(testing.allocator);
+    defer without.deinit();
+
+    inline for (.{ &with, &without }) |wp| {
+        const e = try wp.spawn();
+        try wp.setTransform(e, .{ .pos = .{ .x = 1, .y = 2, .z = 3 } });
+    }
+    // Attaching a TintCue (and thus a cursor) to one world must not change its hash —
+    // both are cosmetic, and the cursor's blink phase is wall-clock-driven, so hashing
+    // it would break determinism. Also perturb the cursor's resolved color to prove the
+    // cursor itself is excluded, not just the cue.
+    try with.setTintCue(with.entityAt(0), .{ .selector = "mode", .states = &.{.{ .color = .{ 1, 0, 0 } }} });
+    try with.setTintCursor(with.entityAt(0), .{ .time_s = 9.9, .color = .{ 1, 0, 0 } });
+    try testing.expectEqual(without.stateHash(), with.stateHash());
+}
+
 test "world: a sprite and its animation cursor do not perturb the state hash (cosmetic, excluded)" {
     var with = World.init(testing.allocator);
     defer with.deinit();

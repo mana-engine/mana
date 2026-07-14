@@ -110,6 +110,58 @@ pub const AnimationState = struct {
 /// (`ping_pong`). Interpreted by `animation.clipPosition`.
 pub const LoopMode = enum { loop, once, ping_pong };
 
+/// A named tint state a `TintCue`'s selector may pick (issue #128; ADR 0033 phase 2).
+/// `color` is the solid override while this state is active; `blink_color`, when
+/// present, is alternated with `color` at `blink_hz` full cycles per WALL-CLOCK second
+/// (a square wave, computed by `tint.advance`) instead of holding solid.
+pub const TintCueState = struct {
+    /// RGB, each channel 0..1 — the override tint (replaces `Appearance.color`/the
+    /// sprite tint while this state is active).
+    color: [3]f32,
+    /// Null ⇒ hold `color` solid, no blink. Present ⇒ alternate `color`/`blink_color`.
+    blink_color: ?[3]f32 = null,
+    /// Blink rate in full on/off cycles per wall-clock second. Ignored when
+    /// `blink_color` is null.
+    blink_hz: f32 = 0,
+};
+
+/// A runtime-settable tint + blink cue (issue #128; ADR 0033 phase 2): content declares
+/// a named list of `states`; a script SELECTS the active one by writing a 1-based index
+/// to the entity's existing ADR 0024 named data component `selector` — reusing
+/// `mana.set`, no new scripting API (e.g. `games/pacman` widens its ghosts' existing
+/// `"frightened"` data component from 0/1 to 0/1/2 to add the end-of-window blink phase).
+/// `0` (or `selector` absent/undeclared/out of range) means "no override" — the renderer
+/// falls through to `Appearance.color` (or white) unchanged; `N` selects `states[N-1]`.
+/// `tint.advance` (wall-clock, cosmetic) resolves the displayed color into the entity's
+/// `TintCursor` every frame; `render.project`/`projectSprites` read that resolved color
+/// ahead of `Appearance.color`. COSMETIC: like `Sprite`, excluded from `World.stateHash`
+/// — the discrete `selector` VALUE is ordinary hashed data-component state (ADR 0024);
+/// only the continuous blink phase/output color computed here is not.
+pub const TintCue = struct {
+    /// Name of the ADR 0024 named data component a script writes to select a state.
+    /// Must already be declared (as any value, e.g. 0) on the same entity/prototype, or
+    /// `tint.advance` always resolves "no override" (an undeclared name reads `null`,
+    /// treated as 0).
+    selector: []const u8,
+    /// `states[0]` is selector value 1, `states[1]` is 2, etc. Never indexed by 0.
+    states: []const TintCueState = &.{},
+};
+
+/// Live per-entity resolved tint (issue #128; ADR 0033 phase 2). Advanced by the
+/// COSMETIC, wall-clock render-time system `tint.advance` — never a sim tick — so, like
+/// `AnimationState`, it is excluded from `World.stateHash`. The engine attaches a
+/// default cursor whenever a `TintCue` is attached (see `World.setTintCue`); content
+/// never declares it.
+pub const TintCursor = struct {
+    /// Wall-clock seconds accumulated while a `TintCue` is attached (the blink-phase
+    /// clock); never a sim tick.
+    time_s: f32 = 0,
+    /// This frame's resolved override color, or `null` when the selector currently
+    /// reads 0/absent/out-of-range — no override, so the renderer falls through to
+    /// `Appearance.color` (or white).
+    color: ?[3]f32 = null,
+};
+
 /// A navigation agent (ADR 0027): an entity the native `nav` steering system drives
 /// toward a target grid cell each tick. `speed` is its movement rate in world units
 /// per second along the path. The target cell itself is *not* held here — it lives in
@@ -153,6 +205,11 @@ pub const Bundle = struct {
     /// samples for this entity. Attaching one also attaches a default `AnimationState`
     /// cursor (see `World.setSprite`); cosmetic, excluded from the state hash.
     sprite: ?Sprite = null,
+    /// A tint + blink cue (issue #128) to attach — named override states a script
+    /// selects via an existing ADR 0024 data component. Attaching one also attaches a
+    /// default `TintCursor` (see `World.setTintCue`); cosmetic, excluded from the state
+    /// hash.
+    tint_cue: ?TintCue = null,
 };
 
 /// Kinematic character-controller intent (ADR 0008 follow-on: move-and-slide).

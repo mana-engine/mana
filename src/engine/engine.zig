@@ -40,6 +40,7 @@ pub const render = @import("render.zig");
 pub const render_svg = @import("render_svg.zig");
 pub const animation = @import("animation.zig");
 pub const sprite = @import("sprite.zig");
+pub const tint = @import("tint.zig");
 pub const collision = @import("collision.zig");
 pub const controller = @import("controller.zig");
 pub const nav = @import("nav.zig");

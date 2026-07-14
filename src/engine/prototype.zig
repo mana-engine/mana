@@ -53,6 +53,7 @@ pub fn bundleAt(proto: Prototype, pos: core.Vec3) components.Bundle {
         .nav_agent = proto.nav_agent, // nav agent (ADR 0027) carries through as-is
         .appearance = proto.appearance, // appearance (ADR 0030) carries through as-is
         .sprite = proto.sprite, // sprite ref (ADR 0031) carries through as-is
+        .tint_cue = proto.tint_cue, // tint + blink cue (issue #128) carries through as-is
     };
 }
 
