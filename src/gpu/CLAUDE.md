@@ -53,3 +53,6 @@ the **null backend is the default**, so ordinary and CI builds are GPU-free. See
   `@embedFile`s the `.spv` (declare it `align(@alignOf(u32))` so it can be cast to
   `[*]const u32` for `p_code`). glslc/GLSL isn't cleanly installable here (ADR 0006
   §5); a swap is trivial since the backend consumes SPIR-V.
+- **naga-cli build:** On this machine, `mise x cargo:naga-cli` builds with `zig cc`
+  as Rust's linker (no system C compiler available). This is transparent to `mise run
+  shaders`, but a fresh clone needs Zig installed for shader recompilation.
