@@ -254,7 +254,7 @@ pub fn projectSprites(
 const testing = std.testing;
 
 /// Build a `SheetStore` owning one decoded sheet under `ref` (encode→decode so the store
-/// owns freeable slices, matching `sprite.loadForWorld`). Caller `deinit`s the store.
+/// owns freeable slices, matching `sprite.loadForScene`). Caller `deinit`s the store.
 fn spriteStoreWith(gpa: Allocator, ref: []const u8, sheet: data.msf.Sheet) !sprite.SheetStore {
     const bytes = try data.msf.encode(gpa, sheet);
     defer gpa.free(bytes);
