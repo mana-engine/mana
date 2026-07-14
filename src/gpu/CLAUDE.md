@@ -56,3 +56,10 @@ the **null backend is the default**, so ordinary and CI builds are GPU-free. See
 - **naga-cli build:** On this machine, `mise x cargo:naga-cli` builds with `zig cc`
   as Rust's linker (no system C compiler available). This is transparent to `mise run
   shaders`, but a fresh clone needs Zig installed for shader recompilation.
+- **Clip-space Y-convention (ADR 0037):** The engine emits **Y-down NDC**
+  (`screen.y=0 → ndc.y=-1`). naga compiles WGSL under WebGPU's Y-up convention and
+  injects `position.y = -position.y` into every shader to retarget to Vulkan's Y-down.
+  Applied to already-Y-down NDC that is a *second* flip → whole frame inverted on
+  Vulkan with a positive-height viewport (PR #155 fix: use a negative-height viewport).
+  Every backend must preserve Y-down NDC; the `gpu.captureFrame` orientation test
+  guards it.
