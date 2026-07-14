@@ -1,9 +1,10 @@
 // Pac-Man staircase, step 3/5: an `on_key` press changes rules.lua's `pac_dir`
-// immediately, but nav (ADR 0027) only ever steers toward the NEXT cell in that
-// heading (#108) — never a far one — so a direction that is a wall right where pac
-// currently stands is simply an unwalkable nav target: pac holds still on that axis
-// rather than detouring sideways through the maze to find some other way down (the
-// pre-#108 bug this regresses). Holding DOWN from tick 10 changes the heading to
+// immediately, but pac's target is the farthest walkable cell in that heading (#139) —
+// and when the very next cell in the new heading is a wall, `farthest_open` returns pac's
+// OWN cell, an unwalkable-onward nav target: pac holds still on that axis rather than
+// detouring sideways through the maze to find some other way down (the pre-#108 bug this
+// regresses; the #139 far target is a pure-axis scan, so it still can't corner-cut).
+// Holding DOWN from tick 10 changes the heading to
 // vertical while pac is still a few cells short of column 8's row-8 gap, so the very
 // first "down" retarget picks a wall cell; by tick 50 pac has NOT moved off row 9 at
 // all (y is still 4). Since #126 nav is axis-aligned and grid-locked, a blocked agent

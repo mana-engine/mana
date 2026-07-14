@@ -1,13 +1,14 @@
 // Pac-Man staircase, step 8: the #108 fix, pinned. Pressing DOWN before pac has left
 // its start cell (col 8, row 9) is a *legal* turn — row 8's column-8 cell is open — so
 // nav steers pac straight down column 8. Row 7 is a full east-west corridor (an
-// intersection pac's straight-down heading crosses without turning onto it, unlike the
-// pre-#108 bug where a far nav target made the BFS auto-route pac sideways through
-// exactly this kind of crossing). Column 8's row-6 cell is a wall, so pac's next-cell
-// nav target becomes unwalkable there and pac stops dead. Since #126 nav is axis-aligned
-// and grid-locked: a blocked agent glides to its current cell centre and stops flush
-// against the wall, so pac lands exactly on row 7's centre (world y = 2) rather than the
-// pre-#126 stop-short mid-cell halt (~2.4) — deterministically, and flush to the wall.
+// intersection pac's straight-down heading crosses without turning onto it). Since #139
+// pac targets the farthest walkable cell in its heading — here (8,7), because column 8's
+// row-6 cell is a wall — and because that target is a pure-axis scan (same column), the
+// BFS shortest path IS the straight line down column 8 with no room to corner-cut sideways
+// (the pre-#108 far-target bug required a target OFF the axis; this one never is). Pac
+// glides down and, since #126 nav is axis-aligned and grid-locked, a blocked agent stops
+// flush at its target cell's centre: pac lands exactly on row 7's centre (world y = 2),
+// not the pre-#126 stop-short mid-cell halt (~2.4) — deterministically, flush to the wall.
 //
 // Two ordered, single-fundamental checkpoints (ADR 0028 "one fundamental per
 // assertion"): the first isolates the *successful open turn* — at tick 10 pac is still

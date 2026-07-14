@@ -30,6 +30,46 @@ local function clampi(v, lo, hi)
     if v < lo then return lo elseif v > hi then return hi else return v end
 end
 
+-- The maze wall picture, mirrored from scenes/maze.zon's tilemap `.rows` in the SAME
+-- (col,row) frame (`WALLS[row+1]:sub(col+1,col+1)`; row 0 is the first string, matching
+-- `Tilemap.cellToWorld`'s row→+Y). The ADR 0003 scripting API exposes no tilemap-
+-- walkability query, and pac's target selection (below) needs to know how far a straight
+-- corridor runs before a wall, so the picture lives here as package content — no new
+-- `mana` API (ADR 0027 §3: Lua selects, native nav steers). MUST stay in sync with
+-- maze.zon; the pac scenarios (`08_straight_through`, `03_turn`) are the guard.
+local WALLS = {
+    "###################",
+    "#........#........#",
+    "#.####.#.#.#.####.#",
+    "#.................#",
+    "#.##.###.#.###.##.#",
+    "#....#..gggg.#....#",
+    "#.##.#.#####.#.##.#",
+    "#........#........#",
+    "#.##.###.#.###.##.#",
+    "#o......P........o#",
+    "###################",
+}
+local function is_wall(col, row)
+    if col < 0 or col >= W or row < 0 or row >= H then return true end
+    return string.sub(WALLS[row + 1], col + 1, col + 1) == "#"
+end
+
+-- The farthest still-walkable cell reached by stepping (dc,dr) from (col,row) until the
+-- cell before the first wall — pac's straight-run nav target. A pure-axis target (same
+-- row for a horizontal heading, same col for a vertical one) has a *unique* shortest
+-- path — the straight line — because any deviation adds perpendicular steps, so the
+-- native BFS (ADR 0027) never shortcuts a corner even across an open room; pac holds one
+-- lane until it hits a wall or the player turns. If the next cell is already a wall this
+-- returns (col,row) itself, so pac's target is its own cell and nav stops it flush.
+local function farthest_open(col, row, dc, dr)
+    local c, r = col, row
+    while not is_wall(c + dc, r + dr) do
+        c, r = c + dc, r + dr
+    end
+    return c, r
+end
+
 -- Contact classification by data tag (kept in sync with prototypes.zon / maze.zon).
 local KIND_PAC, KIND_GHOST, KIND_DOT, KIND_PELLET, KIND_FRUIT = 1, 2, 3, 4, 5
 
@@ -90,18 +130,20 @@ local function pac_cell()
 end
 
 -- One selection pass (a coarse timer, a handful of movers — never a per-frame world
--- scan). Pac targets only the NEXT cell in its heading (#108), not a far one: with a
--- single adjacent cell as the nav target, the native BFS (ADR 0027) has no room to
--- shortcut around a corner on its own, so pac holds a straight line through an
--- intersection until the player presses a new heading (the next pass then targets the
--- next cell in THAT direction) — and a wall dead ahead is simply an unwalkable target,
--- so `nav.nextStep` returns null and pac stops dead. That is exactly classic Pac-Man:
--- continue straight, turn only on input, stop at a wall. Retargeting every RETARGET
--- (0.1s) while nav crosses a whole cell in 1/speed seconds (pac: 1/8s) keeps this
--- smooth — a fresh next-cell target lands well before pac reaches the current one, so
--- velocity never actually drops to zero mid-corridor. In scatter (or while any ghost is
--- frightened) every ghost retreats to its own corner; the native BFS finds the path and
--- the next step. Interior cells are cols/rows [1, W-2]/[1, H-2] (the border is wall).
+-- scan). Pac targets the FARTHEST walkable cell along its heading (#139), not the single
+-- next cell (#108's original fix): a one-cell-ahead target let pac *reach* its target
+-- before the next 0.1s retarget pass, so `start == target` → `nav.nextStep` returns null
+-- → pac stopped flush and held until the next pass — a per-cell stall the player felt as
+-- a stutter (ghosts, whose targets are always cells away, never stalled: same nav, so
+-- steering was never the bug). A pure-axis far target down the current lane still keeps
+-- classic Pac-Man's three rules — the BFS never shortcuts around a corner because a
+-- same-row/same-col target's shortest path IS the straight line (`farthest_open`), so:
+-- pac holds ONE straight lane at full speed, turns only when the player presses a new
+-- heading (the next pass scans THAT direction), and glides to a flush stop at the wall
+-- dead ahead (target = last walkable cell → pac reaches its centre and holds). In scatter
+-- (or while any ghost is frightened) every ghost retreats to its own corner; the native
+-- BFS finds the path and the next step. Interior cells are cols/rows [1, W-2]/[1, H-2]
+-- (the border is wall).
 --
 -- In chase mode each ghost gets the classic arcade AI's distinct target, using only the
 -- surface already available to Lua (ADR 0027 §3: selection, never steering, and no new
@@ -116,7 +158,7 @@ end
 --     closes the final few cells.
 local function retarget()
     local pc, pr = pac_cell()
-    set_target(pac, clampi(pc + pac_dir.dc, 1, W - 2), clampi(pr + pac_dir.dr, 1, H - 2))
+    set_target(pac, farthest_open(pc, pr, pac_dir.dc, pac_dir.dr))
 
     if frightened or mode == "scatter" then
         for _, g in ipairs(ghosts) do set_target(g.handle, g.scatter[1], g.scatter[2]) end
