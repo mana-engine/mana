@@ -75,12 +75,16 @@ deferred (see the last bullet below).
   `now` + the sim's seeded `core.Rng` and calls `State.setHost` around dispatch;
   the `mana` closures capture a pointer to the `State`'s `host` slot). **Wired:**
   the reads `position`, `now`, `get` (named data components, ADR 0024),
-  `random`/`random_int` (ADR 0022, #47) and the authoritative `is_valid` (host when
-  a Sim is dispatching, `handle.Registry` fallback otherwise); the deferred
-  mutations `set` (named data components, ADR 0024), `set_velocity`, `set_position`,
-  `spawn`, `despawn`; the timers `after`/`every`/`cancel` (ADR 0019). With `get`/
-  `set` the ADR 0003 §2 `mana` v1 surface is **complete** — nothing remains
-  deferred. Named data components live in the ECS/World layer
+  `random`/`random_int` (ADR 0022, #47), `is_walkable` (the scene tilemap's
+  walkability grid, ADR 0035 — a *borrowed* `?*const Tilemap` threaded through
+  `DispatchCtx`/`HostCtx`, mirroring `Sim.tilemap`/`Context.tilemap`, ADR 0027) and
+  the authoritative `is_valid` (host when a Sim is dispatching, `handle.Registry`
+  fallback otherwise); the deferred mutations `set` (named data components, ADR
+  0024), `set_velocity`, `set_position`, `spawn`, `despawn`; the timers
+  `after`/`every`/`cancel` (ADR 0019). With `get`/`set`/`is_walkable` the ADR 0003
+  §2 `mana` v1 surface is **complete** — nothing remains deferred; any further
+  addition needs its own ADR (ADR 0003 §5), same as this one. Named data components
+  live in the ECS/World layer
   (`src/engine/data_components.zig`, a registered dense-column store, Option B),
   never in `script`; `get`/`set` reach it through the host seam like every other
   live-Sim accessor.

@@ -18,6 +18,7 @@ const command = @import("command.zig");
 const prototype = @import("prototype.zig");
 const timer = @import("timer.zig");
 const World = @import("world.zig").World;
+const Tilemap = @import("tilemap.zig").Tilemap;
 
 const Entity = ecs.Entity;
 const Allocator = std.mem.Allocator;
@@ -39,6 +40,10 @@ pub const DispatchCtx = struct {
     /// The Sim's seeded RNG stream, so `mana.random`/`random_int` draw from it
     /// (ADR 0022, issue #47) instead of a fresh/nondeterministic source.
     rng: *core.Rng,
+    /// The scene's grid level (ADR 0026/0027), or null if the sim has none, so
+    /// `mana.is_walkable` (ADR 0035) can query the same walkability grid the native
+    /// `nav` pathfinder paths over. Mirrors `Sim.tilemap`/`Context.tilemap`.
+    tilemap: ?*const Tilemap = null,
 };
 
 /// The Sim's script runtime: the Lua-backed one under `-Denable-lua`, else a
@@ -199,6 +204,7 @@ const LuaRuntime = struct {
         timers: *timer.Timers,
         runtime: *LuaRuntime,
         rng: *core.Rng,
+        tilemap: ?*const Tilemap,
         oom: bool = false,
 
         fn init(dc: DispatchCtx, runtime: *LuaRuntime) HostCtx {
@@ -211,6 +217,7 @@ const LuaRuntime = struct {
                 .timers = dc.timers,
                 .runtime = runtime,
                 .rng = dc.rng,
+                .tilemap = dc.tilemap,
             };
         }
         fn cast(ctx: *anyopaque) *HostCtx {
@@ -332,6 +339,14 @@ const LuaRuntime = struct {
         fn randomInt(ctx: *anyopaque, lo: i64, hi: i64) i64 {
             return cast(ctx).rng.intRange(lo, hi);
         }
+        /// `mana.is_walkable` (ADR 0035): an immediate read of the sim's tilemap —
+        /// `false` when the sim has none (no scene tilemap loaded), matching
+        /// `Tilemap.isWalkable`'s own off-grid/wall `false`. Queries the same grid
+        /// the native `nav` pathfinder paths over; never a parallel/mirrored copy.
+        fn isWalkable(ctx: *anyopaque, col: i32, row: i32) bool {
+            const tm = cast(ctx).tilemap orelse return false;
+            return tm.isWalkable(col, row);
+        }
         const vtable: script.lua.Host.VTable = .{
             .is_valid = isValid,
             .position = position,
@@ -347,6 +362,7 @@ const LuaRuntime = struct {
             .timer_cancel = timerCancel,
             .random = random,
             .random_int = randomInt,
+            .is_walkable = isWalkable,
         };
     };
 
