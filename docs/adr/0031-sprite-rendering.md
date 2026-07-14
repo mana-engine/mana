@@ -2,6 +2,7 @@
 
 - Status: proposed
 - Date: 2026-07-13
+- Amended: 2026-07-14 (Issue #122 — the null backend is now a real CPU texel sampler, addendum below)
 
 ## Context
 
@@ -186,11 +187,14 @@ data, no Vulkan types above `gpu`:
   `CommandList.bindTexture(tex)` and a `Vertex` with UVs (`u,v` added to the existing
   NDC-pos+RGB vertex, or a second vertex type — Lane B picks the smaller diff). The
   quad's UVs address the current frame's sub-rect of the sheet.
-- **Null backend = a real no-op adapter (the default).** `createTexture`/
-  `uploadTexture`/`bindTexture` succeed and allocate/track host bytes but the null
-  rasterizer keeps drawing the quad's flat colour (it is not a texture sampler) — so
-  every headless/CI build stays GPU-free and green, and the null path remains the
-  parity harness (ADR 0010 §3). Sampling real texels is the **Vulkan** path only.
+- **Null backend = a real adapter (the default).** `createTexture`/`uploadTexture`/
+  `bindTexture` succeed and allocate/track host bytes, so every headless/CI build stays
+  GPU-free and green and the null path remains the parity harness (ADR 0010 §3).
+  *(**Superseded by the Issue #122 addendum below.** As first shipped, the null
+  rasterizer kept drawing each quad's flat colour — "sampling real texels is the Vulkan
+  path only" — but that made the textured sprite verifiable only by playing `--play` on
+  a GPU box, so the null backend was made a real CPU nearest-neighbour texel sampler. The
+  invariants this bullet protects — GPU-free, default, parity harness — all still hold.)*
 - **Vulkan textured-quad pipeline behind `-Denable-vulkan`** (Lane B): a second
   pipeline whose fragment shader samples the bound sheet texture at the vertex UVs and
   multiplies by the `Appearance` tint. Authored in WGSL → committed SPIR-V (ADR 0006 /
@@ -256,3 +260,48 @@ Cross-references: **#105** (this spike), **#106** (ghosts/frightened, follow-up)
 provisional pending its conclusion); builds on ADR 0029 (headless SVG), ADR 0030
 (appearance as data), ADR 0010 (gpu port surface), ADR 0006 (Vulkan offscreen +
 `data.png`).
+
+## Addendum (Issue #122): the null backend samples the atlas on the CPU
+
+Amended: 2026-07-14.
+
+§4 above scoped the null backend as a real *no-op* adapter: it tracked uploaded texels
+but its rasterizer kept drawing each sprite quad's flat tint, and "sampling real texels
+is the **Vulkan** path only." In practice that made the textured-sprite output verifiable
+**only** by playing `--play` on a Vulkan-capable box with a display — and sprite bugs (a
+wrong animation frame, a mis-rotated facing, a flattened footprint) twice reached the user
+because CI and the orchestrator could not *see* the pixels. That violates the LOOP first
+principle that a game must never ship silently / deterministically broken: **headless
+visual output is first-class**, not a Vulkan-only luxury.
+
+**Reversal.** The null backend's textured pipeline is now a *real* CPU texel sampler
+(`src/gpu/null/textured_raster.zig`, wired into `CommandList.drawTextured`).
+`bindTexture` records the atlas the draw samples; `rasterTri` rasterizes the **same** two
+triangles per sprite quad the Vulkan pipeline draws, barycentric-interpolates the UV
+across the (possibly rotated) footprint, samples the atlas **nearest-neighbour**, tints
+RGB and straight-alpha "over"-blends — mirroring `sprite.wgsl` + the Vulkan blend. Because
+the null path consumes the exact `SpriteQuad`s `render.projectSprites` produces (same
+projection, wedge-facing rotation, quad extents, UV sub-rects), a geometry/UV bug
+reproduces headlessly, pixel-for-pixel modulo the shared-diagonal seam (a deterministic
+test-double artifact; a top-left fill rule is unneeded).
+
+This *strengthens* the null backend from a no-op into a faithful sampler while preserving
+every invariant §4's bullet protected: still GPU-free (pure host math), still the default
+headless/CI backend, still the parity harness (ADR 0010 §3), and still **cosmetic** —
+excluded from the state hash (§1).
+
+**New surface (all render-side, no new sim state):**
+
+- `gpu.captureFrame` — an offscreen, sprite-aware render + readback that reuses the exact
+  `renderFrame` recording the `--play` present loop uses, then reads the target back to
+  RGBA8.
+- `runtime --render-play-frame <out.png> [--ticks N]` — the headless mirror of `--play`'s
+  pixels: it loads the scene, packs the atlas, advances **N deterministic fixed ticks**
+  (fixed dt, not wall-clock, so the captured frame is reproducible), composites the flat
+  quads + textured sprites through the null backend, and writes the PNG via the existing
+  offscreen path (`data.png`). Needs **no GPU**; like the other headless modes a Lua-driven
+  game still needs `-Denable-lua` for its scene handler to spawn the sprited entities.
+
+Cross-reference: **#122** (this addendum). This does not change the `.msf` format, the
+`Sprite`/`AnimationState` components, or the `gpu` port vocabulary — only the null
+backend's implementation of `drawTextured` and two render-side helpers.
