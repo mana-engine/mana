@@ -24,6 +24,7 @@ const gpu = @import("gpu");
 const ui = @import("ui");
 const text = @import("text.zig");
 const sprite = @import("sprite.zig");
+const World = @import("world.zig").World;
 
 const Allocator = std.mem.Allocator;
 
@@ -182,6 +183,34 @@ fn formatValue(v: ui.Value, buf: []u8) []const u8 {
     };
 }
 
+/// Build a `ui.Host` that resolves a bound label name to the value of the same-named data
+/// component (ADR 0024) on the live `world` — the engine-side fill of the §5 `Host` seam
+/// that lets a HUD display gameplay state without `ui` ever touching `World`. This glue is
+/// **generic**: it knows no data-component name (invariant #6) — the key comes from the
+/// game's HUD ZON `bind` (e.g. `"score"`), never from `src/`. A HUD scalar is a singleton
+/// gameplay fact carried on ONE entity (the player's `score`/`lives`), so the seam returns
+/// the value on the FIRST entity (dense-storage order, deterministic) that carries the
+/// column; an unbound/undeclared name yields `null`, and `ui.boundValue` falls back to the
+/// widget's static text. Read-only: it never writes `World`, so it cannot perturb the state
+/// hash. `world` is borrowed for the returned host's lifetime.
+pub fn worldHost(world: *World) ui.Host {
+    return .{ .ctx = world, .vtable = &world_host_vtable };
+}
+
+const world_host_vtable: ui.Host.VTable = .{ .value = worldHostValue };
+
+/// The `worldHost` vtable read: the first entity's value in the data column named `name`,
+/// or `null` if no column is declared for `name` (or the column is empty). Deterministic —
+/// dense storage order is stable within a tick.
+fn worldHostValue(ctx: *anyopaque, name: []const u8) ?ui.Value {
+    const world: *World = @ptrCast(@alignCast(ctx));
+    const col = world.dataColumn(name) orelse return null;
+    const set = &world.data.columns.items[col];
+    const vals = set.slice();
+    if (vals.len == 0) return null;
+    return .{ .number = vals[0] };
+}
+
 // --- Tests ------------------------------------------------------------------------
 
 const testing = std.testing;
@@ -309,6 +338,24 @@ test "render_ui: end-to-end headless capture composites a panel and text ink" {
     // A far corner outside the HUD stays the black clear (no stray ink).
     const corner = (@as(usize, view_h - 1) * view_w + (view_w - 1)) * 4;
     try testing.expectEqual(@as(u8, 0), pixels[corner + 0]);
+}
+
+test "render_ui: worldHost resolves a bound name to a data component on the live world" {
+    const gpa = testing.allocator;
+    var world = World.init(gpa);
+    defer world.deinit();
+
+    // One entity carrying score=1200; the HUD reads it by the key its ZON declares.
+    const player = try world.spawn();
+    try world.setDataByName(player, "score", 1200);
+
+    const host = worldHost(&world);
+    // A bound label resolves through the host to the live value.
+    const score_w: ui.Widget = .{ .kind = .label, .bind = "score", .text = "0" };
+    try testing.expectEqual(@as(f64, 1200), ui.boundValue(&score_w, host).number);
+    // An undeclared name falls back to the widget's static text — no genre key baked in.
+    const lives_w: ui.Widget = .{ .kind = .label, .bind = "lives", .text = "3" };
+    try testing.expectEqualStrings("3", ui.boundValue(&lives_w, host).text);
 }
 
 test "render_ui: formatValue renders whole and fractional numbers and text" {

@@ -87,6 +87,8 @@ local pac = nil                    -- pac's entity handle
 local pac_dir = { dc = -1, dr = 0 } -- current heading in cell deltas; default LEFT
 local ghosts = {}                  -- { { handle, home = {col,row}, scatter = {col,row} }, ... }
 local score = 0
+local START_LIVES = 3
+local lives = START_LIVES          -- remaining lives; the HUD reads pac's `lives` data component
 local frightened = false
 local mode = "chase"
 
@@ -213,13 +215,18 @@ local function send_home(handle)
     end
 end
 
--- Pac caught by a non-frightened ghost: restart the round. Teleport pac back to its
--- start cell AND return every ghost to its pen, so the actors are re-separated instead
--- of the pack staying piled on pac's death cell and immediately re-catching it (the
--- classic "reset the level on a death" — a run/lives count is still out of scope for
--- this scaffold). Nav has no ghost-vs-ghost avoidance yet (ADR 0027 follow-up), so
--- resetting the ghosts is what actually breaks up the corner-mob.
+-- Pac caught by a non-frightened ghost: lose a life and restart the round. Teleport pac
+-- back to its start cell AND return every ghost to its pen, so the actors are re-separated
+-- instead of the pack staying piled on pac's death cell and immediately re-catching it
+-- (the classic "reset the level on a death"). Lives (issue #133) tick down to 0 then loop
+-- back to a full set — a run/game-over flow is a later slice; the point here is a live,
+-- HUD-visible `lives` count driven off the SAME collision event, no new `mana` API. Nav
+-- has no ghost-vs-ghost avoidance yet (ADR 0027 follow-up), so resetting the ghosts is
+-- what actually breaks up the corner-mob.
 local function reset_actors()
+    lives = lives - 1
+    if lives <= 0 then lives = START_LIVES end
+    mana.set(pac, "lives", lives)
     local wx, wy = cell_to_world(PAC_START.col, PAC_START.row)
     mana.set_position(pac, wx, wy, 0)
     mana.set(pac, "flash", 0)

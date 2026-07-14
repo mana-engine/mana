@@ -67,6 +67,18 @@ genre-neutral engine features, and this package is now migrated onto them:
   `render.project`/`projectSprites` read it ahead of `Appearance.color`. A single fruit
   pickup (`scenes/maze.zon`, `kind` 5) exists solely to exercise the pac-flash cue.
 
+- **Data-bound score/lives HUD — CLOSED (ADR 0034, issue #133).** `hud.zon` is a
+  `ui.Screen` widget tree (the #132 widget/layout format) — a score label and a lives
+  label, display-only — declared as CONTENT and wired in `game.zon` via `.hud`. Each
+  label `bind`s a data component (ADR 0024): `score` (already tracked by `add_score`) and
+  a new `lives` (declared on the `pac` prototype at 3, decremented by `reset_actors` on a
+  fatal ghost catch — no new `mana` API). The engine fills the `ui.Host` seam from the
+  live world (`render_ui.worldHost`) and composites the HUD over the game frame in both
+  `--play` and the headless `--render-play-frame` (the font glyph atlas is merged into the
+  scene sprite atlas so one bound texture carries sprites *and* glyphs). The HUD reads
+  gameplay state one-way and writes nothing, so it is cosmetic and cannot perturb the
+  state hash.
+
 What was **never** a gap and is unchanged: chase/scatter/frightened mode *timing*
 (`mana.after`/`mana.every` + `mana.set`), per-entity data (`score`, `frightened`, ADR
 0024), and the input→heading path (`on_key`) Snake proved.

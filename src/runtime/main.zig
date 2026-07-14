@@ -260,6 +260,60 @@ fn runRender(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, path: []c
     try out.flush();
 }
 
+/// Bundled HUD render state (issue #133; ADR 0034): a package's parsed `ui.Screen` plus
+/// the font-glyph atlas merged into the scene atlas, so ONE bound texture carries both game
+/// sprites and HUD label glyphs (`gpu.captureFrame`/`renderFrame` bind a single atlas).
+/// Empty (`screen == null`) when the manifest declares no `hud` — the HUD is then a no-op.
+/// Owns the screen and both atlases; `deinit`.
+const HudState = struct {
+    gpa: Allocator,
+    screen: ?engine.ui.Screen = null,
+    font: ?engine.sprite.Atlas = null,
+    merged: ?engine.sprite.Atlas = null,
+
+    /// The atlas BOTH game sprites and HUD glyphs render through: the font-merged atlas
+    /// when a HUD is present, else the untouched scene `scene_atlas`.
+    fn atlas(self: *HudState, scene_atlas: *const engine.sprite.Atlas) *const engine.sprite.Atlas {
+        return if (self.merged) |*m| m else scene_atlas;
+    }
+
+    fn deinit(self: *HudState) void {
+        if (self.merged) |*m| m.deinit();
+        if (self.font) |*f| f.deinit();
+        if (self.screen) |s| engine.ui.free(self.gpa, s);
+    }
+};
+
+/// Load a package's HUD screen (issue #133) and merge the font glyph atlas into
+/// `scene_atlas`, so a single bound texture carries game sprites and label glyphs. Returns
+/// an empty `HudState` when the manifest declares no `hud` (genre-neutral: the engine draws
+/// only what the package declares). `scene_atlas` — and whatever backs its region `ref`s
+/// (the sheet store) — must outlive the returned state, whose merged atlas borrows those
+/// refs. Caller `deinit`s. Errors: file read / `ui.parse` errors, `error.OutOfMemory`.
+fn loadHud(io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest, scene_atlas: *const engine.sprite.Atlas) !HudState {
+    const hud_rel = manifest.hud orelse return .{ .gpa = gpa };
+    const hud_path = try std.fs.path.join(gpa, &.{ pkg, hud_rel });
+    defer gpa.free(hud_path);
+    const src = try Io.Dir.cwd().readFileAllocOptions(io, hud_path, gpa, .unlimited, .of(u8), 0);
+    defer gpa.free(src);
+    const screen = try engine.ui.parse(gpa, src);
+    errdefer engine.ui.free(gpa, screen);
+    var font = try engine.text.buildFontAtlas(gpa);
+    errdefer font.deinit();
+    const merged = try engine.sprite.merge(gpa, scene_atlas, &font);
+    return .{ .gpa = gpa, .screen = screen, .font = font, .merged = merged };
+}
+
+/// Project a loaded `hud` (if any) over the current frame into a `render_ui.DrawList`,
+/// reading live gameplay state one-way through `worldHost` (issue #133). `null` when the
+/// package declares no HUD. The draw list samples `render_atlas` (the font-merged one), so
+/// pass `hud.atlas(&scene_atlas)` as both the sprite atlas and here. Caller owns the result
+/// (`deinit`). Errors: `error.OutOfMemory`.
+fn projectHud(gpa: Allocator, hud: *HudState, world: *engine.World, view: engine.render.View, render_atlas: *const engine.sprite.Atlas) !?engine.render_ui.DrawList {
+    const screen = hud.screen orelse return null;
+    return try engine.render_ui.project(gpa, &screen, engine.render_ui.worldHost(world), view.width, view.height, render_atlas, .{});
+}
+
 /// Capture the `--play` textured-sprite composite to a PNG, headlessly (issue #122). This
 /// is the deterministic, GPU-free analogue of `playLoop`'s render zone: it builds the same
 /// `Sim` as `runOnce`/`playLoop` (standard systems + the #30 input system, so the load path
@@ -303,6 +357,13 @@ fn runRenderPlayFrame(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, 
     var atlas = try engine.sprite.buildAtlas(gpa, &sheets);
     defer atlas.deinit();
 
+    // HUD (issue #133): merge the font glyph atlas into the scene atlas so the single
+    // atlas `captureFrame` binds carries BOTH game sprites and label glyphs. A package
+    // with no `hud` yields an empty state and the scene atlas is used untouched.
+    var hud = try loadHud(io, gpa, pkg, manifest, &atlas);
+    defer hud.deinit();
+    const render_atlas = hud.atlas(&atlas);
+
     var t: u32 = 0;
     while (t < ticks) : (t += 1) {
         try sim.tick();
@@ -313,10 +374,23 @@ fn runRenderPlayFrame(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, 
     const view: engine.render.View = .{ .width = svg_view_size, .height = svg_view_size, .projection = manifest.projection };
     const quads = try engine.render.project(gpa, &sim.world, view, &engine.render.default_palette, &sheets);
     defer gpa.free(quads);
-    const sprites = try engine.render.projectSprites(gpa, &sim.world, view, &sheets, &atlas);
+    const sprites = try engine.render.projectSprites(gpa, &sim.world, view, &sheets, render_atlas);
     defer gpa.free(sprites);
+
+    // Composite the data-bound HUD over the game frame in the SAME capture: project it
+    // (reading live score/lives through worldHost), then concatenate its panel quads and
+    // glyph sprites onto the game's before the single `captureFrame` call.
+    var hud_draw = try projectHud(gpa, &hud, &sim.world, view, render_atlas);
+    defer if (hud_draw) |*d| d.deinit();
+    const hud_rects: []const engine.gpu.Quad = if (hud_draw) |d| d.rects else &.{};
+    const hud_glyphs: []const engine.gpu.SpriteQuad = if (hud_draw) |d| d.glyphs else &.{};
+    const all_quads = try std.mem.concat(gpa, engine.gpu.Quad, &.{ quads, hud_rects });
+    defer gpa.free(all_quads);
+    const all_sprites = try std.mem.concat(gpa, engine.gpu.SpriteQuad, &.{ sprites, hud_glyphs });
+    defer gpa.free(all_sprites);
+
     const clear = [4]f32{ 0.09, 0.10, 0.14, 1.0 };
-    const pixels = try engine.gpu.captureFrame(gpa, view.width, view.height, quads, sprites, atlas.pixels, atlas.width, atlas.height, clear);
+    const pixels = try engine.gpu.captureFrame(gpa, view.width, view.height, all_quads, all_sprites, render_atlas.pixels, render_atlas.width, render_atlas.height, clear);
     defer gpa.free(pixels);
     const bytes = try data.png.encode(gpa, view.width, view.height, pixels);
     defer gpa.free(bytes);
@@ -563,19 +637,28 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     // every entity keeps its flat `Appearance` quad.
     var atlas = try engine.sprite.buildAtlas(gpa, &sheets);
     defer atlas.deinit();
+
+    // HUD (issue #133): merge the font glyph atlas into the scene atlas and upload the
+    // MERGED sheet, so the single sampled texture carries both game sprites and label
+    // glyphs (the render zone appends the HUD draw list to the sprite pass each frame). A
+    // package with no `hud` leaves the scene atlas untouched.
+    var hud = try loadHud(io, gpa, pkg, manifest, &atlas);
+    defer hud.deinit();
+    const render_atlas = hud.atlas(&atlas);
+
     var sprite_pipeline = try dev.createTexturedPipeline(.rgba8_unorm);
     defer sprite_pipeline.deinit(&dev);
     var atlas_tex: ?engine.gpu.Texture = null;
     defer if (atlas_tex) |*t| t.deinit(&dev);
-    if (atlas.width > 0) {
+    if (render_atlas.width > 0) {
         var t = try dev.createTexture(.{
-            .width = atlas.width,
-            .height = atlas.height,
+            .width = render_atlas.width,
+            .height = render_atlas.height,
             .format = .rgba8_unorm,
             .usage = .{ .transfer_dst = true, .sampled = true },
         });
         errdefer t.deinit(&dev);
-        try dev.uploadTexture(&t, atlas.pixels);
+        try dev.uploadTexture(&t, render_atlas.pixels);
         atlas_tex = t;
     }
 
@@ -646,9 +729,19 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
             const quads = try engine.render.project(fa, &sim.world, view, &engine.render.default_palette, &sheets);
             // Textured sprite quads (ADR 0031 §4): the current animation frame's atlas
             // sub-rect, tinted and rotated to face travel; drawn over the flat quads.
-            const sprite_quads = try engine.render.projectSprites(fa, &sim.world, view, &sheets, &atlas);
+            const sprite_quads = try engine.render.projectSprites(fa, &sim.world, view, &sheets, render_atlas);
+            // HUD (issue #133): project the data-bound score/lives over the frame (reading
+            // live state through worldHost) and append its panels + glyphs to the two draw
+            // lists — one bound (merged) atlas, one renderFrame call, no extra pass.
+            // The draw list is allocated from the frame arena (freed at next reset), so it
+            // needs no explicit deinit.
+            const hud_draw = try projectHud(fa, &hud, &sim.world, view, render_atlas);
+            const hud_rects: []const engine.gpu.Quad = if (hud_draw) |d| d.rects else &.{};
+            const hud_glyphs: []const engine.gpu.SpriteQuad = if (hud_draw) |d| d.glyphs else &.{};
+            const all_quads = try std.mem.concat(fa, engine.gpu.Quad, &.{ quads, hud_rects });
+            const all_sprites = try std.mem.concat(fa, engine.gpu.SpriteQuad, &.{ sprite_quads, hud_glyphs });
             const atlas_ptr: ?*engine.gpu.Texture = if (atlas_tex) |*t| t else null;
-            try engine.gpu.renderFrame(fa, &dev, &pipeline, &sprite_pipeline, atlas_ptr, frame.target, quads, sprite_quads, clear);
+            try engine.gpu.renderFrame(fa, &dev, &pipeline, &sprite_pipeline, atlas_ptr, frame.target, all_quads, all_sprites, clear);
         }
         {
             const z = tracy.zone(@src(), "present");

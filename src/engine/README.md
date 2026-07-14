@@ -17,5 +17,11 @@ turns a parsed `ui.Screen` (+ optional `ui.Host`) into flat `gpu.Quad` panels an
 through the same `gpu.captureFrame` sprites use — so a HUD renders headlessly. It lives
 here, not in `ui`, because the glyph atlas/text layout are engine-tier, exactly as
 `render.zig` is (the `ui` module stays a font-free `core + gpu + platform` interpreter).
+`render_ui.worldHost` fills the `ui.Host` seam from a live `World` — a bound label name
+resolves to the same-named data component (ADR 0024) on the first entity carrying it —
+read-only and genre-neutral (the key comes from the game's HUD ZON, never from `src/`).
+Because `gpu.captureFrame`/`renderFrame` bind ONE atlas, the runner uses
+`sprite.merge` to stack the font glyph atlas below the scene sprite atlas, so a single
+bound texture carries both game sprites and HUD label glyphs in one pass (issue #133).
 
 **Imported by:** `runtime`, `tools`.

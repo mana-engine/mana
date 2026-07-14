@@ -313,6 +313,71 @@ pub fn buildAtlas(gpa: Allocator, store: *const SheetStore) Allocator.Error!Atla
     return .{ .gpa = gpa, .width = aw, .height = ah, .pixels = pixels, .regions = regions };
 }
 
+/// Stack atlas `b` directly below atlas `a` into ONE new `Atlas` (issue #133): the merged
+/// image is `max(a.width, b.width)` wide and `a.height + b.height` tall, with `a`'s pixels
+/// at the top-left and `b`'s below them, and a region table carrying BOTH atlases' regions
+/// with their UVs recomputed against the merged dimensions. This is how a HUD composites in
+/// ONE `gpu.captureFrame`/`renderFrame` call: the scene sprite atlas and the font glyph
+/// atlas (`text.buildFontAtlas`) merge, so both game sprites (`ref`s from `a`) and label
+/// glyphs (`text.font_ref`, from `b`) sample the single bound texture the sprite pass binds.
+/// A region's UVs address the exact same source texels after the merge (nearest-neighbour
+/// sampling, `floor(uv*dim)`, is preserved), so a sprite drawn through the merged atlas is
+/// pixel-identical to one drawn through `a` alone. Either atlas may be zero-sized (an empty
+/// scene, or no font): the other is copied through. `Region.ref` keys are BORROWED from `a`
+/// and `b` (never copied), so both source atlases — and whatever backs their `ref`s — must
+/// outlive the merged atlas. Caller owns it (`deinit`). Errors: `error.OutOfMemory`.
+pub fn merge(gpa: Allocator, a: *const Atlas, b: *const Atlas) Allocator.Error!Atlas {
+    const mw = @max(a.width, b.width);
+    const mh = a.height + b.height;
+    if (mw == 0 or mh == 0) return .{ .gpa = gpa, .width = 0, .height = 0, .pixels = try gpa.alloc(u8, 0), .regions = try gpa.alloc(Region, 0) };
+
+    const pixels = try gpa.alloc(u8, @as(usize, mw) * mh * 4);
+    @memset(pixels, 0);
+    errdefer gpa.free(pixels);
+    const regions = try gpa.alloc(Region, a.regions.len + b.regions.len);
+    errdefer gpa.free(regions);
+
+    // Copy each source atlas row-by-row into the merged sheet (widths may differ, so a
+    // per-row copy — never a single memcpy — keeps each source left-aligned).
+    copyRows(pixels, mw, a.pixels, a.width, a.height, 0);
+    copyRows(pixels, mw, b.pixels, b.width, b.height, a.height);
+
+    const mwf: f32 = @floatFromInt(mw);
+    const mhf: f32 = @floatFromInt(mh);
+    for (a.regions, regions[0..a.regions.len]) |src, *dst| dst.* = remapRegion(src, a.width, a.height, 0, mwf, mhf);
+    for (b.regions, regions[a.regions.len..]) |src, *dst| dst.* = remapRegion(src, b.width, b.height, a.height, mwf, mhf);
+
+    return .{ .gpa = gpa, .width = mw, .height = mh, .pixels = pixels, .regions = regions };
+}
+
+/// Copy an `sw`×`sh` RGBA8 source into `dst` (a `dw`-wide RGBA8 sheet) left-aligned at
+/// vertical offset `y_off`, one row at a time (source and destination strides differ).
+fn copyRows(dst: []u8, dw: u32, src: []const u8, sw: u32, sh: u32, y_off: u32) void {
+    var y: u32 = 0;
+    while (y < sh) : (y += 1) {
+        const s = @as(usize, y) * sw * 4;
+        const d = (@as(usize, y_off + y) * dw) * 4;
+        @memcpy(dst[d .. d + @as(usize, sw) * 4], src[s .. s + @as(usize, sw) * 4]);
+    }
+}
+
+/// Remap one `Region` from a source atlas (`sw`×`sh`, placed at vertical offset `y_off` in
+/// the merged sheet) into merged-normalized UVs. The source UVs are recovered to exact pixel
+/// columns/rows (`round(uv*dim)` — the atlas builder emits `px/dim`, so the round is
+/// lossless), shifted down by `y_off` texels, then re-normalized against the merged
+/// `mwf`×`mhf` so a nearest-neighbour sample lands on the same source texel.
+fn remapRegion(src: Region, sw: u32, sh: u32, y_off: u32, mwf: f32, mhf: f32) Region {
+    const swf: f32 = @floatFromInt(sw);
+    const shf: f32 = @floatFromInt(sh);
+    const yo: f32 = @floatFromInt(y_off);
+    return .{
+        .ref = src.ref,
+        .frame = src.frame,
+        .uv_min = .{ @round(src.uv_min[0] * swf) / mwf, (@round(src.uv_min[1] * shf) + yo) / mhf },
+        .uv_max = .{ @round(src.uv_max[0] * swf) / mwf, (@round(src.uv_max[1] * shf) + yo) / mhf },
+    };
+}
+
 // --- Tests ------------------------------------------------------------------------
 
 const testing = std.testing;
@@ -375,6 +440,73 @@ test "sprite: buildAtlas on an empty store yields a zero-sized atlas" {
     defer atlas.deinit();
     try testing.expectEqual(@as(u32, 0), atlas.width);
     try testing.expectEqual(@as(usize, 0), atlas.regions.len);
+}
+
+test "sprite: merge stacks two atlases and both refs resolve to their original texels" {
+    const gpa = testing.allocator;
+    // Atlas A: one 2x2 sheet "a" with a distinct top-left texel.
+    var af: [2 * 2 * 4]u8 = undefined;
+    for (&af, 0..) |*b, i| b.* = @intCast((10 + i) & 0xff);
+    var sa = try storeWith(gpa, "a.msf", .{ .width = 2, .height = 2, .frames = &.{&af}, .clips = &.{} });
+    defer sa.deinit();
+    var atlas_a = try buildAtlas(gpa, &sa);
+    defer atlas_a.deinit();
+
+    // Atlas B: one 2x2 sheet "b" with a different marker texel.
+    var bf: [2 * 2 * 4]u8 = undefined;
+    for (&bf, 0..) |*b, i| b.* = @intCast((100 + i) & 0xff);
+    var sb = try storeWith(gpa, "b.msf", .{ .width = 2, .height = 2, .frames = &.{&bf}, .clips = &.{} });
+    defer sb.deinit();
+    var atlas_b = try buildAtlas(gpa, &sb);
+    defer atlas_b.deinit();
+
+    var m = try merge(gpa, &atlas_a, &atlas_b);
+    defer m.deinit();
+
+    // Merged sheet is A over B: 2 wide, 4 tall, both regions present.
+    try testing.expectEqual(@as(u32, 2), m.width);
+    try testing.expectEqual(@as(u32, 4), m.height);
+    try testing.expectEqual(@as(usize, 2), m.regions.len);
+    try testing.expect(m.uv("a.msf", 0) != null);
+    try testing.expect(m.uv("b.msf", 0) != null);
+
+    // Each ref's UV, sampled nearest-neighbour (floor(uv*dim)), lands on its own texel:
+    // A's first texel is at merged (0,0); B's first texel is at merged (0,2) — byte
+    // offset (2*2)*4 = 16 — proving B was stacked below A and its UVs shifted down.
+    const uva = m.uv("a.msf", 0).?;
+    const ax: u32 = @intFromFloat(@floor(uva.min[0] * @as(f32, @floatFromInt(m.width))));
+    const ay: u32 = @intFromFloat(@floor(uva.min[1] * @as(f32, @floatFromInt(m.height))));
+    try testing.expectEqual(af[0], m.pixels[(@as(usize, ay) * m.width + ax) * 4]);
+
+    const uvb = m.uv("b.msf", 0).?;
+    const bx: u32 = @intFromFloat(@floor(uvb.min[0] * @as(f32, @floatFromInt(m.width))));
+    const by: u32 = @intFromFloat(@floor(uvb.min[1] * @as(f32, @floatFromInt(m.height))));
+    try testing.expectEqual(@as(u32, 2), by); // shifted down by A's height
+    try testing.expectEqual(bf[0], m.pixels[(@as(usize, by) * m.width + bx) * 4]);
+}
+
+test "sprite: merge with an empty atlas copies the other through unchanged" {
+    const gpa = testing.allocator;
+    var f: [2 * 2 * 4]u8 = undefined;
+    for (&f, 0..) |*b, i| b.* = @intCast(i & 0xff);
+    var store = try storeWith(gpa, "s.msf", .{ .width = 2, .height = 2, .frames = &.{&f}, .clips = &.{} });
+    defer store.deinit();
+    var atlas = try buildAtlas(gpa, &store);
+    defer atlas.deinit();
+
+    // An empty font atlas (no glyphs) must not perturb the scene atlas: same size, the
+    // one ref still resolves, its texel unchanged.
+    var empty: Atlas = .{ .gpa = gpa, .width = 0, .height = 0, .pixels = try gpa.alloc(u8, 0), .regions = try gpa.alloc(Region, 0) };
+    defer empty.deinit();
+
+    var m = try merge(gpa, &atlas, &empty);
+    defer m.deinit();
+    try testing.expectEqual(atlas.width, m.width);
+    try testing.expectEqual(atlas.height, m.height);
+    try testing.expectEqual(@as(usize, 1), m.regions.len);
+    const uv = m.uv("s.msf", 0).?;
+    try testing.expectApproxEqAbs(uv.min[0], atlas.uv("s.msf", 0).?.min[0], 1e-6);
+    try testing.expectEqual(f[0], m.pixels[0]);
 }
 
 test "sprite: resolvePath maps a sheet ref to its generated artifact" {

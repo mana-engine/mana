@@ -79,6 +79,11 @@
             .data = .{
                 .{ .name = "kind", .value = 1 },
                 .{ .name = "score", .value = 0 },
+                // Remaining lives, shown by the HUD (issue #133) and decremented by
+                // rules.lua on a fatal ghost catch. Declared here (ADR 0024) so the
+                // column exists — and the HUD reads 3 — from the first tick, before any
+                // `mana.set`.
+                .{ .name = "lives", .value = 3 },
                 .{ .name = "nav_target_col", .value = 0 },
                 .{ .name = "nav_target_row", .value = 0 },
                 .{ .name = "flash", .value = 0 },
