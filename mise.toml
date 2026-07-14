@@ -20,8 +20,16 @@ description = "Compile the engine + runner (native target)."
 run = "zig build"
 
 [tasks.test]
+# `--error-style minimal` (a documented `zig build` flag): the default `verbose`
+# style prints a `failed command: ... --listen=-` line for the test-runner step
+# whenever it wrote ANY stderr (e.g. an in-test `std.log.warn`) — even on a
+# fully green run (issue #169). `minimal` drops only that command-line-echo
+# tail; the actual stderr content, error bundles, per-test fail counts, and the
+# non-zero exit code on a real failure are all printed unconditionally and
+# stay exactly as loud (verified: a deliberately broken test still exits 2
+# with the full assertion message and a "Build Summary: ... 1 failed" line).
 description = "Run all unit + integration tests."
-run = "zig build test"
+run = "zig build test --error-style minimal"
 
 [tasks.test-lua]
 # Without `-Denable-lua`, `script_api_version == 0` and every test in
@@ -32,7 +40,7 @@ run = "zig build test"
 # backend compiled in, so the staircase (and the Lua-gated `script`/`lua.zig`
 # backend tests) genuinely execute instead of silently no-opping behind a green gate.
 description = "Run all tests with the Lua scripting backend enabled — executes the pacman/snake acceptance staircase instead of skipping it."
-run = "zig build -Denable-lua test"
+run = "zig build -Denable-lua test --error-style minimal"
 
 [tasks.fmt]
 # `--exclude zig-pkg`: fetched dependency sources (e.g. ziglua's vendored Lua
