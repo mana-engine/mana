@@ -1,6 +1,6 @@
 # 0031. Sprite rendering: a cosmetic sprite/animation component, a dependency-free sheet asset, and a gpu texture path
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-13
 - Amended: 2026-07-14 (Issue #122 — the null backend is now a real CPU texel sampler, addendum below)
 
