@@ -19,6 +19,16 @@
             .name = "head",
             .appearance = .{ .color = .{ 0.2, 0.75, 0.35 }, .size = 0.85, .shape = .circle },
             .sprite = .{ .sheet = "sprites/head.msf", .clip = "idle", .loop = .loop },
+            // `score` and `length` are data components (ADR 0024) so the engine (the HUD,
+            // issue #177) can read them without asking the script. Declared here so the
+            // columns exist — and the HUD reads 0/1 — from the first tick, before any
+            // `mana.set`. Only `head` carries them: `rules.lua` respawns a NEW head handle
+            // on every `reset()`, so there is always exactly one live entity with these
+            // columns (the ADR 0034 §5 "first entity" host read never has to disambiguate).
+            .data = .{
+                .{ .name = "score", .value = 0 },
+                .{ .name = "length", .value = 1 },
+            },
         },
         // One body cell of the snake. Spawned per growth step at the tail cell.
         .{

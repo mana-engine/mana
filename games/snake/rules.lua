@@ -9,12 +9,27 @@
 local HALF = 8
 local MIN, MAX = -HALF, HALF - 1 -- play-field cells [-8, 7] in x and y, around origin
 local STEP = 0.15                -- seconds per move (grid tick)
+local FOOD_SCORE = 10            -- points per food eaten (HUD, issue #177)
 
 local dir = { x = 1, y = 0 }     -- current heading (grid delta)
 local pending = { x = 1, y = 0 } -- next heading, applied at the move boundary
 local body = {}                  -- ordered cells, head first: { {x,y,handle}, ... }
 local food = { x = 0, y = 0, handle = nil }
 local rng = 1 -- content-side deterministic PRNG for food, until #47 wires a seeded Sim RNG
+local score = 0 -- mirrored to the head's `score` data component so the HUD (#177) can read it
+
+-- Mirror score/length onto the head's data components (ADR 0024) so the engine (the HUD,
+-- issue #177) can read live gameplay state without the script. `#body` IS the snake's
+-- length — no separate counter to keep in sync. Only called from `step`'s eat branch,
+-- never right after a spawn: a freshly spawned head's `score`/`length` columns are not
+-- registered until the engine flushes its spawn command (after this tick's script calls
+-- return), so `mana.set` on a just-spawned handle would hit the "undeclared component"
+-- path. `reset` relies on the "head" prototype's own defaults (score=0, length=1,
+-- prototypes.zon) instead of writing here.
+local function sync_hud()
+    mana.set(body[1].handle, "score", score)
+    mana.set(body[1].handle, "length", #body)
+end
 
 -- The head's sprite is DIRECTIONAL (ADR 0033, issue #107: `sprites/head.zon`, right/up/
 -- down authored, left mirrored). The engine picks a facing from the entity's latched
@@ -92,7 +107,9 @@ local function reset()
     body = {}
     dir = { x = 1, y = 0 }
     pending = { x = 1, y = 0 }
-    grow_at(0, 0, "head") -- head is body[1], at the world origin (screen centre)
+    score = 0
+    grow_at(0, 0, "head") -- head is body[1], at the world origin (screen centre); its
+                          -- prototype defaults already give the HUD score=0/length=1
     face(body[1].handle, dir.x, dir.y)
     place_food()
 end
@@ -121,6 +138,8 @@ local function step()
 
     if eating then
         grow_at(vacated_x, vacated_y) -- extend into the cell the tail just left
+        score = score + FOOD_SCORE
+        sync_hud()
         place_food()
     end
 end
