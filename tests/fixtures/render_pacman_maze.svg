@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
 <rect x="0.00" y="0.00" width="512.00" height="512.00" fill="rgb(23,26,36)"/>
+<ellipse cx="112.00" cy="352.00" rx="6.00" ry="6.00" fill="rgb(230,77,38)"/>
 <ellipse cx="64.00" cy="352.00" rx="4.80" ry="4.80" fill="rgb(242,230,179)"/>
 <ellipse cx="448.00" cy="352.00" rx="4.80" ry="4.80" fill="rgb(242,230,179)"/>
 <ellipse cx="88.00" cy="160.00" rx="2.16" ry="2.16" fill="rgb(217,204,166)"/>

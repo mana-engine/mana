@@ -1,7 +1,8 @@
 // Entity prototypes (ADR 0016) mana.spawn instantiates. Genre lives here in content,
 // never in src/. Positions come from the spawn call; templates carry the non-spatial
 // component defaults: a collider (ADR 0025), a nav agent + its target cell (ADR 0027),
-// named scalar data components (ADR 0024), and a render appearance (ADR 0030).
+// named scalar data components (ADR 0024), a render appearance (ADR 0030), and a tint +
+// blink cue (issue #128, ADR 0033 phase 2).
 //
 // Only pac and ghosts are script-spawned — they need a Lua handle so rules.lua can
 // select their nav targets and identify them in collisions. The maze walls come from
@@ -45,7 +46,7 @@
         .{
             .name = "pac",
             .velocity = .{ .v = .{ .x = 0, .y = 0, .z = 0 } },
-            .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 1, .mask = 14 } },
+            .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 1, .mask = 46 } },
             .nav_agent = .{ .speed = 8 },
             .appearance = .{ .color = .{ 1.0, 0.9, 0.2 }, .size = 0.7, .shape = .circle },
             // Animated chomp sprite (ADR 0031). The sheet is a DERIVED artifact built by
@@ -56,24 +57,51 @@
             // until the Vulkan textured pipeline lands, the GPU path); its color is the
             // sprite tint.
             .sprite = .{ .sheet = "sprites/pac.msf", .clip = "chomp", .loop = .loop },
+            // Fruit-eaten flash (issue #128): rules.lua sets the existing `flash` data
+            // component to 1 on an `on_collision_begin` fruit pickup and back to 0 a
+            // short beat later (`mana.after`, no new API). Pac draws through the
+            // TEXTURED sprite path (ADR 0031 §4), whose tint MULTIPLIES the sampled
+            // texel (`gpu.SpriteQuad.tint`) rather than replacing it — so state 1 dims
+            // pac to a near-black silhouette and back to full brightness at 12 Hz (a
+            // strobe that reads as a flash on ANY base sprite color, unlike a bright
+            // tint which a multiply can only ever darken, never brighten, a texel
+            // beyond its own value).
+            .tint_cue = .{
+                .selector = "flash",
+                .states = .{
+                    .{ .color = .{ 0.15, 0.15, 0.15 }, .blink_color = .{ 1.0, 1.0, 1.0 }, .blink_hz = 12 },
+                },
+            },
             .data = .{
                 .{ .name = "kind", .value = 1 },
                 .{ .name = "score", .value = 0 },
                 .{ .name = "nav_target_col", .value = 0 },
                 .{ .name = "nav_target_row", .value = 0 },
+                .{ .name = "flash", .value = 0 },
             },
         },
 
-        // Ghosts. `frightened` (0/1) is script-driven per-entity mode; a future render
-        // pass could re-tint a frightened ghost blue by writing its Appearance through a
-        // native system (not today — a script cannot touch Appearance, ADR 0030 keeps
-        // the mana surface unchanged). Identical except name/color.
+        // Ghosts. `frightened` is script-driven per-entity mode, WIDENED (issue #128)
+        // from a 0/1 flag to a 0/1/2 tri-state: 0 normal, 1 frightened (solid blue), 2
+        // frightened-ending (blinking blue/white) — `begin_fright` schedules the 1→2
+        // flip a few seconds before the window closes. The SAME data component drives
+        // both `retarget`'s scatter-while-frightened logic and the `tint_cue` below, so
+        // no new per-entity state and no new `mana` API: a native render-time system
+        // (`tint.advance`) reads the value a script already writes and re-tints the
+        // ghost through its existing `Appearance.color` fallback.
         .{
             .name = "ghost_red",
             .velocity = .{ .v = .{ .x = 0, .y = 0, .z = 0 } },
             .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
             .nav_agent = .{ .speed = 5 },
             .appearance = .{ .color = .{ 0.9, 0.2, 0.2 }, .size = 0.7, .shape = .circle },
+            .tint_cue = .{
+                .selector = "frightened",
+                .states = .{
+                    .{ .color = .{ 0.2, 0.3, 1.0 } },
+                    .{ .color = .{ 0.2, 0.3, 1.0 }, .blink_color = .{ 0.9, 0.9, 0.95 }, .blink_hz = 4 },
+                },
+            },
             .data = .{
                 .{ .name = "kind", .value = 2 },
                 .{ .name = "frightened", .value = 0 },
@@ -87,6 +115,13 @@
             .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
             .nav_agent = .{ .speed = 5 },
             .appearance = .{ .color = .{ 0.95, 0.6, 0.8 }, .size = 0.7, .shape = .circle },
+            .tint_cue = .{
+                .selector = "frightened",
+                .states = .{
+                    .{ .color = .{ 0.2, 0.3, 1.0 } },
+                    .{ .color = .{ 0.2, 0.3, 1.0 }, .blink_color = .{ 0.9, 0.9, 0.95 }, .blink_hz = 4 },
+                },
+            },
             .data = .{
                 .{ .name = "kind", .value = 2 },
                 .{ .name = "frightened", .value = 0 },
@@ -100,6 +135,13 @@
             .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
             .nav_agent = .{ .speed = 5 },
             .appearance = .{ .color = .{ 0.3, 0.85, 0.9 }, .size = 0.7, .shape = .circle },
+            .tint_cue = .{
+                .selector = "frightened",
+                .states = .{
+                    .{ .color = .{ 0.2, 0.3, 1.0 } },
+                    .{ .color = .{ 0.2, 0.3, 1.0 }, .blink_color = .{ 0.9, 0.9, 0.95 }, .blink_hz = 4 },
+                },
+            },
             .data = .{
                 .{ .name = "kind", .value = 2 },
                 .{ .name = "frightened", .value = 0 },
@@ -113,6 +155,13 @@
             .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 2, .mask = 1 } },
             .nav_agent = .{ .speed = 5 },
             .appearance = .{ .color = .{ 0.95, 0.65, 0.2 }, .size = 0.7, .shape = .circle },
+            .tint_cue = .{
+                .selector = "frightened",
+                .states = .{
+                    .{ .color = .{ 0.2, 0.3, 1.0 } },
+                    .{ .color = .{ 0.2, 0.3, 1.0 }, .blink_color = .{ 0.9, 0.9, 0.95 }, .blink_hz = 4 },
+                },
+            },
             .data = .{
                 .{ .name = "kind", .value = 2 },
                 .{ .name = "frightened", .value = 0 },

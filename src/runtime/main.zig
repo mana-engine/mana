@@ -307,6 +307,7 @@ fn runRenderPlayFrame(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, 
     while (t < ticks) : (t += 1) {
         try sim.tick();
         engine.sprite.advance(&sim.world, &sheets, core.time.default_dt);
+        engine.tint.advance(&sim.world, core.time.default_dt);
     }
 
     const view: engine.render.View = .{ .width = svg_view_size, .height = svg_view_size, .projection = manifest.projection };
@@ -620,6 +621,8 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
         // Cosmetic sprite animation advances by WALL-CLOCK elapsed time, never a sim
         // tick, so it stays out of `stateHash` (ADR 0031 §1; issue #113 item 3).
         engine.sprite.advance(&sim.world, &sheets, elapsed_s);
+        // Cosmetic tint/blink cue advance (issue #128), same wall-clock discipline.
+        engine.tint.advance(&sim.world, elapsed_s);
 
         // Plots (ADR 0023): live app-state time series. fps guards a zero-length frame;
         // tick_rate is steps advanced this frame; entities is the live world count.

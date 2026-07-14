@@ -12,20 +12,21 @@
 //      below and pac/ghosts (now four, Refs #62) are spawned by rules.lua at the
 //      'P'/'g' cells.
 //
-//   2. `.entities` — the collidable pickups (dots, pellets) as ADR 0025 colliders with
-//      a `kind` data tag (ADR 0024). They are NOT tilemap cells on purpose: a tilemap
-//      cell with a collider would read as a nav *wall*, so a floor full of dots would
-//      wall the maze off. As plain entities their colliders drive pac-eats-dot through
-//      `on_collision_begin` (native collision), while nav still paths over the
-//      '#'-only tilemap freely.
+//   2. `.entities` — the collidable pickups (dots, pellets, a fruit) as ADR 0025
+//      colliders with a `kind` data tag (ADR 0024). They are NOT tilemap cells on
+//      purpose: a tilemap cell with a collider would read as a nav *wall*, so a floor
+//      full of dots would wall the maze off. As plain entities their colliders drive
+//      pac-eats-dot (and pac-eats-fruit, issue #128) through `on_collision_begin`
+//      (native collision), while nav still paths over the '#'-only tilemap freely.
 //
 // Grid frame: cell_size 1, origin (-9,-5,0) → a 19x11 grid centred on the world origin.
 // Cell (col,row) → world (col-9, row-5, 0). rules.lua uses the same frame to place pac/
 // ghosts and to convert positions back to cells for ghost target selection.
 //
 // Layers (physics.Layers, bidirectional mask): wall=16/mask 0 (collides with nothing —
-// nav does the blocking), pac=1, ghost=2, dot=4, pellet=8; pickups & ghosts mask pac
-// (1) only, so the sole collision events are pac↔dot, pac↔pellet, pac↔ghost.
+// nav does the blocking), pac=1, ghost=2, dot=4, pellet=8, fruit=32; pickups & ghosts
+// mask pac (1) only, so the sole collision events are pac↔dot, pac↔pellet, pac↔fruit,
+// pac↔ghost.
 //
 // Appearance (ADR 0030): walls are a solid blue filling their cell; dots are small and
 // pale (barely more than a speck); pellets are a bigger pale dot, so the two pickups
@@ -55,10 +56,17 @@
             "###################",
         },
     },
-    // Pickups. kind: dot=3, pellet=4 (pac=1, ghost=2 live on the prototypes). radius 0.4
-    // so two adjacent-cell colliders (centres 1 apart) never overlap — only a piece
-    // sharing a pickup's cell fires a collision.
+    // Pickups. kind: dot=3, pellet=4, fruit=5 (pac=1, ghost=2 live on the prototypes).
+    // radius 0.4 so two adjacent-cell colliders (centres 1 apart) never overlap — only
+    // a piece sharing a pickup's cell fires a collision.
     .entities = .{
+        // A single fruit (issue #128 proof): a bonus pickup with no gameplay effect
+        // beyond score — pac's `tint_cue` flashes on eating it (rules.lua). Placed on
+        // pac's default leftward path (row 9, col 3 — an empty floor cell, no dot/
+        // pellet there already) so it is reachable within a handful of ticks for a
+        // headless `--render-play-frame` capture. Layer 32 (a fresh bit) masks pac (1)
+        // only, same convention as dot/pellet.
+        .{ .name = "fruit", .transform = .{ .pos = .{ .x = -6, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 32, .mask = 1 } }, .appearance = .{ .color = .{ 0.9, 0.3, 0.15 }, .size = 0.5, .shape = .circle }, .data = .{.{ .name = "kind", .value = 5 }} },
         // Power pellets ('o' cells, row 9 cols 1 & 17).
         .{ .name = "pellet", .transform = .{ .pos = .{ .x = -8, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 8, .mask = 1 } }, .appearance = .{ .color = .{ 0.95, 0.9, 0.7 }, .size = 0.4, .shape = .circle }, .data = .{.{ .name = "kind", .value = 4 }} },
         .{ .name = "pellet", .transform = .{ .pos = .{ .x = 8, .y = 4, .z = 0 } }, .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 8, .mask = 1 } }, .appearance = .{ .color = .{ 0.95, 0.9, 0.7 }, .size = 0.4, .shape = .circle }, .data = .{.{ .name = "kind", .value = 4 }} },

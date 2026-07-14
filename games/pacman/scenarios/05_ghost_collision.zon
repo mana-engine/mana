@@ -1,16 +1,18 @@
 // Pac-Man staircase, step 5/5: an un-frightened ghost catching pac resets it to its
 // start cell (rules.lua `reset_actors`), via the same native `on_collision_begin` path
 // as the dot pickup (ADR 0025), classified by the `kind` data tag. With no input, pac
-// runs its default leftward path, eats the dot and the power pellet in its way
-// (score 60 by tick 65; see 06_frightened_catch.zon), parks flush at its clamped target
-// cell (world (-8,4) — since #126 nav stops grid-locked and flush, not short), and Inky
-// (index 3) reaches it along row 9 — the first catch, deterministically, at tick 453
-// (the #126 axis-aligned/flush steering re-timed every ghost's path, so the earlier
-// tick-514 Blinky catch is now an Inky catch at 453). A reset teleports pac AND returns
-// every ghost to its pen (rules.lua `reset_actors`, so the pack cannot stay piled on
-// pac's death cell); it does not despawn anything (120 entities throughout — four ghosts
-// now — same as right after the pellet: see 04_eat.zon's dot count plus the eaten
-// pellet). Every ghost is back on its pen row: Blinky's home cell (8,5)→world (-1,0) is
+// runs its default leftward path, eats the dot, the fruit (issue #128), and the power
+// pellet in its way (score 160 by tick 65; see 06_frightened_catch.zon), parks flush at
+// its clamped target cell (world (-8,4) — since #126 nav stops grid-locked and flush,
+// not short), and Inky (index 3) reaches it along row 9 — the first catch,
+// deterministically, at tick 453 (the #126 axis-aligned/flush steering re-timed every
+// ghost's path, so the earlier tick-514 Blinky catch is now an Inky catch at 453). A
+// reset teleports pac AND returns every ghost to its pen (rules.lua `reset_actors`, so
+// the pack cannot stay piled on pac's death cell); it does not despawn anything (120
+// entities throughout — four ghosts now, and the fruit already eaten by tick 65 nets
+// back to the same total — same as right after the pellet: see 04_eat.zon's dot count
+// plus the eaten pellet). Every ghost is back on its pen row: Blinky's home cell
+// (8,5)→world (-1,0) is
 // the one this checks, occupied on reset regardless of which ghost made the catch.
 .{
     .steps = 453,

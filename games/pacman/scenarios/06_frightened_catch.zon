@@ -1,7 +1,8 @@
 // Pac-Man staircase, step 6: power pellet -> frightened -> catch -> sent home (Refs
-// #62). With no input pac's default leftward march (see 04_eat.zon) crosses the dot
-// then the power pellet in its path, eating both — `begin_fright` flags every ghost
-// `frightened` (ADR 0024) and pac's score reaches 60 (10 + 50), at tick 65. Ghosts then
+// #62). With no input pac's default leftward march (see 04_eat.zon) crosses the dot,
+// the fruit (issue #128, world (-6,4), no gameplay effect beyond +100 score), then the
+// power pellet in its path, eating all three — `begin_fright` flags every ghost
+// `frightened` (ADR 0024) and pac's score reaches 160 (10 + 100 + 50), at tick 65. Ghosts then
 // flee to their own scatter corners (`retarget`'s frightened branch) rather than
 // chasing pac. Inky's scatter corner (1,9) happens to be the cell pac parks at (its own
 // clamped default target — see 05_ghost_collision.zon), so with zero input Inky's flight
@@ -26,9 +27,9 @@
             .check = .{ .data_count = .{ .name = "frightened", .value = 1, .bound = .{ .min = 4, .max = 4 } } },
         },
         .{
-            .label = "frightened: the dot + power pellet raise pac's score to 60",
+            .label = "frightened: the dot + fruit + power pellet raise pac's score to 160",
             .at_tick = 65,
-            .check = .{ .data_at = .{ .pos = .{ .x = -7.4, .y = 4, .eps = 0.02 }, .name = "score", .value = 60 } },
+            .check = .{ .data_at = .{ .pos = .{ .x = -7.4, .y = 4, .eps = 0.02 }, .name = "score", .value = 160 } },
         },
         .{
             .label = "frightened catch: pac reaching a frightened ghost sends it home, not a kill (120 entities, none despawned)",

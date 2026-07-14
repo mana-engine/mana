@@ -167,7 +167,11 @@ pub fn project(gpa: Allocator, world: *World, view: View, palette: []const [3]f3
         }
         const p = projectPoint(view.projection, t.pos, origin);
         const appearance = world.appearances.get(entity_index);
-        const color = if (appearance) |a| a.color else palette[entity_index % palette.len];
+        // A `TintCue`'s resolved cursor color (issue #128) overrides `Appearance.color`/
+        // the palette fallback when present; `null` (no active cue state) falls through
+        // to the pre-existing behavior unchanged.
+        const tint_override = if (world.tint_cursors.get(entity_index)) |tc| tc.color else null;
+        const color = tint_override orelse (if (appearance) |a| a.color else palette[entity_index % palette.len]);
         const half_px = if (appearance) |a| (a.size / 2) * pxPerWorldUnit(view.projection) else view.quad_half_px;
         const shape = if (appearance) |a| a.shape else .rect;
         try entries.append(gpa, .{
@@ -210,7 +214,8 @@ fn lessThanSpriteDepth(_: void, a: SpriteDepthEntry, b: SpriteDepthEntry) bool {
 /// index it by the clip cursor → a sheet frame index — look that frame's UV sub-rect up in
 /// `atlas`, and place the quad at the entity's projected screen footprint (same centre/
 /// half-size math as `project`, `Appearance`-aware). The quad's `tint` is the entity's
-/// `Appearance.color` (white if none); an inferred (mirrored) facing X-flips the frame's UV
+/// resolved `TintCue` cursor color (issue #128) when active, else `Appearance.color`
+/// (white if neither); an inferred (mirrored) facing X-flips the frame's UV
 /// (a CPU-side U swap, no shader change). Sprite quads are axis-aligned — facing is a frame
 /// choice, not a rotation (ADR 0033 retired the wedge-rotation hack). Results are painter-
 /// sorted far-to-near like `project`. An entity whose sheet is unloaded, or whose current
@@ -262,7 +267,11 @@ pub fn projectSprites(
         const p = projectPoint(view.projection, t.pos, origin);
         const appearance = world.appearances.get(entity_index);
         const half_px = if (appearance) |a| (a.size / 2) * pxPerWorldUnit(view.projection) else view.quad_half_px;
-        const tint = if (appearance) |a| a.color else [3]f32{ 1, 1, 1 };
+        // A `TintCue`'s resolved cursor color (issue #128) overrides `Appearance.color`/
+        // white when present — the same precedence `project` applies to the flat-quad
+        // path, so a sprited entity's frightened-blue/blink/flash cue works identically.
+        const tint_override = if (world.tint_cursors.get(entity_index)) |tc| tc.color else null;
+        const tint = tint_override orelse (if (appearance) |a| a.color else [3]f32{ 1, 1, 1 });
 
         // Mirror an inferred facing by swapping the frame's U endpoints: the vertex builder
         // interpolates U linearly across the quad, so the sampled frame is X-flipped with

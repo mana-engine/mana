@@ -42,6 +42,10 @@ pub const EntityDef = struct {
     /// this entity. Loading one also attaches a default animation cursor (via
     /// `World.setSprite`). Absent ⇒ the entity is not sprited.
     sprite: ?components.Sprite = null,
+    /// A tint + blink cue (issue #128): named override states a script selects via an
+    /// existing ADR 0024 data component. Loading one also attaches a default cursor
+    /// (via `World.setTintCue`). Absent ⇒ the entity has no tint override.
+    tint_cue: ?components.TintCue = null,
 };
 
 /// A named collection of entity definitions — the unit a runtime loads.
@@ -80,6 +84,7 @@ pub fn load(scene: Scene, world: *World) World.Error!void {
         if (def.nav_agent) |na| try world.setNavAgent(e, na);
         if (def.appearance) |a| try world.setAppearance(e, a);
         if (def.sprite) |s| try world.setSprite(e, s);
+        if (def.tint_cue) |tc| try world.setTintCue(e, tc);
         for (def.data) |nv| try world.setDataByName(e, nv.name, nv.value);
     }
     if (scene.tilemap) |tm| try tilemap.materialize(tm, world);

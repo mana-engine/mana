@@ -31,11 +31,18 @@ local function clampi(v, lo, hi)
 end
 
 -- Contact classification by data tag (kept in sync with prototypes.zon / maze.zon).
-local KIND_PAC, KIND_GHOST, KIND_DOT, KIND_PELLET = 1, 2, 3, 4
+local KIND_PAC, KIND_GHOST, KIND_DOT, KIND_PELLET, KIND_FRUIT = 1, 2, 3, 4, 5
 
 local RETARGET = 0.1 -- seconds between target-selection passes (finer than a cell cross)
 local MODE_SECS = 7.0 -- seconds between chase/scatter flips
 local FRIGHT = 6.0    -- seconds a power pellet keeps ghosts frightened
+-- Issue #128 (tint/blink cues, subsumes #106's frightened-blue): `frightened` widens
+-- from a 0/1 flag to 0/1/2 — the ghost `tint_cue` (prototypes.zon) reads the SAME data
+-- component `retarget` already checks, so no new per-entity state and no new `mana`
+-- API. BLINK_LEAD is how long before the window closes the ghosts flip 1 -> 2 (solid
+-- blue -> blinking blue/white), the classic "frightened is about to end" warning.
+local BLINK_LEAD = 2.0
+local FLASH_SECS = 0.4 -- how long pac's fruit-eaten tint cue (`flash`) holds before reverting
 
 -- Start cells and per-ghost scatter corners (walkable floor in the maze) — the four
 -- interior corners of the playable grid (cols/rows [1, W-2]/[1, H-2]).
@@ -154,10 +161,19 @@ local function add_score(n)
 end
 
 -- Open the frightened window on eating a power pellet: flag every ghost and schedule the
--- window's close (ADR 0019 timer). Mode *timing* was never an engine gap.
+-- window's close (ADR 0019 timer). Mode *timing* was never an engine gap. Two timers:
+-- BLINK_LEAD seconds before the close, flip every STILL-frightened ghost from 1 (solid
+-- blue) to 2 (blinking blue/white, issue #128) — the `if == 1` guard means a ghost
+-- already caught and sent home (its flag cleared to 0 by `send_home`) is left alone, not
+-- resurrected into the blink state.
 local function begin_fright()
     frightened = true
     for _, g in ipairs(ghosts) do mana.set(g.handle, "frightened", 1) end
+    mana.after(FRIGHT - BLINK_LEAD, function()
+        for _, g in ipairs(ghosts) do
+            if mana.get(g.handle, "frightened") == 1 then mana.set(g.handle, "frightened", 2) end
+        end
+    end)
     mana.after(FRIGHT, function()
         frightened = false
         for _, g in ipairs(ghosts) do mana.set(g.handle, "frightened", 0) end
@@ -185,6 +201,7 @@ end
 local function reset_actors()
     local wx, wy = cell_to_world(PAC_START.col, PAC_START.row)
     mana.set_position(pac, wx, wy, 0)
+    mana.set(pac, "flash", 0)
     pac_dir = { dc = -1, dr = 0 }
     for _, g in ipairs(ghosts) do
         local gx, gy = cell_to_world(g.home[1], g.home[2])
@@ -230,6 +247,14 @@ return {
             mana.despawn(other)
             add_score(50)
             begin_fright()
+        elseif other_kind == KIND_FRUIT then
+            -- A player-facing cue with no gameplay effect beyond score (issue #128):
+            -- flash pac's tint cue on, then off a beat later (ADR 0019 timer, no new
+            -- `mana` API) — the same `flash` data component `pac`'s `tint_cue` reads.
+            mana.despawn(other)
+            add_score(100)
+            mana.set(pac, "flash", 1)
+            mana.after(FLASH_SECS, function() mana.set(pac, "flash", 0) end)
         elseif other_kind == KIND_GHOST then
             if frightened then send_home(other) else reset_actors() end
         end
