@@ -19,6 +19,8 @@ const prototype = @import("prototype.zig");
 const timer = @import("timer.zig");
 const World = @import("world.zig").World;
 const Tilemap = @import("tilemap.zig").Tilemap;
+const action_map = @import("action_map.zig");
+const ActionMap = action_map.ActionMap;
 const platform = @import("platform");
 
 const Entity = ecs.Entity;
@@ -49,6 +51,11 @@ pub const DispatchCtx = struct {
     /// / ADR 0040 §2) can poll the same held-key set native systems already read via
     /// `Context.input`. Mirrors `Sim.input`; hash-excluded like all input (ADR 0009).
     input: platform.InputSnapshot = .{},
+    /// The sim's borrowed action-binding table (ADR 0040 §3), or null if the package
+    /// declares none, so the device-agnostic `mana.action_down`/`action_axis`/
+    /// `action_vector` polls (ADR 0040 §2) can resolve action names against `input`.
+    /// Mirrors `Sim.action_map`; read-only config, never part of the state hash.
+    action_map: ?*const ActionMap = null,
 };
 
 /// The Sim's script runtime: the Lua-backed one under `-Denable-lua`, else a
@@ -61,6 +68,9 @@ pub const Runtime = if (script.lua_enabled) LuaRuntime else NoopRuntime;
 const HandlerKey = enum {
     on_scene_enter,
     on_key,
+    /// Device-agnostic action edges (ADR 0040 §2), diffed and dispatched exactly like
+    /// `on_key` but keyed by content action name; its own circuit-breaker slot (§9).
+    on_action,
     /// UI input events (ADR 0039): each is a distinct circuit-breaker slot (§9), so a
     /// broken `on_click` never disables `on_focus`/`on_activate` and vice versa.
     on_click,
@@ -216,6 +226,7 @@ const LuaRuntime = struct {
         rng: *core.Rng,
         tilemap: ?*const Tilemap,
         input: platform.InputSnapshot,
+        action_map: ?*const ActionMap,
         oom: bool = false,
 
         fn init(dc: DispatchCtx, runtime: *LuaRuntime) HostCtx {
@@ -230,6 +241,7 @@ const LuaRuntime = struct {
                 .rng = dc.rng,
                 .tilemap = dc.tilemap,
                 .input = dc.input,
+                .action_map = dc.action_map,
             };
         }
         fn cast(ctx: *anyopaque) *HostCtx {
@@ -368,6 +380,32 @@ const LuaRuntime = struct {
             const key = std.meta.stringToEnum(platform.Key, name) orelse return false;
             return cast(ctx).input.keys.contains(key);
         }
+        /// `mana.action_down` (ADR 0040 §2): the device-agnostic held poll — resolves
+        /// action `name` against this tick's `InputSnapshot` via the pure resolver
+        /// (`action_map.buttonHeld`, the OR of every bound source). `false` when the sim
+        /// has no action map, or the name is unknown/wrong-typed (the resolver's neutral
+        /// value). Immediate, like `key_down`.
+        fn actionDown(ctx: *anyopaque, name: []const u8) bool {
+            const hc = cast(ctx);
+            const map = hc.action_map orelse return false;
+            return action_map.buttonHeld(map.*, hc.input, name);
+        }
+        /// `mana.action_axis` (ADR 0040 §2): the `axis1d` value poll — dead-zoned and
+        /// clamped engine-side by `action_map.axis1d`. `0` with no action map or an
+        /// unknown/wrong-typed name.
+        fn actionAxis(ctx: *anyopaque, name: []const u8) f32 {
+            const hc = cast(ctx);
+            const map = hc.action_map orelse return 0;
+            return action_map.axis1d(map.*, hc.input, name);
+        }
+        /// `mana.action_vector` (ADR 0040 §2): the `axis2d` value poll — the
+        /// `(x, y)` from `action_map.axis2d` (dead-zoned/clamped engine-side). Zero
+        /// vector with no action map or an unknown/wrong-typed name.
+        fn actionVector(ctx: *anyopaque, name: []const u8) core.Vec2 {
+            const hc = cast(ctx);
+            const map = hc.action_map orelse return core.Vec2.zero;
+            return action_map.axis2d(map.*, hc.input, name);
+        }
         const vtable: script.lua.Host.VTable = .{
             .is_valid = isValid,
             .position = position,
@@ -385,6 +423,9 @@ const LuaRuntime = struct {
             .random_int = randomInt,
             .is_walkable = isWalkable,
             .key_down = keyDown,
+            .action_down = actionDown,
+            .action_axis = actionAxis,
+            .action_vector = actionVector,
         };
     };
 
@@ -478,6 +519,29 @@ const LuaRuntime = struct {
         if (outcome == .errored) try dc.commands.rollback(dc.world, mark);
         if (host_ctx.oom) return error.OutOfMemory;
         self.report(.on_key, s, outcome);
+    }
+
+    /// Dispatch a device-agnostic action edge `on_action(ev = { action, pressed })`
+    /// (ADR 0040 §2) host-live: `action_name` is the content-declared action name whose
+    /// OR-combined held-state transitioned this tick, `pressed` distinguishes the down
+    /// edge from the up edge. Mirrors `dispatchKey` exactly — same host-install, §9
+    /// command-buffer transaction, and circuit-breaker discipline. A no-op if no script
+    /// is loaded, the `on_action` handler is absent, or its breaker tripped.
+    pub fn dispatchAction(self: *LuaRuntime, action_name: []const u8, pressed: bool, dc: DispatchCtx) Allocator.Error!void {
+        const s = if (self.state) |*st| st else return;
+        if (self.isDisabled(.on_action)) return;
+
+        const z = tracy.zone(@src(), "script.on_action");
+        defer z.end();
+        var host_ctx: HostCtx = .init(dc, self);
+        s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
+        defer s.setHost(null);
+
+        const mark = dc.commands.mark();
+        const outcome = s.dispatchAction(action_name, pressed);
+        if (outcome == .errored) try dc.commands.rollback(dc.world, mark);
+        if (host_ctx.oom) return error.OutOfMemory;
+        self.report(.on_action, s, outcome);
     }
 
     /// Dispatch a UI pointer click `on_click(ev = { widget, id, x, y })` (ADR 0039 §1)
@@ -654,6 +718,10 @@ const NoopRuntime = struct {
         _ = key_name;
         _ = pressed;
         _ = dc;
+    }
+
+    pub fn dispatchAction(self: *NoopRuntime, action_name: []const u8, pressed: bool, dc: DispatchCtx) Allocator.Error!void {
+        _ = .{ self, action_name, pressed, dc };
     }
 
     pub fn dispatchClick(self: *NoopRuntime, index: u32, generation: u32, id: []const u8, x: f32, y: f32, dc: DispatchCtx) Allocator.Error!void {

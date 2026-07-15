@@ -84,11 +84,17 @@ deferred (see the last bullet below).
   unknown name degrades to `false`) and the authoritative `is_valid` (host when a
   Sim is dispatching, `handle.Registry` fallback otherwise); the deferred mutations
   `set` (named data components, ADR 0024), `set_velocity`, `set_position`, `spawn`,
-  `despawn`; the timers `after`/`every`/`cancel` (ADR 0019). With `get`/`set`/
-  `is_walkable`/`key_down` the ADR 0003 §2 `mana` v1 surface (as amended by ADR
-  0035 and ADR 0021 §5/ADR 0040 §2) is **complete** — `action_down`/`action_axis`/
-  `action_vector`/`on_action` (ADR 0040 §2) are a separate lane, not deferred here;
-  any further surface addition needs its own ADR (ADR 0003 §5), same as this one.
+  `despawn`; the timers `after`/`every`/`cancel` (ADR 0019); and the device-agnostic
+  action polls `action_down`/`action_axis`/`action_vector` (ADR 0040 §2) — each
+  resolves an action *name* against the sim's borrowed `*const ActionMap`
+  (`Sim.action_map`, threaded through `DispatchCtx`/`HostCtx` like `input`/`tilemap`)
+  via the pure resolver (`engine.action_map.buttonHeld`/`axis1d`/`axis2d`), degrading
+  to the neutral value with no map or an unknown/wrong-typed name. With `get`/`set`/
+  `is_walkable`/`key_down` plus those three polls the ADR 0003 §2 `mana` v1 surface (as
+  amended by ADR 0035 and ADR 0040 §2) is **complete**. The matching `on_action` edge
+  *event* is not a `mana` member: `lua.zig`'s `dispatchAction` fires it, driven by the
+  per-tick action diff in `sim.zig` (mirroring the `on_key` snapshot diff, ADR 0040 §2).
+  Any further surface addition needs its own ADR (ADR 0003 §5), same as this one.
   Named data components live in the ECS/World layer
   (`src/engine/data_components.zig`, a registered dense-column store, Option B),
   never in `script`; `get`/`set` reach it through the host seam like every other

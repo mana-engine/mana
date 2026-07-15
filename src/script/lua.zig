@@ -365,6 +365,24 @@ pub const State = struct {
         return self.invokeHandler(1);
     }
 
+    /// Dispatch an action edge `on_action(ev)` (ADR 0040 §2) where `ev = { action,
+    /// pressed }`. `action` is the content-declared action name string — device-agnostic
+    /// (no `platform` type crosses down), mirroring `on_key`'s `pressed`-flagged edge
+    /// shape. `pressed` is `true` on the combined-held down edge, `false` on the up edge.
+    /// No `self` (input is global, like `on_key`/`on_scene_enter`). A missing handler is a
+    /// no-op; a handler error is caught and reported (§9). `action_name` is borrowed for
+    /// the call.
+    pub fn dispatchAction(self: *State, action_name: []const u8, pressed: bool) DispatchOutcome {
+        if (!self.pushHandler("on_action")) return .no_handler;
+        const l = self.lua;
+        l.newTable(); // arg 1: ev (no self — global input)
+        _ = l.pushString(action_name);
+        l.setField(-2, "action");
+        l.pushBoolean(pressed);
+        l.setField(-2, "pressed");
+        return self.invokeHandler(1);
+    }
+
     /// Dispatch a UI pointer click `on_click(ev = { widget, id, x, y })` (ADR 0039 §1)
     /// where `widget` is the opaque widget handle (§2), `id` the hit widget's authored
     /// name (`""` when anonymous), and `x`/`y` the press point in screen pixels. No
