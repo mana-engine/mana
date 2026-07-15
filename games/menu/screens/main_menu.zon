@@ -1,0 +1,19 @@
+// games/menu/screens/main_menu.zon — the front screen (issue #135; ADR 0034/0039):
+// three focusable buttons in a vertical stack, navigable with up/down, activated with
+// enter. `id` is what scripts/rules.lua's on_activate correlates against — content
+// only: src/ui gains no menu-specific concept from this file.
+.{
+    .name = "main-menu",
+    .root = .{
+        .kind = .container,
+        .layout = .flex,
+        .direction = .column,
+        .padding = 40,
+        .gap = 14,
+        .children = .{
+            .{ .kind = .label, .id = "start_button", .focusable = true, .width = 240, .height = 28, .text = "START GAME" },
+            .{ .kind = .label, .id = "settings_button", .focusable = true, .width = 240, .height = 28, .text = "SETTINGS" },
+            .{ .kind = .label, .id = "quit_button", .focusable = true, .width = 240, .height = 28, .text = "QUIT" },
+        },
+    },
+}

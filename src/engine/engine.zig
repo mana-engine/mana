@@ -46,6 +46,11 @@ pub const render_sprite = @import("render_sprite.zig");
 pub const render_svg = @import("render_svg.zig");
 pub const render_ui = @import("render_ui.zig");
 pub const ui_dispatch = @import("ui_dispatch.zig");
+/// The Sim-owned script-dispatch bridge (ADR 0003 §1/§8; ADR 0039). Re-exported so a
+/// caller outside `engine` (e.g. a `tests/` acceptance file driving `ui_dispatch.UiInput`
+/// directly against a real Lua handler table) can name `Runtime`/`DispatchCtx` without
+/// standing up a whole `Sim`. No Lua/handle type crosses this seam either way.
+pub const script_runtime = @import("script_runtime.zig");
 pub const animation = @import("animation.zig");
 pub const sprite = @import("sprite.zig");
 pub const text = @import("text.zig");

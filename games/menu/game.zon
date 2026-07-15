@@ -1,0 +1,10 @@
+.{
+    .name = "menu",
+    .version = "0.0.1",
+    // No gameplay: this package's entire content is the screen pair under `screens/`
+    // (issue #135). The entry scene is a trivial placeholder — `runtime` requires one,
+    // but a front-end screen has no entities.
+    .entry_scene = "scenes/empty.zon",
+    .script = "scripts/rules.lua",
+    .script_api = 1,
+}
