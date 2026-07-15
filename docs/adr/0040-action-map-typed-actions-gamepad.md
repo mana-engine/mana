@@ -1,6 +1,6 @@
 # 0040. Data-driven action-map: typed (device-agnostic) actions + gamepad
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-15
 
 ## Context
@@ -269,6 +269,14 @@ bit-identical hash) covers analog input by construction.
 - **Analog action returns a Lua table `{x, y}`** (issue #191's illustrative shape). Chosen
   the two-return form instead: a per-tick poll returning a fresh table heap-allocates every
   frame (invariant #3), and multiple returns match the established `mana.position` shape.
+- **A flat `keys = .{…}` list for an `axis2d` action** (issue #191's illustrative binding
+  shape). Rejected: a flat key list is ambiguous for a 2-D action — it says *which* keys bind
+  but not which direction each drives, so the engine cannot synthesize a vector from it. The
+  per-direction `keys_2d = .{ .up, .down, .left, .right }` composite (§4) names each direction
+  explicitly, which is what lets held opposites cancel, diagonals normalize to unit length, and
+  a keyboard read through `action_vector` identically to a stick. `axis1d` takes the same shape
+  as a `pos`/`neg` pair (`keys_1d`). The flat list is kept only for `button` actions, where
+  there is no direction to disambiguate.
 - **Redundant `on_key_pressed` / `on_key_released` + a key-repeat event.** Rejected: the
   single `on_key(pressed)` edge already carries both transitions, and repeat/DAS is content
   on edges + timers — this is ADR 0021's decision, restated, not reopened.
