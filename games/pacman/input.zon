@@ -1,0 +1,33 @@
+.{
+    // Data-driven action bindings (ADR 0040 §3), interpreted by the engine's action
+    // resolver — no action name is known to src/ (invariant #6); the namespace is entirely
+    // this file's. `move` is the only control grid Pac-Man needs: one device-agnostic 2-D
+    // heading that arrow keys, WASD, or a gamepad left stick all drive identically.
+    // rules.lua reads it via `mana.action_vector("move")` and thresholds the (possibly
+    // analog/diagonal) vector to the dominant 4-way grid axis IN LUA (ADR 0040 §8) — the
+    // engine never discretizes an analog source into a digital direction (§1's one-way
+    // analog rule: analog stays analog into an analog action, content decides the grid cut).
+    .actions = .{
+        .move = .{
+            .type = .axis2d,
+            // Native analog: the whole left stick, x+y at once. The engine applies the
+            // radial dead-zone below BEFORE the value reaches Lua, so a resting/drifting
+            // stick reads zero and pac holds its current lane (classic hold-until-turn).
+            .pad_stick = .left,
+            // Digital → analog synthesis (ADR 0040 §4): arrow keys AND WASD both drive the
+            // same four directions (each group OR's its member keys), held opposites cancel,
+            // and a diagonal key combo normalizes to unit length. Sign convention is the
+            // engine's (src/engine/input.zig / action_resolve.zig): right +x, left -x,
+            // down +y, up -y — which rules.lua maps straight onto pac's (dc, dr) cell delta.
+            .keys_2d = .{
+                .up = .{ .up, .w },
+                .down = .{ .down, .s },
+                .left = .{ .left, .a },
+                .right = .{ .right, .d },
+            },
+            // Grid game: a modestly wide radial dead-zone so only a deliberate stick push
+            // turns pac (the value is thresholded to a 4-way axis downstream regardless).
+            .deadzone = 0.3,
+        },
+    },
+}
