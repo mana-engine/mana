@@ -19,6 +19,7 @@ const prototype = @import("prototype.zig");
 const timer = @import("timer.zig");
 const World = @import("world.zig").World;
 const Tilemap = @import("tilemap.zig").Tilemap;
+const platform = @import("platform");
 
 const Entity = ecs.Entity;
 const Allocator = std.mem.Allocator;
@@ -44,6 +45,10 @@ pub const DispatchCtx = struct {
     /// `mana.is_walkable` (ADR 0035) can query the same walkability grid the native
     /// `nav` pathfinder paths over. Mirrors `Sim.tilemap`/`Context.tilemap`.
     tilemap: ?*const Tilemap = null,
+    /// This tick's `InputSnapshot` (ADR 0009 §3/§4), so `mana.key_down` (ADR 0021 §5
+    /// / ADR 0040 §2) can poll the same held-key set native systems already read via
+    /// `Context.input`. Mirrors `Sim.input`; hash-excluded like all input (ADR 0009).
+    input: platform.InputSnapshot = .{},
 };
 
 /// The Sim's script runtime: the Lua-backed one under `-Denable-lua`, else a
@@ -210,6 +215,7 @@ const LuaRuntime = struct {
         runtime: *LuaRuntime,
         rng: *core.Rng,
         tilemap: ?*const Tilemap,
+        input: platform.InputSnapshot,
         oom: bool = false,
 
         fn init(dc: DispatchCtx, runtime: *LuaRuntime) HostCtx {
@@ -223,6 +229,7 @@ const LuaRuntime = struct {
                 .runtime = runtime,
                 .rng = dc.rng,
                 .tilemap = dc.tilemap,
+                .input = dc.input,
             };
         }
         fn cast(ctx: *anyopaque) *HostCtx {
@@ -352,6 +359,15 @@ const LuaRuntime = struct {
             const tm = cast(ctx).tilemap orelse return false;
             return tm.isWalkable(col, row);
         }
+        /// `mana.key_down` (ADR 0021 §5 / ADR 0040 §2): an immediate read of this
+        /// tick's `InputSnapshot.keys` — the same held-state set native systems poll
+        /// via `Context.input` (`src/engine/input.zig`). `name` is the `@tagName`
+        /// scheme `on_key` already uses; a name that is not a known `platform.Key`
+        /// (a content typo) resolves to `false` via `stringToEnum`, never an error.
+        fn keyDown(ctx: *anyopaque, name: []const u8) bool {
+            const key = std.meta.stringToEnum(platform.Key, name) orelse return false;
+            return cast(ctx).input.keys.contains(key);
+        }
         const vtable: script.lua.Host.VTable = .{
             .is_valid = isValid,
             .position = position,
@@ -368,6 +384,7 @@ const LuaRuntime = struct {
             .random = random,
             .random_int = randomInt,
             .is_walkable = isWalkable,
+            .key_down = keyDown,
         };
     };
 
