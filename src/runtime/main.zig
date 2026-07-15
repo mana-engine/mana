@@ -855,6 +855,100 @@ fn watchDir(watcher: *data.Watcher, io: Io, gpa: Allocator, pkg: []const u8, sub
     }
 }
 
+const testing = std.testing;
+
+/// `std.testing.tmpDir` always roots its temp dir at `Io.Dir.cwd()/.zig-cache/tmp/<sub>`
+/// (see `std.testing.tmpDir`'s own use of `Io.Dir.cwd()`) — the same base `watchDir`/
+/// `watchFile` hardcode. So a package path built from `tmp.sub_path` resolves correctly
+/// through them without needing to pass a `Io.Dir` parameter through the whole chain.
+fn tmpPkgPath(gpa: Allocator, tmp: *const testing.TmpDir) ![]u8 {
+    return std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+}
+
+/// True if some watched path ends with `suffix` (order-independent — directory
+/// iteration order is not guaranteed).
+fn watchSetHasSuffix(watcher: *const data.Watcher, suffix: []const u8) bool {
+    for (watcher.entries.items) |e| {
+        if (std.mem.endsWith(u8, e.path, suffix)) return true;
+    }
+    return false;
+}
+
+test "watch set: extension filter and missing-dir skip" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    try tmp.dir.createDirPath(io, "scenes");
+    try tmp.dir.writeFile(io, .{ .sub_path = "scenes/a.zon", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "scenes/notes.txt", .data = "ignore me" });
+
+    var watcher = data.Watcher.init(gpa, Io.Dir.cwd());
+    defer watcher.deinit();
+
+    // Only the .zon file matches the extension filter; the .txt file is skipped.
+    try watchDir(&watcher, io, gpa, pkg, "scenes", ".zon");
+    try testing.expectEqual(@as(usize, 1), watcher.watchedCount());
+    try testing.expect(watchSetHasSuffix(&watcher, "scenes/a.zon"));
+    try testing.expect(!watchSetHasSuffix(&watcher, "scenes/notes.txt"));
+
+    // A kind-directory that doesn't exist at all is silently skipped: no error, no
+    // addition to the watch set.
+    try watchDir(&watcher, io, gpa, pkg, "prototypes", ".zon");
+    try testing.expectEqual(@as(usize, 1), watcher.watchedCount());
+}
+
+test "watch set: syncWatchSet globs kind-directories plus manifest and hud" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "game.zon", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "hud.zon", .data = "x" });
+
+    try tmp.dir.createDirPath(io, "scenes");
+    try tmp.dir.writeFile(io, .{ .sub_path = "scenes/a.zon", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "scenes/b.zon", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "scenes/readme.txt", .data = "ignored" });
+
+    try tmp.dir.createDirPath(io, "scripts");
+    try tmp.dir.writeFile(io, .{ .sub_path = "scripts/rules.lua", .data = "x" });
+
+    // No `prototypes/` directory at all — exercises the missing-kind-dir skip inside
+    // `syncWatchSet` itself, not just `watchDir` directly.
+
+    const manifest: Manifest = .{
+        .name = "t",
+        .version = "0",
+        .entry_scene = "scenes/a.zon",
+        .hud = "hud.zon",
+    };
+
+    var watcher = data.Watcher.init(gpa, Io.Dir.cwd());
+    defer watcher.deinit();
+    try syncWatchSet(&watcher, io, gpa, pkg, manifest);
+
+    // game.zon + hud.zon + 2 scenes + 1 script; prototypes/ (missing) contributes 0;
+    // scenes/readme.txt is filtered by extension.
+    try testing.expectEqual(@as(usize, 5), watcher.watchedCount());
+    try testing.expect(watchSetHasSuffix(&watcher, "game.zon"));
+    try testing.expect(watchSetHasSuffix(&watcher, "hud.zon"));
+    try testing.expect(watchSetHasSuffix(&watcher, "scenes/a.zon"));
+    try testing.expect(watchSetHasSuffix(&watcher, "scenes/b.zon"));
+    try testing.expect(watchSetHasSuffix(&watcher, "scripts/rules.lua"));
+    try testing.expect(!watchSetHasSuffix(&watcher, "scenes/readme.txt"));
+
+    // `syncWatchSet` clears before re-adding (last-good re-sync is idempotent).
+    try syncWatchSet(&watcher, io, gpa, pkg, manifest);
+    try testing.expectEqual(@as(usize, 5), watcher.watchedCount());
+}
+
 /// Watch mode: tick, poll the whole package, hot-reload on change (last-good-wins).
 fn runWatch(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     var manifest = try loadManifest(io, gpa, pkg);

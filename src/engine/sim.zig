@@ -270,6 +270,7 @@ pub const Sim = struct {
             .timers = &self.timers,
             .rng = &self.rng,
             .tilemap = self.tilemap,
+            .input = self.input,
         };
         // The dispatch phase is bounded by one Tracy zone: this is the ADR 0003 §6
         // per-frame script-dispatch budget site (the fine per-handler `script.*`
@@ -627,6 +628,30 @@ test "sim: a key press then release dispatches on_key edges with name + flag (re
     try sim.tick(); // no change this tick → no further on_key
     try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("presses").?);
     try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("releases").?);
+}
+
+test "sim: mana.key_down polls this tick's held InputSnapshot, not just the on_key edge (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    var sim = Sim.init(testing.allocator, 1.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = { up_down = 0, left_down = 0, bogus_down = 0 }
+        \\function t.on_key(ev)
+        \\  t.up_down = mana.key_down("up") and 1 or 0
+        \\  t.left_down = mana.key_down("left") and 1 or 0
+        \\  t.bogus_down = mana.key_down("not_a_real_key") and 1 or 0
+        \\end
+        \\return t
+    );
+
+    var held = platform.KeySet.initEmpty();
+    held.insert(.up);
+    sim.setInput(.{ .keys = held });
+    try sim.tick(); // "up" newly held fires on_key; key_down("up") reads this tick's snapshot
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("up_down").?);
+    try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("left_down").?);
+    try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("bogus_down").?);
 }
 
 test "sim: mana.every fires a Lua timer host-live each interval (requires -Denable-lua)" {

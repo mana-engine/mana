@@ -99,6 +99,14 @@ pub const Host = struct {
         /// cell, or when the sim has no tilemap (no live Sim dispatching). Immediate,
         /// like `position`/`now` — this is a read of static level data, never queued.
         is_walkable: *const fn (ctx: *anyopaque, col: i32, row: i32) bool,
+        /// True iff `name` (the same `@tagName` scheme `on_key` uses, e.g. `"up"`,
+        /// `"w"`) is a currently-held key on the sim's current `InputSnapshot`
+        /// (`mana.key_down`, ADR 0021 §5 / ADR 0040 §2) — the raw-device poll that
+        /// coexists with the device-agnostic `action_down`. `false` for a name that
+        /// is not a known `platform.Key` (never an error — a content typo degrades
+        /// gracefully) or when no Sim is dispatching. `name` is borrowed for the call
+        /// only.
+        key_down: *const fn (ctx: *anyopaque, name: []const u8) bool,
     };
 
     /// Thin forwarders so callers read `host.position(h)` rather than threading
@@ -148,6 +156,9 @@ pub const Host = struct {
     pub fn isWalkable(self: Host, col: i32, row: i32) bool {
         return self.vtable.is_walkable(self.ctx, col, row);
     }
+    pub fn keyDown(self: Host, name: []const u8) bool {
+        return self.vtable.key_down(self.ctx, name);
+    }
 };
 
 const testing = @import("std").testing;
@@ -177,6 +188,8 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         walkable: bool = false,
         last_walkable_col: i32 = 0,
         last_walkable_row: i32 = 0,
+        key_held: bool = false,
+        last_key_name: []const u8 = "",
 
         fn isValid(ctx: *anyopaque, handle: u64) bool {
             _ = handle;
@@ -248,6 +261,11 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
             self.last_walkable_row = row;
             return self.walkable;
         }
+        fn keyDown(ctx: *anyopaque, name: []const u8) bool {
+            const self = fromOpaque(ctx);
+            self.last_key_name = name;
+            return self.key_held;
+        }
         fn fromOpaque(ctx: *anyopaque) *@This() {
             return @ptrCast(@alignCast(ctx));
         }
@@ -267,6 +285,7 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
             .random = random,
             .random_int = randomInt,
             .is_walkable = isWalkable,
+            .key_down = keyDown,
         };
     };
 
@@ -305,4 +324,8 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
     try testing.expect(host.isWalkable(2, 5));
     try testing.expectEqual(@as(i32, 2), fake.last_walkable_col);
     try testing.expectEqual(@as(i32, 5), fake.last_walkable_row);
+
+    fake.key_held = true;
+    try testing.expect(host.keyDown("up"));
+    try testing.expectEqualStrings("up", fake.last_key_name);
 }
