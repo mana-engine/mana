@@ -2,9 +2,7 @@
     .name = "sandbox",
     .version = "0.0.1",
     .entry_scene = "scenes/hello.zon",
-    .scenes = .{
-        "scenes/hello.zon",
-    },
+    // Scenes are globbed from `scenes/*.zon` (ADR 0038 §4); only the entry is named.
     // This demo is framed isometrically (ADR 0014). Omit to get top-down orthographic.
     .projection = .{ .isometric = .{ .half_w = 30, .half_h = 15, .z_height = 20 } },
 }

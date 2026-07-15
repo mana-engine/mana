@@ -1,6 +1,6 @@
 # 0038. Game package layout: modular, grouped content over monolithic blobs
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-15
 
 ## Context

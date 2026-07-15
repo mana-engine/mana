@@ -2,11 +2,9 @@
     .name = "snake",
     .version = "0.0.1",
     .entry_scene = "scenes/board.zon",
-    .scenes = .{
-        "scenes/board.zon",
-    },
-    .prototypes = "prototypes.zon",
-    .script = "rules.lua",
+    // No bulk file lists (ADR 0038 §4): prototypes are globbed from `prototypes/*.zon`
+    // and additional scenes from `scenes/*.zon`; only the one entry scene is named.
+    .script = "scripts/rules.lua",
     // Data-bound score/length HUD (ADR 0034; issue #177), composited display-only over
     // the game frame. Content, interpreted by the engine — no GUI code in the package.
     .hud = "hud.zon",

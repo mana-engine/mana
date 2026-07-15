@@ -1,8 +1,9 @@
 //! runtime — the `mana` runner executable. Loads a game content package by path,
 //! parses its `game.zon` manifest and entry scene, and either runs a fixed number
 //! of deterministic steps and prints a state hash (default), or watches the whole
-//! package — the manifest plus every referenced scene — and hot-reloads on change
-//! (`--watch`, ADR 0005). It knows the manifest *format* but never any specific
+//! package — the manifest plus its globbed content directories (ADR 0038) — and
+//! hot-reloads on change (`--watch`, ADR 0005). It knows the manifest *format* and the
+//! package directory conventions but never any specific
 //! game; nothing here references `games/**`.
 //!
 //! Over the ~500-line soft limit by design: this is the single runner entry point,
@@ -190,17 +191,14 @@ fn loadManifest(io: Io, gpa: Allocator, pkg: []const u8) !Manifest {
     return manifest_mod.parse(gpa, src);
 }
 
-/// Load a package's prototype file (ADR 0016) into a parsed `File`, or null if the
-/// manifest declares none. Caller owns the result and must `engine.prototype.free`
-/// it *after* the `Sim` that borrows its prototypes is torn down (the registry
-/// borrows the prototype slice).
-fn loadPrototypes(io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest) !?engine.prototype.File {
-    const rel = manifest.prototypes orelse return null;
-    const path = try std.fs.path.join(gpa, &.{ pkg, rel });
-    defer gpa.free(path);
-    const src = try Io.Dir.cwd().readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0);
-    defer gpa.free(src);
-    return try engine.prototype.parse(gpa, src);
+/// Load and merge the package's `prototypes/` directory (ADR 0016; ADR 0038 §2) into
+/// a `Set`: every `prototypes/*.zon` file, globbed, byte-lexicographically sorted, and
+/// concatenated into one template list (a duplicate name across files is a hard error).
+/// A package with no `prototypes/` directory yields an empty set (`mana.spawn` then
+/// resolves nothing). Caller owns the result and must `Set.deinit` it *after* the `Sim`
+/// that borrows its prototypes is torn down (the registry borrows the merged slice).
+fn loadPrototypes(io: Io, gpa: Allocator, pkg: []const u8) !engine.prototype.Set {
+    return engine.prototype.loadDir(gpa, io, Io.Dir.cwd(), pkg);
 }
 
 /// Load a package's Lua handler script (ADR 0003 §1; issue #51) into `sim`, if the
@@ -338,12 +336,12 @@ fn runRenderPlayFrame(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, 
     const parsed = try engine.scene.parse(gpa, scene_src);
     defer engine.scene.free(gpa, parsed);
 
-    const proto_file = try loadPrototypes(io, gpa, pkg, manifest);
-    defer if (proto_file) |f| engine.prototype.free(gpa, f);
+    var protos = try loadPrototypes(io, gpa, pkg);
+    defer protos.deinit();
 
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
-    if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
+    sim.prototypes = .{ .prototypes = protos.prototypes };
     try engine.scene.load(parsed, &sim.world);
     if (parsed.tilemap) |*tm| sim.tilemap = tm; // see runOnce: parsed outlives sim (LIFO defers)
     try loadPackageScript(io, gpa, pkg, manifest, &sim);
@@ -446,12 +444,12 @@ fn runFilmstrip(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, dir: [
     const parsed = try engine.scene.parse(gpa, scene_src);
     defer engine.scene.free(gpa, parsed);
 
-    const proto_file = try loadPrototypes(io, gpa, pkg, manifest);
-    defer if (proto_file) |f| engine.prototype.free(gpa, f);
+    var protos = try loadPrototypes(io, gpa, pkg);
+    defer protos.deinit();
 
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
-    if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
+    sim.prototypes = .{ .prototypes = protos.prototypes };
     try engine.scene.load(parsed, &sim.world);
     if (parsed.tilemap) |*tm| sim.tilemap = tm; // see runOnce: parsed outlives sim (LIFO defers)
     try loadPackageScript(io, gpa, pkg, manifest, &sim);
@@ -498,12 +496,12 @@ fn runScenario(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, scenari
     const parsed = try engine.scene.parse(gpa, scene_src);
     defer engine.scene.free(gpa, parsed);
 
-    const proto_file = try loadPrototypes(io, gpa, pkg, manifest);
-    defer if (proto_file) |f| engine.prototype.free(gpa, f);
+    var protos = try loadPrototypes(io, gpa, pkg);
+    defer protos.deinit();
 
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
-    if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
+    sim.prototypes = .{ .prototypes = protos.prototypes };
     try engine.scene.load(parsed, &sim.world);
     if (parsed.tilemap) |*tm| sim.tilemap = tm; // see runOnce: parsed outlives sim (LIFO defers)
     try loadPackageScript(io, gpa, pkg, manifest, &sim);
@@ -582,12 +580,12 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
 
     // Prototypes (ADR 0016): parsed before the Sim, freed after it (the registry
     // borrows the slice), so `mana.spawn` can resolve package templates.
-    const proto_file = try loadPrototypes(io, gpa, pkg, manifest);
-    defer if (proto_file) |f| engine.prototype.free(gpa, f);
+    var protos = try loadPrototypes(io, gpa, pkg);
+    defer protos.deinit();
 
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
-    if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
+    sim.prototypes = .{ .prototypes = protos.prototypes };
     try engine.scene.load(parsed, &sim.world);
     // Same tilemap borrow as the one-shot path (see runOnce): `parsed` outlives `sim`
     // (LIFO defers), so nav can path over the scene's grid; null ⇒ nav no-ops.
@@ -603,7 +601,7 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     // `Sprite` components AND `sim.prototypes`. The latter matters here — `enterScene`
     // above only QUEUES `on_scene_enter` to fire on the first `sim.tick()` in the loop
     // below, and it's that scene's Lua handler that spawns sprited entities (e.g. pac
-    // and the ghosts via `mana.spawn` in `games/pacman/rules.lua`), so `sim.world` is
+    // and the ghosts via `mana.spawn` in `games/pacman/scripts/rules.lua`), so `sim.world` is
     // still empty right here. Without the prototype half, the atlas built below would
     // be zero-sized and no sprite would ever render (ADR 0031 §4). Decoded once here;
     // each frame the animation cursor is advanced from wall-clock time below.
@@ -789,12 +787,12 @@ fn runOnce(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
 
     // Prototypes (ADR 0016): parsed before the Sim and freed after it (the registry
     // borrows the slice), so `mana.spawn` can resolve package templates.
-    const proto_file = try loadPrototypes(io, gpa, pkg, manifest);
-    defer if (proto_file) |f| engine.prototype.free(gpa, f);
+    var protos = try loadPrototypes(io, gpa, pkg);
+    defer protos.deinit();
 
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
-    if (proto_file) |f| sim.prototypes = .{ .prototypes = f.prototypes };
+    sim.prototypes = .{ .prototypes = protos.prototypes };
     try engine.scene.load(parsed, &sim.world);
     // Point the sim at the scene's grid level (ADR 0026/0027), if any, so `navSystem`
     // can path over it. `parsed` outlives `sim` — its `defer scene.free` was registered
@@ -813,14 +811,45 @@ fn runOnce(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     try out.flush();
 }
 
-/// Register the package's watch set — its manifest and every referenced scene — as
-/// paths relative to cwd, replacing any previous set.
+/// Register the package's watch set (ADR 0005; ADR 0038 §4/§5), replacing any previous
+/// set: `game.zon`, the named HUD screen (if any), and every file the loader discovers
+/// by globbing the conventional kind-directories — `scenes/*.zon`, `prototypes/*.zon`,
+/// and `scripts/*.lua`. The set is derived from the filesystem, not enumerated in the
+/// manifest, so a newly-added content file is watched without a manifest edit
+/// (invariant #1). A missing kind-directory is silently skipped.
 fn syncWatchSet(watcher: *data.Watcher, io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest) !void {
     watcher.clear();
-    const rels = try manifest_mod.watchPaths(gpa, manifest);
-    defer gpa.free(rels);
-    for (rels) |rel| {
-        const joined = try std.fs.path.join(gpa, &.{ pkg, rel });
+    try watchFile(watcher, io, gpa, pkg, "game.zon");
+    if (manifest.hud) |hud| try watchFile(watcher, io, gpa, pkg, hud);
+    try watchDir(watcher, io, gpa, pkg, "scenes", ".zon");
+    try watchDir(watcher, io, gpa, pkg, "prototypes", ".zon");
+    try watchDir(watcher, io, gpa, pkg, "scripts", ".lua");
+}
+
+/// Add a single package-relative file (`<pkg>/<rel>`) to the watch set.
+fn watchFile(watcher: *data.Watcher, io: Io, gpa: Allocator, pkg: []const u8, rel: []const u8) !void {
+    const joined = try std.fs.path.join(gpa, &.{ pkg, rel });
+    defer gpa.free(joined);
+    try watcher.add(io, joined);
+}
+
+/// Add every regular file whose name ends in `ext` directly under `<pkg>/<subdir>` to
+/// the watch set. A missing directory is silently skipped; order is irrelevant (each
+/// file is polled independently). Feature-folder nesting is deferred (ADR 0038 §3):
+/// no in-repo package nests content, so this globs one level.
+fn watchDir(watcher: *data.Watcher, io: Io, gpa: Allocator, pkg: []const u8, subdir: []const u8, ext: []const u8) !void {
+    const sub = try std.fs.path.join(gpa, &.{ pkg, subdir });
+    defer gpa.free(sub);
+    var dir = Io.Dir.cwd().openDir(io, sub, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ext)) continue;
+        const joined = try std.fs.path.join(gpa, &.{ sub, entry.name });
         defer gpa.free(joined);
         try watcher.add(io, joined);
     }
@@ -843,7 +872,7 @@ fn runWatch(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     defer world.deinit();
 
     try out.print(
-        "mana: watching '{s}' — {d} files (manifest + scenes); Ctrl-C to stop\n",
+        "mana: watching '{s}' — {d} files (manifest + globbed content); Ctrl-C to stop\n",
         .{ manifest.name, watcher.watchedCount() },
     );
     try out.flush();

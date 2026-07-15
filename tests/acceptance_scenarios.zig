@@ -36,21 +36,22 @@ fn requireLua() !void {
 /// A game package's fixed file layout (relative to the build's cwd, like every
 /// integration test that reads the game corpus — `src/**` may not).
 const PackagePaths = struct {
-    prototypes: []const u8,
+    /// Package root — its `prototypes/*.zon` are globbed and merged (ADR 0038 §2).
+    dir: []const u8,
     scene: []const u8,
     rules: []const u8,
 };
 
 const snake_paths: PackagePaths = .{
-    .prototypes = "games/snake/prototypes.zon",
+    .dir = "games/snake",
     .scene = "games/snake/scenes/board.zon",
-    .rules = "games/snake/rules.lua",
+    .rules = "games/snake/scripts/rules.lua",
 };
 
 const pacman_paths: PackagePaths = .{
-    .prototypes = "games/pacman/prototypes.zon",
+    .dir = "games/pacman",
     .scene = "games/pacman/scenes/maze.zon",
-    .rules = "games/pacman/rules.lua",
+    .rules = "games/pacman/scripts/rules.lua",
 };
 
 /// A loaded, ready-to-replay game package: prototypes → scene (+ tilemap, if any) →
@@ -62,8 +63,7 @@ const pacman_paths: PackagePaths = .{
 /// prototype/scene slices stay pinned; caller owns the result, call `deinit`.
 const Package = struct {
     gpa: Allocator,
-    proto_src: [:0]u8,
-    proto_file: engine.prototype.File,
+    protos: engine.prototype.Set,
     scene_src: [:0]u8,
     scene: engine.Scene,
     rules: [:0]u8,
@@ -74,10 +74,10 @@ const Package = struct {
         errdefer gpa.destroy(self);
         self.gpa = gpa;
 
-        self.proto_src = try readFile(gpa, io, paths.prototypes);
-        errdefer gpa.free(self.proto_src);
-        self.proto_file = try engine.prototype.parse(gpa, self.proto_src);
-        errdefer engine.prototype.free(gpa, self.proto_file);
+        // Prototypes are globbed and merged from `<dir>/prototypes/*.zon` (ADR 0038 §2),
+        // exactly as `src/runtime/main.zig`'s `loadPrototypes` does.
+        self.protos = try engine.prototype.loadDir(gpa, io, Io.Dir.cwd(), paths.dir);
+        errdefer self.protos.deinit();
 
         self.scene_src = try readFile(gpa, io, paths.scene);
         errdefer gpa.free(self.scene_src);
@@ -89,7 +89,7 @@ const Package = struct {
 
         self.sim = engine.Sim.init(gpa, core.time.default_dt);
         errdefer self.sim.deinit();
-        self.sim.prototypes = .{ .prototypes = self.proto_file.prototypes };
+        self.sim.prototypes = .{ .prototypes = self.protos.prototypes };
         try engine.scene.load(self.scene, &self.sim.world);
         if (self.scene.tilemap) |*tm| self.sim.tilemap = tm;
         try self.sim.loadScript(self.rules);
@@ -104,9 +104,8 @@ const Package = struct {
     fn deinit(self: *Package) void {
         const gpa = self.gpa;
         self.sim.deinit();
-        engine.prototype.free(gpa, self.proto_file);
+        self.protos.deinit();
         engine.scene.free(gpa, self.scene);
-        gpa.free(self.proto_src);
         gpa.free(self.scene_src);
         gpa.free(self.rules);
         gpa.destroy(self);

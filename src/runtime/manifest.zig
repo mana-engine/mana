@@ -19,11 +19,19 @@ pub const NativeModule = struct {
 };
 
 /// A parsed `game.zon`. Paths are relative to the game package root.
+///
+/// Convention over configuration for bulk content (ADR 0038 §4): the manifest names
+/// only identity, the one start scene, the script *entry*, and cross-cutting settings
+/// — it does **not** enumerate the package's scenes or prototype files. Those are
+/// discovered by globbing the conventional kind-directories (`scenes/`, `prototypes/`,
+/// `scripts/`), so adding content needs no manifest edit (the file's presence is the
+/// declaration — invariant #1, files-are-truth).
 pub const Manifest = struct {
     name: []const u8,
     version: []const u8,
+    /// The one distinguished start scene, package-relative (e.g. `scenes/maze.zon`).
+    /// Named because it is not discoverable — a package has exactly one entry scene.
     entry_scene: []const u8,
-    scenes: []const []const u8,
     native_module: ?NativeModule = null,
     /// Scripting API version this package requires (ADR 0003 gate). 0 = none.
     /// The runner refuses a version higher than the build provides.
@@ -32,13 +40,11 @@ pub const Manifest = struct {
     /// top-down orthographic; isometric content declares `.isometric` explicitly.
     /// The engine has no hardcoded camera — the projection comes from package data.
     projection: engine.render.Projection = .{ .orthographic = .{} },
-    /// Optional prototype file (ADR 0016): a package-relative ZON path declaring the
-    /// named entity templates `mana.spawn` may instantiate. Absent ⇒ the package
-    /// spawns no prototypes. Watched for hot reload alongside scenes.
-    prototypes: ?[]const u8 = null,
-    /// Optional Lua handler script (ADR 0003 §1; issue #51): a package-relative
-    /// `.lua` path loaded as the Sim's single event-handler table. Absent ⇒ the
-    /// package has no script. Watched for hot reload. A package that actually needs
+    /// Optional Lua handler script *entry* (ADR 0003 §1; issue #51; ADR 0038 §1): a
+    /// package-relative `.lua` path (conventionally `scripts/rules.lua`) loaded as the
+    /// Sim's single event-handler table. Sibling modules under `scripts/` are composed
+    /// by the entry, not listed here. Absent ⇒ the package has no script. Watched for
+    /// hot reload. A package that actually needs
     /// scripting should also set `script_api`, so a build without `-Denable-lua` is
     /// refused rather than silently running scriptless.
     script: ?[]const u8 = null,
@@ -61,29 +67,6 @@ pub fn free(gpa: Allocator, manifest: Manifest) void {
     data.free(gpa, manifest);
 }
 
-/// The package-relative files whose changes should trigger a hot reload: the
-/// manifest itself, every scene it references, and its optional prototype (ADR 0016)
-/// and script (issue #51) files. Returned paths borrow from `manifest`; the slice is
-/// owned by `gpa` (free it, not the elements).
-pub fn watchPaths(gpa: Allocator, manifest: Manifest) Allocator.Error![]const []const u8 {
-    const optional = [_]?[]const u8{ manifest.prototypes, manifest.script, manifest.hud };
-    var extra: usize = 0;
-    for (optional) |o| {
-        if (o != null) extra += 1;
-    }
-    const paths = try gpa.alloc([]const u8, manifest.scenes.len + 1 + extra);
-    paths[0] = "game.zon";
-    for (manifest.scenes, paths[1 .. 1 + manifest.scenes.len]) |scene, *dst| dst.* = scene;
-    var i = 1 + manifest.scenes.len;
-    for (optional) |o| {
-        if (o) |p| {
-            paths[i] = p;
-            i += 1;
-        }
-    }
-    return paths;
-}
-
 const testing = std.testing;
 
 test "manifest: parse a minimal game.zon" {
@@ -92,16 +75,16 @@ test "manifest: parse a minimal game.zon" {
         \\    .name = "sandbox",
         \\    .version = "0.0.1",
         \\    .entry_scene = "scenes/hello.zon",
-        \\    .scenes = .{ "scenes/hello.zon" },
         \\}
     ;
     const m = try parse(testing.allocator, src);
     defer free(testing.allocator, m);
     try testing.expectEqualStrings("sandbox", m.name);
     try testing.expectEqualStrings("scenes/hello.zon", m.entry_scene);
-    try testing.expectEqual(@as(usize, 1), m.scenes.len);
     try testing.expect(m.native_module == null);
     try testing.expectEqual(@as(u32, 0), m.script_api); // defaults to none
+    try testing.expect(m.script == null);
+    try testing.expect(m.hud == null);
 }
 
 test "manifest: projection defaults to orthographic, iso is declared explicitly" {
@@ -110,7 +93,6 @@ test "manifest: projection defaults to orthographic, iso is declared explicitly"
         \\    .name = "grid",
         \\    .version = "0.1.0",
         \\    .entry_scene = "s.zon",
-        \\    .scenes = .{ "s.zon" },
         \\}
     ;
     const d = try parse(testing.allocator, default_src);
@@ -122,7 +104,6 @@ test "manifest: projection defaults to orthographic, iso is declared explicitly"
         \\    .name = "iso",
         \\    .version = "0.1.0",
         \\    .entry_scene = "s.zon",
-        \\    .scenes = .{ "s.zon" },
         \\    .projection = .{ .isometric = .{ .half_w = 30, .half_h = 15, .z_height = 20 } },
         \\}
     ;
@@ -138,7 +119,6 @@ test "manifest: parse an optional native module" {
         \\    .name = "hot",
         \\    .version = "1.0.0",
         \\    .entry_scene = "s.zon",
-        \\    .scenes = .{ "s.zon" },
         \\    .native_module = .{ .path = "libhot.so", .abi_version = 1 },
         \\}
     ;
@@ -148,131 +128,63 @@ test "manifest: parse an optional native module" {
     try testing.expectEqual(@as(u32, 1), m.native_module.?.abi_version);
 }
 
-test "manifest: watchPaths lists the manifest plus every referenced scene" {
-    const src =
-        \\.{
-        \\    .name = "m",
-        \\    .version = "1",
-        \\    .entry_scene = "scenes/a.zon",
-        \\    .scenes = .{ "scenes/a.zon", "scenes/b.zon" },
-        \\}
-    ;
-    const m = try parse(testing.allocator, src);
-    defer free(testing.allocator, m);
-
-    const paths = try watchPaths(testing.allocator, m);
-    defer testing.allocator.free(paths);
-    try testing.expectEqual(@as(usize, 3), paths.len);
-    try testing.expectEqualStrings("game.zon", paths[0]);
-    try testing.expectEqualStrings("scenes/a.zon", paths[1]);
-    try testing.expectEqualStrings("scenes/b.zon", paths[2]);
-}
-
-test "manifest: prototypes field parses and watchPaths includes it when present" {
-    const src =
-        \\.{
-        \\    .name = "p",
-        \\    .version = "1",
-        \\    .entry_scene = "scenes/a.zon",
-        \\    .scenes = .{ "scenes/a.zon" },
-        \\    .prototypes = "prototypes.zon",
-        \\}
-    ;
-    const m = try parse(testing.allocator, src);
-    defer free(testing.allocator, m);
-    try testing.expectEqualStrings("prototypes.zon", m.prototypes.?);
-
-    const paths = try watchPaths(testing.allocator, m);
-    defer testing.allocator.free(paths);
-    try testing.expectEqual(@as(usize, 3), paths.len); // game.zon + one scene + prototypes
-    try testing.expectEqualStrings("game.zon", paths[0]);
-    try testing.expectEqualStrings("scenes/a.zon", paths[1]);
-    try testing.expectEqualStrings("prototypes.zon", paths[2]);
-}
-
-test "manifest: script field parses and watchPaths lists scene, then prototypes, then script" {
+test "manifest: script entry and script_api parse" {
     const src =
         \\.{
         \\    .name = "s",
         \\    .version = "1",
         \\    .entry_scene = "scenes/a.zon",
-        \\    .scenes = .{ "scenes/a.zon" },
-        \\    .prototypes = "protos.zon",
-        \\    .script = "rules.lua",
+        \\    .script = "scripts/rules.lua",
         \\    .script_api = 1,
         \\}
     ;
     const m = try parse(testing.allocator, src);
     defer free(testing.allocator, m);
-    try testing.expectEqualStrings("rules.lua", m.script.?);
+    try testing.expectEqualStrings("scripts/rules.lua", m.script.?);
     try testing.expectEqual(@as(u32, 1), m.script_api);
-
-    const paths = try watchPaths(testing.allocator, m);
-    defer testing.allocator.free(paths);
-    try testing.expectEqual(@as(usize, 4), paths.len); // game + scene + protos + script
-    try testing.expectEqualStrings("protos.zon", paths[2]);
-    try testing.expectEqualStrings("rules.lua", paths[3]);
 }
 
-test "manifest: hud field parses and watchPaths includes it when present" {
-    const src =
+test "manifest: hud field parses; defaults to null" {
+    const with_hud =
         \\.{
         \\    .name = "h",
         \\    .version = "1",
         \\    .entry_scene = "scenes/a.zon",
-        \\    .scenes = .{ "scenes/a.zon" },
         \\    .hud = "hud.zon",
         \\}
     ;
-    const m = try parse(testing.allocator, src);
+    const m = try parse(testing.allocator, with_hud);
     defer free(testing.allocator, m);
     try testing.expectEqualStrings("hud.zon", m.hud.?);
 
-    const paths = try watchPaths(testing.allocator, m);
-    defer testing.allocator.free(paths);
-    try testing.expectEqual(@as(usize, 3), paths.len); // game.zon + one scene + hud
-    try testing.expectEqualStrings("hud.zon", paths[2]);
-}
-
-test "manifest: hud defaults to null (no HUD screen)" {
-    const src =
+    const no_hud =
         \\.{
         \\    .name = "h",
         \\    .version = "1",
         \\    .entry_scene = "s.zon",
-        \\    .scenes = .{ "s.zon" },
         \\}
     ;
-    const m = try parse(testing.allocator, src);
-    defer free(testing.allocator, m);
-    try testing.expect(m.hud == null);
+    const d = try parse(testing.allocator, no_hud);
+    defer free(testing.allocator, d);
+    try testing.expect(d.hud == null);
 }
 
-test "manifest: prototypes defaults to null (no prototype file)" {
-    const src =
-        \\.{
-        \\    .name = "p",
-        \\    .version = "1",
-        \\    .entry_scene = "s.zon",
-        \\    .scenes = .{ "s.zon" },
-        \\}
-    ;
-    const m = try parse(testing.allocator, src);
-    defer free(testing.allocator, m);
-    try testing.expect(m.prototypes == null);
-}
-
-test "manifest: unknown fields are tolerated" {
+test "manifest: bulk-content and unknown fields are tolerated (globbed, not enumerated)" {
+    // A pre-ADR-0038 manifest still parses: the retired `scenes`/`prototypes` bulk
+    // fields (and any future field) are ignored by `parseLenient`, so an older-format
+    // package loads under the new globbing loader without a manifest edit.
     const src =
         \\.{
         \\    .name = "future",
         \\    .version = "9.9.9",
         \\    .entry_scene = "s.zon",
         \\    .scenes = .{ "s.zon" },
+        \\    .prototypes = "prototypes.zon",
         \\    .some_new_field = 123,
         \\}
     ;
     const m = try parse(testing.allocator, src);
     defer free(testing.allocator, m);
     try testing.expectEqualStrings("future", m.name);
+    try testing.expectEqualStrings("s.zon", m.entry_scene);
 }

@@ -98,7 +98,7 @@ pub fn resolvePath(gpa: Allocator, pkg: []const u8, ref: []const u8) Allocator.E
 /// `world`'s live `Sprite` components AND every prototype in `prototypes` that declares
 /// a `.sprite.sheet`. The prototype half matters because `Sim.enterScene` only QUEUES
 /// `on_scene_enter` to fire on the first `sim.tick()` — a scene's Lua handler (e.g.
-/// `games/pacman/rules.lua` spawning `pac` and the ghosts via `mana.spawn`) runs AFTER
+/// `games/pacman/scripts/rules.lua` spawning `pac` and the ghosts via `mana.spawn`) runs AFTER
 /// this loader in `playLoop`, so `world.sprites` can still be EMPTY here even though the
 /// scene is about to spawn sprited entities. The prototype registry is static content
 /// known up front, so unioning it in guarantees those sheets are already decoded — and
@@ -304,7 +304,7 @@ test "sprite: loadForScene includes a prototype-declared sheet even with an empt
     // Reproduces issue #113's load-order bug: `Sim.enterScene` only QUEUES
     // `on_scene_enter` to fire on the first `sim.tick()`, and it is a scene's Lua
     // handler that spawns sprited entities (e.g. `mana.spawn("pac", …)` in
-    // `games/pacman/rules.lua`) — so at load time (before that first tick)
+    // `games/pacman/scripts/rules.lua`) — so at load time (before that first tick)
     // `world.sprites` is EMPTY even though the scene's prototype registry already
     // knows `pac` needs `sprites/pac.msf`. The loader must pull that sheet in from
     // `prototypes` alone, or the atlas built from an empty store stays zero-sized and
