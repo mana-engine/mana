@@ -79,6 +79,34 @@ pub const AxisValue = struct {
     value: f32 = 0,
 };
 
+/// Build the deterministic `platform.InputSnapshot` an `InputSegment` holds for each of
+/// its `ticks`: `keys`/`pad_buttons` inserted by `@tagName` (matching `platform.Key`/
+/// `GamepadButton`), `pad_axes` set by `@tagName` (`platform.GamepadAxis`), and
+/// `pad_connected` inferred from any gamepad input being driven — the headless replay has
+/// no device to poll, so "a pad is present" is inferred from "the trace is driving one"
+/// (ADR 0040 §5). Pure: the same segment always yields the same snapshot (determinism §6).
+/// Shared by `run` (the assertion referee) and the runtime's `--filmstrip --scenario`
+/// visual scrub so both drive the sim from a byte-identical snapshot stream. Errors:
+/// `error.UnknownKey`/`UnknownGamepadButton`/`UnknownGamepadAxis` when a name matches no
+/// enum tag.
+pub fn segmentSnapshot(seg: InputSegment) error{ UnknownKey, UnknownGamepadButton, UnknownGamepadAxis }!platform.InputSnapshot {
+    var snap: platform.InputSnapshot = .{};
+    for (seg.keys) |name| {
+        const key = std.meta.stringToEnum(platform.Key, name) orelse return error.UnknownKey;
+        snap.keys.insert(key);
+    }
+    for (seg.pad_buttons) |name| {
+        const btn = std.meta.stringToEnum(platform.GamepadButton, name) orelse return error.UnknownGamepadButton;
+        snap.pad_buttons.insert(btn);
+    }
+    for (seg.pad_axes) |av| {
+        const axis = std.meta.stringToEnum(platform.GamepadAxis, av.name) orelse return error.UnknownGamepadAxis;
+        snap.pad_axes.set(axis, av.value);
+    }
+    snap.pad_connected = seg.pad_buttons.len != 0 or seg.pad_axes.len != 0;
+    return snap;
+}
+
 /// Either bound is optional; both null holds for any count. `min == max` expresses
 /// exact equality (the common case for a deterministic staircase checkpoint).
 pub const Bound = struct {
@@ -234,20 +262,7 @@ pub fn run(gpa: Allocator, sim: *Sim, scenario: Scenario) !Report {
     var next_expect: usize = 0;
     var elapsed: u32 = 0;
     for (scenario.input_trace) |seg| {
-        var snap: platform.InputSnapshot = .{};
-        for (seg.keys) |name| {
-            const key = std.meta.stringToEnum(platform.Key, name) orelse return error.UnknownKey;
-            snap.keys.insert(key);
-        }
-        for (seg.pad_buttons) |name| {
-            const btn = std.meta.stringToEnum(platform.GamepadButton, name) orelse return error.UnknownGamepadButton;
-            snap.pad_buttons.insert(btn);
-        }
-        for (seg.pad_axes) |av| {
-            const axis = std.meta.stringToEnum(platform.GamepadAxis, av.name) orelse return error.UnknownGamepadAxis;
-            snap.pad_axes.set(axis, av.value);
-        }
-        snap.pad_connected = seg.pad_buttons.len != 0 or seg.pad_axes.len != 0;
+        const snap = try segmentSnapshot(seg);
         for (0..seg.ticks) |_| {
             sim.setInput(snap);
             try sim.tick();

@@ -85,6 +85,17 @@ description = "Run the runner headless: mise run run -- games/sandbox"
 depends = ["assets"]
 run = "zig build run --"
 
+[tasks.pacman-gamepad-filmstrip]
+# Headless SVG filmstrip of Pac-Man driven by an INJECTED gamepad LEFT-STICK trace
+# (issue #222, ADR 0040 §5; vision invariant #4 — a human must be able to SEE gamepad
+# control). Needs `-Denable-lua` so rules.lua spawns pac and reads `mana.action_vector`;
+# runs on the DEFAULT null gpu backend (an SVG is text, no GPU/display/controller). The
+# trace (a committed data recipe) is the source of truth; the frames are generated output
+# under gitignored zig-out/. Open zig-out/filmstrip-gamepad/frame_0000.svg … in a browser
+# and scrub: pac turns off its default LEFT heading and climbs column 8 under the stick.
+description = "Render the injected-gamepad-stick Pac-Man filmstrip to zig-out/filmstrip-gamepad (issue #222)."
+run = "zig build run -Denable-lua -- games/pacman --filmstrip zig-out/filmstrip-gamepad --scenario games/pacman/captures/gamepad_stick.zon"
+
 [tasks.cross-win]
 description = "Cross-compile for x86_64-windows (portability gate)."
 run = "zig build -Dtarget=x86_64-windows"
