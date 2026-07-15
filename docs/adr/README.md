@@ -51,3 +51,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0037 | GPU: Y-down NDC clip-space convention | accepted |
 | 0038 | Game package layout: modular, grouped (by-kind baseline + optional feature folders) content over monolithic blobs | proposed |
 | 0039 | UI input events: `on_click`/`on_focus`/`on_activate` | proposed |
+| 0040 | Data-driven action-map: typed (device-agnostic) actions + gamepad | proposed |
