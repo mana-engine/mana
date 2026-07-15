@@ -331,3 +331,27 @@ test "pacman scenario [down]: pressing down after reaching row 7 rides column 8 
     try requireLua();
     try expectScenarioPasses(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/10_down_through.zon");
 }
+
+// --- Device-agnostic proof (issue #221): the same `move` action, driven by a GAMEPAD LEFT
+// STICK (injected via #219's `pad_axes`, ADR 0028 amendment) instead of the keyboard, must
+// steer pac IDENTICALLY. Step 12 mirrors the keyboard open up-turn (08) via `left_y=-0.9`;
+// step 13 mirrors the keyboard up-then-down round trip (10) via `left_y` -0.9 then +0.9.
+// Both assert the exact positions their keyboard twin does, so "keyboard and gamepad drive
+// the same action to the same result" (ADR 0040 §8) is literally proven, not asserted. The
+// d-pad staircase step the issue also named is deferred — d-pad buttons are not bound to the
+// `move` axis2d action yet (no resolver d-pad→axis2d path); see those scenarios' headers. --
+
+test "pacman scenario [stick up]: a left-stick push up (left_y=-0.9) turns pac onto column 8 IDENTICALLY to keyboard 'up' — device-agnostic proof (issue #221, mirrors 08)" {
+    try requireLua();
+    try expectScenarioPasses(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/12_stick_up_turn.zon");
+}
+
+test "pacman scenario [stick down]: a left-stick up-then-down round trip drives pac home IDENTICALLY to keyboard 'up'/'down' — device-agnostic proof on +y (issue #221, mirrors 10)" {
+    try requireLua();
+    try expectScenarioPasses(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/13_stick_down_turn.zon");
+}
+
+test "pacman scenario: two independent replays of the stick-up staircase agree bit-for-bit (issue #221)" {
+    try requireLua();
+    try expectDeterministic(std.testing.allocator, std.testing.io, pacman_paths, "games/pacman/scenarios/12_stick_up_turn.zon");
+}
