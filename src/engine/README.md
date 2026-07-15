@@ -24,4 +24,12 @@ Because `gpu.captureFrame`/`renderFrame` bind ONE atlas, the runner uses
 `sprite.merge` to stack the font glyph atlas below the scene sprite atlas, so a single
 bound texture carries both game sprites and HUD label glyphs in one pass (issue #133).
 
+`render_sprite.zig` and `sprite_atlas.zig` (issue #151) are size-driven splits off
+`render.zig` and `sprite.zig` respectively, once each parent crossed the ~500-line soft
+limit: `render_sprite.zig` holds the textured/animated sprite-quad path
+(`projectSprites`), sharing `render.zig`'s projection math; `sprite_atlas.zig` holds the
+CPU atlas packer (`Atlas`/`buildAtlas`/`merge`). Both re-export through their parent
+(`render.projectSprites`, `sprite.Atlas`/`buildAtlas`/`merge`), so the public API is
+unchanged — see each file's header for the split rationale.
+
 **Imported by:** `runtime`, `tools`.
