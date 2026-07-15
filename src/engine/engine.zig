@@ -45,6 +45,7 @@ pub const render = @import("render.zig");
 pub const render_sprite = @import("render_sprite.zig");
 pub const render_svg = @import("render_svg.zig");
 pub const render_ui = @import("render_ui.zig");
+pub const ui_dispatch = @import("ui_dispatch.zig");
 pub const animation = @import("animation.zig");
 pub const sprite = @import("sprite.zig");
 pub const text = @import("text.zig");

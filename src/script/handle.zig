@@ -40,6 +40,40 @@ pub const Handle = struct {
     }
 };
 
+/// An opaque **widget** reference as seen by Lua (ADR 0039 §2): a distinct handle
+/// *kind* from `Handle`, drawn from a separate widget-handle table (a `Screen`'s
+/// laid-out widgets, not `ecs.World`'s entities) so a widget handle is never
+/// comparable or interchangeable with an entity handle — passing one where the other
+/// is expected is a content bug, always a safe nil/no-op, never a crash. It reuses
+/// the exact `index`/`generation` bit layout `Handle` fixes (index = a widget's
+/// deterministic pre-order position in its screen, generation = bumped once per screen
+/// load/hot-reload), so the proven packing is shared while the *type* stays honestly
+/// separate. Runtime-only, like every handle (ADR 0003 §4): never serialized, never
+/// arithmetic — only equality and (script-side) correlation against a widget's `id`.
+/// Phase B (issue #134) has no `mana.ui_*` accessor yet, so staleness has no
+/// observable failure mode; the kind is pinned now so accessors can be added later
+/// (their own ADR) without a bit-layout version bump.
+pub const WidgetHandle = struct {
+    index: u32,
+    generation: u32,
+
+    /// Pack losslessly into the u64 a script receives as a Lua integer (generation
+    /// high 32 bits, index low 32 bits — the same layout `Handle.pack` uses).
+    pub fn pack(h: WidgetHandle) u64 {
+        return (@as(u64, h.generation) << 32) | @as(u64, h.index);
+    }
+
+    /// Inverse of `pack`.
+    pub fn unpack(v: u64) WidgetHandle {
+        return .{ .index = @truncate(v), .generation = @intCast(v >> 32) };
+    }
+
+    /// Identity comparison.
+    pub fn eql(a: WidgetHandle, b: WidgetHandle) bool {
+        return a.index == b.index and a.generation == b.generation;
+    }
+};
+
 /// The live-entity generation table backing `mana.is_valid` (ADR 0003 §4,
 /// §2). One per `script.State`, independent of any `ecs.EntityAllocator` the
 /// engine may separately own — nothing in `script` reaches engine/world data
@@ -105,6 +139,17 @@ test "handle: unpack(pack(x)) round-trips across edge and max index/generation" 
     for (cases) |h| {
         try testing.expect(Handle.unpack(h.pack()).eql(h));
     }
+}
+
+test "widget handle: pack/unpack round-trips and shares Handle's bit layout (ADR 0039 §2)" {
+    // Same literal layout as the entity handle above — the two kinds share the wire
+    // packing deliberately, so this pins that they cannot silently diverge.
+    const w: WidgetHandle = .{ .index = 5, .generation = 10 };
+    try testing.expectEqual(@as(u64, 0x0000_000A_0000_0005), w.pack());
+    try testing.expect(WidgetHandle.unpack(0x0000_000A_0000_0005).eql(w));
+    // A packed widget handle carries the same bits an identical entity handle would,
+    // yet the two are distinct *types* the compiler keeps apart (ADR 0039 §2).
+    try testing.expectEqual(Handle.pack(.{ .index = 5, .generation = 10 }), w.pack());
 }
 
 test "handle registry: a freshly-registered handle is valid" {

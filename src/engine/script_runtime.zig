@@ -56,6 +56,11 @@ pub const Runtime = if (script.lua_enabled) LuaRuntime else NoopRuntime;
 const HandlerKey = enum {
     on_scene_enter,
     on_key,
+    /// UI input events (ADR 0039): each is a distinct circuit-breaker slot (§9), so a
+    /// broken `on_click` never disables `on_focus`/`on_activate` and vice versa.
+    on_click,
+    on_focus,
+    on_activate,
     on_spawn,
     on_collision_begin,
     /// Lua timer callbacks (ADR 0019) — one breaker slot for all of them, so an
@@ -458,6 +463,55 @@ const LuaRuntime = struct {
         self.report(.on_key, s, outcome);
     }
 
+    /// Dispatch a UI pointer click `on_click(ev = { widget, id, x, y })` (ADR 0039 §1)
+    /// host-live: `index`/`generation` are the engine-assigned widget-handle fields, `id`
+    /// the hit widget's authored name, `x`/`y` the press point in screen pixels. Same
+    /// host-install + §9 command-buffer-transaction + circuit-breaker discipline as
+    /// `dispatchKey`. A no-op if no script is loaded, the key is absent, or its breaker
+    /// tripped. A handler's gameplay mutations queue on `commands` as usual — the click
+    /// itself is cosmetic and never enters the state hash (ADR 0039 §4).
+    pub fn dispatchClick(self: *LuaRuntime, index: u32, generation: u32, id: []const u8, x: f32, y: f32, dc: DispatchCtx) Allocator.Error!void {
+        try self.dispatchUi(.on_click, index, generation, id, x, y, dc);
+    }
+
+    /// Dispatch a UI focus entry `on_focus(ev = { widget, id })` (ADR 0039 §1) host-live.
+    /// Same discipline as `dispatchClick`; carries no pointer coordinate (nav-driven).
+    pub fn dispatchFocus(self: *LuaRuntime, index: u32, generation: u32, id: []const u8, dc: DispatchCtx) Allocator.Error!void {
+        try self.dispatchUi(.on_focus, index, generation, id, 0, 0, dc);
+    }
+
+    /// Dispatch a UI activation `on_activate(ev = { widget, id })` (ADR 0039 §1)
+    /// host-live. Same discipline as `dispatchClick`; carries no pointer coordinate.
+    pub fn dispatchActivate(self: *LuaRuntime, index: u32, generation: u32, id: []const u8, dc: DispatchCtx) Allocator.Error!void {
+        try self.dispatchUi(.on_activate, index, generation, id, 0, 0, dc);
+    }
+
+    /// Shared host-live dispatch for the three ADR 0039 UI events: install the host
+    /// seam, run the handler inside a §9 command-buffer transaction (rolled back if it
+    /// throws), and record the outcome on `key`'s circuit breaker. `x`/`y` are ignored
+    /// for `on_focus`/`on_activate` (their `State` dispatch omits the coordinate fields).
+    fn dispatchUi(self: *LuaRuntime, comptime key: HandlerKey, index: u32, generation: u32, id: []const u8, x: f32, y: f32, dc: DispatchCtx) Allocator.Error!void {
+        const s = if (self.state) |*st| st else return;
+        if (self.isDisabled(key)) return;
+
+        const z = tracy.zone(@src(), "script." ++ @tagName(key));
+        defer z.end();
+        var host_ctx: HostCtx = .init(dc, self);
+        s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
+        defer s.setHost(null);
+
+        const mark = dc.commands.mark();
+        const outcome = switch (key) {
+            .on_click => s.dispatchClick(index, generation, id, x, y),
+            .on_focus => s.dispatchFocus(index, generation, id),
+            .on_activate => s.dispatchActivate(index, generation, id),
+            else => comptime unreachable, // dispatchUi is only called for the three UI keys
+        };
+        if (outcome == .errored) try dc.commands.rollback(dc.world, mark);
+        if (host_ctx.oom) return error.OutOfMemory;
+        self.report(key, s, outcome);
+    }
+
     /// Advance the timer wheel by `dt` (ADR 0019), firing due timers — Lua callbacks
     /// among them run host-live: the host is installed for the duration so a timer's
     /// `mana` calls resolve. Native timers fire regardless of the host. Only OOM from
@@ -583,6 +637,18 @@ const NoopRuntime = struct {
         _ = key_name;
         _ = pressed;
         _ = dc;
+    }
+
+    pub fn dispatchClick(self: *NoopRuntime, index: u32, generation: u32, id: []const u8, x: f32, y: f32, dc: DispatchCtx) Allocator.Error!void {
+        _ = .{ self, index, generation, id, x, y, dc };
+    }
+
+    pub fn dispatchFocus(self: *NoopRuntime, index: u32, generation: u32, id: []const u8, dc: DispatchCtx) Allocator.Error!void {
+        _ = .{ self, index, generation, id, dc };
+    }
+
+    pub fn dispatchActivate(self: *NoopRuntime, index: u32, generation: u32, id: []const u8, dc: DispatchCtx) Allocator.Error!void {
+        _ = .{ self, index, generation, id, dc };
     }
 
     pub fn advanceTimers(self: *NoopRuntime, dc: DispatchCtx, dt: f32) Allocator.Error!void {

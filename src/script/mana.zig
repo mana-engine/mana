@@ -37,6 +37,10 @@ const handle = @import("handle.zig");
 const host_mod = @import("host.zig");
 
 pub const Handle = handle.Handle;
+/// The opaque UI-widget handle kind (ADR 0039 §2), re-exported so `lua.zig`'s
+/// `on_click`/`on_focus`/`on_activate` dispatch can pack a widget reference without
+/// importing `handle.zig` directly — the same way `Handle` is surfaced for entities.
+pub const WidgetHandle = handle.WidgetHandle;
 pub const Registry = handle.Registry;
 pub const Host = host_mod.Host;
 

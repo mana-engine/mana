@@ -20,6 +20,12 @@ here, not in `ui`, because the glyph atlas/text layout are engine-tier, exactly 
 `render_ui.worldHost` fills the `ui.Host` seam from a live `World` — a bound label name
 resolves to the same-named data component (ADR 0024) on the first entity carrying it —
 read-only and genre-neutral (the key comes from the game's HUD ZON, never from `src/`).
+
+`ui_dispatch.zig` is the UI input-event → Lua bridge (ADR 0039, accepted; issue #134
+phase B): `UiInput` holds the one active screen + focus state and turns synthetic
+pointer/keyboard edges into `on_click`/`on_focus`/`on_activate` dispatches at the Sim's
+handler table, applying the §3 "UI consumes input before gameplay" ordering. Event-driven
+(never per-frame per-widget), opaque widget handles only, focus/hit state hash-excluded.
 Because `gpu.captureFrame`/`renderFrame` bind ONE atlas, the runner uses
 `sprite.merge` to stack the font glyph atlas below the scene sprite atlas, so a single
 bound texture carries both game sprites and HUD label glyphs in one pass (issue #133).
