@@ -7,4 +7,11 @@
     .entry_scene = "scenes/empty.zon",
     .script = "scripts/rules.lua",
     .script_api = 1,
+    // The front screen doubles as the runner's `hud` (ADR 0039 §6: one active
+    // screen) — `--play` renders it AND routes keyboard focus-nav/activate presses
+    // into it (issue #209), so `mana run -- games/menu --play` is navigable in a
+    // real window. `settings.zon` is reached only via the headless acceptance test's
+    // manual `input.setScreen` swap for now — screen-switching from `on_activate` is
+    // a separate follow-up, not this issue's scope.
+    .hud = "screens/main_menu.zon",
 }

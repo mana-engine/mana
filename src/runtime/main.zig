@@ -644,6 +644,18 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     defer hud.deinit();
     const render_atlas = hud.atlas(&atlas);
 
+    // UI focus/activate input (ADR 0039 §3; issue #209): a package's `hud` screen
+    // (ADR 0039 §6's "one active screen") also becomes `sim`'s active `UiInput`
+    // screen, so arrow/enter presses polled below drive its focus nav / on_activate
+    // through `Sim.tick` instead of always falling to gameplay's `on_key` — the same
+    // seam `tests/menu_acceptance.zig` exercises headlessly, now reachable from a
+    // real window. A package with no `hud` (`hud.screen == null`) leaves `sim.ui_input`
+    // at its default (no active screen), so this is a no-op for every existing game.
+    if (hud.screen) |*screen| {
+        const size = window.size();
+        sim.ui_input.setScreen(screen, .{ .x = 0, .y = 0, .w = @floatFromInt(size[0]), .h = @floatFromInt(size[1]) });
+    }
+
     var sprite_pipeline = try dev.createTexturedPipeline(.rgba8_unorm);
     defer sprite_pipeline.deinit(&dev);
     var atlas_tex: ?engine.gpu.Texture = null;
@@ -684,6 +696,13 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
             const z = tracy.zone(@src(), "poll");
             defer z.end();
             sim.setInput(window.poll());
+            // Track a resized window: a plain field write (no allocation, no focus
+            // reset — only `setScreen` above does that), so a live resize keeps the
+            // UI's hit-test/focus-nav geometry correct without disturbing `Focus.current`.
+            if (hud.screen != null) {
+                const size = window.size();
+                sim.ui_input.viewport = .{ .x = 0, .y = 0, .w = @floatFromInt(size[0]), .h = @floatFromInt(size[1]) };
+            }
         }
 
         // Advance the sim by whole fixed steps for the real time elapsed since the last

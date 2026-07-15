@@ -8,6 +8,10 @@ Pac-Man anchor slice shipped.
 
 **Layout:**
 - `game.zon` — manifest (a trivial empty entry scene; this package has no gameplay).
+  Its `.hud = "screens/main_menu.zon"` (issue #209) doubles the front screen as the
+  runner's `hud`: `--play` both renders it and routes keyboard focus-nav/activate
+  presses into it (ADR 0039 §6's "one active screen"), so `mise run run --
+  games/menu --play` is navigable in a real window.
 - `screens/main_menu.zon` / `screens/settings.zon` — the two `ui.Screen` widget trees
   (ADR 0034 §2): vertical button stacks, navigable with up/down, activated with enter.
 - `scripts/rules.lua` — `on_focus`/`on_click`/`on_activate` handlers; settings values
@@ -23,9 +27,17 @@ See `tests/menu_acceptance.zig` for the headless acceptance proof: navigate → 
 `ui_dispatch.UiInput` / `script_runtime.Runtime` primitives #196 shipped, against a
 real Lua interpreter, no window.
 
-**Known gap (not this issue's scope):** `Sim`/`src/runtime/main.zig` do not yet route
-real keyboard/pointer input through `UiInput` in the interactive `--play` loop (today
-only a display-only `hud` screen is wired end-to-end, via `manifest.hud`). This
-package's screens are driven headlessly by the acceptance test; wiring an *active,
-input-consuming* screen into the runner (so `mise run run -- games/menu --play` is
-actually navigable) is a follow-up integration task.
+**Known gaps (not this issue's scope, #209):**
+- **No visual focus indicator.** `ui.Widget` has no "focused" styling hook, so a
+  human playing `--play` can navigate (arrow keys move `Sim.ui_input.focus.current`,
+  enter activates) but sees no on-screen highlight of which button is focused. Adding
+  one is a widget/content change, deliberately out of #209's scope.
+- **No screen switching.** Activating "SETTINGS" fires `on_activate` and mutates the
+  Lua handler table's `next_screen` field exactly as `tests/menu_acceptance.zig`
+  observes, but nothing in the runner reacts to it by swapping `sim.ui_input`'s active
+  screen to `settings.zon` — that swap is driven manually by the headless test today.
+  A generic "the runner reacts to a content-declared screen transition" mechanism is
+  future work, not this issue's (single active screen, ADR 0039 §6) scope.
+- **Pointer/click routing is not wired in `--play`** — #209 is keyboard-only
+  (`Sim.ui_input.keyEdge`); `UiInput.pointerPress` exists and is tested, but nothing
+  in `runtime/main.zig` feeds it a mouse position yet.

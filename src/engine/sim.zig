@@ -18,6 +18,7 @@ const script = @import("script");
 const platform = @import("platform");
 const prototype = @import("prototype.zig");
 const Tilemap = @import("tilemap.zig").Tilemap;
+const ui_dispatch = @import("ui_dispatch.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -109,6 +110,16 @@ pub const Sim = struct {
     /// (ADR 0021). Defaults empty, so a key held on the very first tick reads as a
     /// press. Not part of the state hash (input never is, ADR 0009).
     prev_input: platform.InputSnapshot = .{},
+    /// The active UI screen's focus/dispatch state (ADR 0039; issue #209): `null`
+    /// screen by default, so a `Sim` that never sets one behaves exactly as before
+    /// this field existed — every key edge falls straight through to `on_key`. The
+    /// runner (or a test) points this at a loaded `ui.Screen` via
+    /// `ui_input.setScreen` — mirroring how `tilemap`/`prototypes` are populated —
+    /// so `tick` can route keyboard focus-nav/activate edges into it (ADR 0039 §3:
+    /// "UI consumes an input first; gameplay sees only what the UI did not claim").
+    /// Cosmetic-adjacent and never hashed, same as the `ui`/`ui_dispatch` state it
+    /// wraps (ADR 0039 §4).
+    ui_input: ui_dispatch.UiInput = .{},
     dt: f32,
     tick_count: u64 = 0,
     /// The seeded stream `mana.random`/`random_int` draw from (ADR 0022, issue #47).
@@ -286,13 +297,22 @@ pub const Sim = struct {
                 self.pending_scene = null;
                 try self.script_runtime.dispatchSceneEnter(scene_name, dc);
             }
-            // Keyboard edges (ADR 0021): dispatch on_key for every key whose held-state
-            // changed since last tick, in Key-enum order (deterministic), host-live and
-            // before timers — so a turn pressed this tick reaches the move timer this tick.
+            // Keyboard edges (ADR 0021, ordered per ADR 0039 §3): for every key whose
+            // held-state changed since last tick, in Key-enum order (deterministic),
+            // the active UI screen (if any) gets first refusal — a focus-nav/activate
+            // press edge it claims fires on_focus/on_activate instead of on_key, and
+            // never reaches gameplay. Only an edge the UI does not claim (no screen
+            // active, a release edge, or a key with no UI meaning) dispatches on_key,
+            // host-live and before timers, exactly as before this field existed. The
+            // temporary screen layout `ui_input.keyEdge` needs is scratch-arena backed
+            // (issue #153: no per-frame heap alloc in the hot loop).
             inline for (comptime std.enums.values(platform.Key)) |k| {
                 const now_held = self.input.keys.contains(k);
                 if (now_held != self.prev_input.keys.contains(k)) {
-                    try self.script_runtime.dispatchKey(@tagName(k), now_held, dc);
+                    const ui_consumed = try self.ui_input.keyEdge(ctx.scratch, &self.script_runtime, dc, k, now_held);
+                    if (!ui_consumed) {
+                        try self.script_runtime.dispatchKey(@tagName(k), now_held, dc);
+                    }
                 }
             }
             self.prev_input = self.input;
@@ -324,6 +344,7 @@ pub const Sim = struct {
 };
 
 const testing = std.testing;
+const ui = @import("ui");
 
 test "sim: a system recording a despawn takes effect next flush and dispatches an event" {
     const Counter = struct {
@@ -969,4 +990,97 @@ test "sim: an unseeded Sim's mana.random_int still runs deterministically off de
         sim_a.script_runtime.handlerFieldInt("draw").?,
         sim_b.script_runtime.handlerFieldInt("draw").?,
     );
+}
+
+/// Two focusable buttons in a row, the same fixture shape `ui_dispatch.zig`'s own
+/// tests use: button "a" spans x∈[0,50), button "b" x∈[50,100) of a 100×20 viewport.
+const ui_input_two_buttons: ui.Screen = .{ .root = .{
+    .kind = .container,
+    .layout = .flex,
+    .direction = .row,
+    .children = &[_]ui.Widget{
+        .{ .kind = .label, .id = "a", .focusable = true, .width = 50 },
+        .{ .kind = .label, .id = "b", .focusable = true, .width = 50 },
+    },
+} };
+
+test "sim: with no active UI screen, tick's ui_input never claims a key (any build)" {
+    var sim = Sim.init(testing.allocator, 1.0);
+    defer sim.deinit();
+    try testing.expect(sim.ui_input.screen == null); // default: nothing to consume
+
+    var held = platform.KeySet.initEmpty();
+    held.insert(.right);
+    sim.setInput(.{ .keys = held });
+    try sim.tick(); // no UI screen active ⇒ ui_input claims nothing
+    try testing.expect(sim.ui_input.focus.current == null); // UI focus never moved
+}
+
+test "sim: Sim.tick routes a right-arrow press into ui_input.setScreen's focus nav (issue #209, any build)" {
+    // Proves the wiring end-to-end through `Sim.tick` — not `ui_dispatch.UiInput`
+    // directly — the same seam `runtime/main.zig`'s `--play` loop drives via
+    // `sim.setInput(window.poll())`. Runs under BOTH builds: with no Lua loaded,
+    // dispatch is a no-op but the focus math (this test's assertion) still runs.
+    var sim = Sim.init(testing.allocator, 1.0);
+    defer sim.deinit();
+    sim.ui_input.setScreen(&ui_input_two_buttons, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+
+    var held = platform.KeySet.initEmpty();
+    held.insert(.right);
+    sim.setInput(.{ .keys = held });
+    try sim.tick(); // right-arrow press, nothing focused yet ⇒ UI bootstraps focus onto "a"
+    try testing.expectEqual(&ui_input_two_buttons.root.children[0], sim.ui_input.focus.current.?);
+
+    sim.setInput(.{}); // release
+    try sim.tick();
+    sim.setInput(.{ .keys = held }); // right-arrow press again ⇒ moves onto "b"
+    try sim.tick();
+    try testing.expectEqual(&ui_input_two_buttons.root.children[1], sim.ui_input.focus.current.?);
+}
+
+test "sim: a UI-claimed key press does not also dispatch on_key, but an unclaimed key still does (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    var sim = Sim.init(testing.allocator, 1.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = { key_presses = 0, focuses = 0, activates = 0 }
+        \\function t.on_key(ev) if ev.pressed then t.key_presses = t.key_presses + 1 end end
+        \\function t.on_focus(ev) t.focuses = t.focuses + 1 end
+        \\function t.on_activate(ev) t.activates = t.activates + 1 end
+        \\return t
+    );
+    sim.ui_input.setScreen(&ui_input_two_buttons, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+
+    // A right-arrow press is a recognized nav key: the UI claims it (bootstraps
+    // focus onto "a", fires on_focus) and on_key must NOT also fire for it.
+    var right = platform.KeySet.initEmpty();
+    right.insert(.right);
+    sim.setInput(.{ .keys = right });
+    try sim.tick();
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("focuses").?);
+    try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("key_presses").?);
+
+    sim.setInput(.{}); // release right
+    try sim.tick();
+
+    // Enter activates the focused widget "a": the UI claims it, on_activate fires,
+    // on_key still never fires for "enter".
+    var enter = platform.KeySet.initEmpty();
+    enter.insert(.enter);
+    sim.setInput(.{ .keys = enter });
+    try sim.tick();
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("activates").?);
+    try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("key_presses").?);
+
+    sim.setInput(.{}); // release enter
+    try sim.tick();
+
+    // "w" has no UI meaning (not a nav/activate key): the screen claims nothing,
+    // so it falls through to gameplay's on_key exactly as ADR 0021 already does.
+    var w = platform.KeySet.initEmpty();
+    w.insert(.w);
+    sim.setInput(.{ .keys = w });
+    try sim.tick();
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("key_presses").?);
 }
