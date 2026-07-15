@@ -9,11 +9,13 @@
 //! the round trip. Lives in `tests/` because it reads the game corpus (`src/**` may
 //! not) and needs `-Denable-lua` for the real handler table `on_activate` mutates.
 //!
-//! No `Sim`/`src/runtime/main.zig` wiring exists yet to route real input through
-//! `UiInput` in the interactive `--play` loop (today only the display-only `hud`
-//! screen is runner-wired, via `manifest.hud`) — see `games/menu/README.md`. This test
-//! is the headless proof the content + dispatch + persistence primitives work
-//! end-to-end; it does not claim the menu is playable in a window yet.
+//! `Sim.ui_input` + `runtime/main.zig`'s `--play` loop now route real keyboard input
+//! into this exact `UiInput` (issue #209: `games/menu/game.zon`'s `.hud` doubles as
+//! the active `UiInput` screen) — see `games/menu/README.md` for the remaining gaps
+//! (no focus highlight, no screen-switching, no pointer routing). This test remains
+//! the headless proof the content + dispatch + persistence primitives work
+//! end-to-end, including the settings-screen swap a real `--play` session does not
+//! yet drive automatically.
 
 const std = @import("std");
 const data = @import("data");
