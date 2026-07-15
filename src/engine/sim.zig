@@ -18,6 +18,7 @@ const script = @import("script");
 const platform = @import("platform");
 const prototype = @import("prototype.zig");
 const Tilemap = @import("tilemap.zig").Tilemap;
+const ActionMap = @import("action_map.zig").ActionMap;
 const ui_dispatch = @import("ui_dispatch.zig");
 
 const Allocator = std.mem.Allocator;
@@ -106,6 +107,13 @@ pub const Sim = struct {
     /// as before (nav no-ops). The runner points it at the loaded scene's tilemap; the
     /// borrowed `Tilemap` must outlive the `Sim` (the runner holds the parsed scene).
     tilemap: ?*const Tilemap = null,
+    /// The package's parsed `input.zon` action-binding table (ADR 0040 §3; issue
+    /// #216), borrowed for the (not-yet-built) action resolver — issue #217 — to read.
+    /// Null by default, so a sim that never sets it ticks exactly as before this field
+    /// existed. The runner points it at the loaded package's `ActionMap` (mirroring
+    /// `tilemap`); the borrowed value must outlive the `Sim`. Read-only config, not
+    /// per-tick state — not part of `stateHash` (input never is, ADR 0009/0040 §6).
+    action_map: ?*const ActionMap = null,
     /// Last tick's input, diffed against `input` each tick to emit `on_key` edges
     /// (ADR 0021). Defaults empty, so a key held on the very first tick reads as a
     /// press. Not part of the state hash (input never is, ADR 0009).
@@ -483,6 +491,22 @@ test "sim: a tick with no scheduled timers does not perturb the world's state ha
     for (0..60) |_| @import("systems.zig").movement(&reference, sim.dt);
 
     try testing.expectEqual(reference.stateHash(), sim.stateHash());
+}
+
+test "sim: action_map defaults to null and, once borrowed, never perturbs the state hash (ADR 0040 §3/§6, #216)" {
+    var sim = Sim.init(testing.allocator, 1.0 / 60.0);
+    defer sim.deinit();
+    try testing.expect(sim.action_map == null); // no `.input` package ⇒ unaffected, as before this field existed
+
+    const e = try sim.world.spawn();
+    try sim.world.setTransform(e, .{ .pos = .{ .x = 1, .y = 2, .z = 3 } });
+    const before = sim.stateHash();
+
+    // Borrowing a loaded action map (mirroring how the runner points `tilemap` at a
+    // loaded scene) is config, not sim state: it must not move the hash.
+    const map: ActionMap = .{ .bindings = &.{} };
+    sim.action_map = &map;
+    try testing.expectEqual(before, sim.stateHash());
 }
 
 /// A one-shot system that queues a single deferred spawn on its first tick, so a

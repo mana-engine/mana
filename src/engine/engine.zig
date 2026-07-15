@@ -40,6 +40,10 @@ pub const timer = @import("timer.zig");
 pub const sim = @import("sim.zig");
 pub const scene = @import("scene.zig");
 pub const tilemap = @import("tilemap.zig");
+/// The data-driven action-binding table (ADR 0040 §3; issue #216): parses `input.zon`
+/// into an `ActionMap` a `Sim` borrows (`Sim.action_map`), mirroring `Tilemap`. Parsing
+/// and validation only — no resolver (issue #217), no `mana.*` script surface (#218).
+pub const action_map = @import("action_map.zig");
 pub const prototype = @import("prototype.zig");
 pub const render = @import("render.zig");
 pub const render_sprite = @import("render_sprite.zig");
@@ -73,6 +77,7 @@ pub const Sim = sim.Sim;
 pub const Context = sim.Context;
 pub const Scene = scene.Scene;
 pub const Tilemap = tilemap.Tilemap;
+pub const ActionMap = action_map.ActionMap;
 pub const Entity = ecs.Entity;
 pub const Transform = components.Transform;
 pub const Velocity = components.Velocity;
@@ -102,6 +107,7 @@ test {
     _ = sim;
     _ = scene;
     _ = tilemap;
+    _ = action_map;
     _ = render;
     _ = render_sprite;
     _ = render_svg;

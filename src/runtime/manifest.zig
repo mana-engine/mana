@@ -53,6 +53,12 @@ pub const Manifest = struct {
     /// `--play` and `--render-play-frame`. Absent ⇒ no HUD (genre-neutral: the engine
     /// draws whatever the package declares). Watched for hot reload.
     hud: ?[]const u8 = null,
+    /// Optional data-driven action-binding table (ADR 0040 §3; issue #216): a
+    /// package-relative `input.zon` path, parsed by `engine.action_map` into an
+    /// `engine.ActionMap` (action name → physical-source binding). Absent ⇒ the
+    /// package declares no actions. Mirrors `hud`/`script`'s optional-path shape;
+    /// nothing in `src/**` ever names a specific action (invariant #6).
+    input: ?[]const u8 = null,
 };
 
 /// Parse a manifest from NUL-terminated ZON `source`. Unknown fields are ignored
@@ -167,6 +173,31 @@ test "manifest: hud field parses; defaults to null" {
     const d = try parse(testing.allocator, no_hud);
     defer free(testing.allocator, d);
     try testing.expect(d.hud == null);
+}
+
+test "manifest: input field parses; defaults to null" {
+    const with_input =
+        \\.{
+        \\    .name = "i",
+        \\    .version = "1",
+        \\    .entry_scene = "scenes/a.zon",
+        \\    .input = "input.zon",
+        \\}
+    ;
+    const m = try parse(testing.allocator, with_input);
+    defer free(testing.allocator, m);
+    try testing.expectEqualStrings("input.zon", m.input.?);
+
+    const no_input =
+        \\.{
+        \\    .name = "i",
+        \\    .version = "1",
+        \\    .entry_scene = "s.zon",
+        \\}
+    ;
+    const d = try parse(testing.allocator, no_input);
+    defer free(testing.allocator, d);
+    try testing.expect(d.input == null);
 }
 
 test "manifest: bulk-content and unknown fields are tolerated (globbed, not enumerated)" {
