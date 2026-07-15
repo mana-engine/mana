@@ -1,0 +1,79 @@
+// The player prototype (ADR 0016) `mana.spawn` instantiates. Genre lives here in
+// content, never in src/. Positions come from the spawn call; the template carries the
+// non-spatial component defaults: a collider (ADR 0025), a nav agent + its target cell
+// (ADR 0027), named scalar data components (ADR 0024), a render appearance (ADR 0030),
+// and a tint + blink cue (issue #128, ADR 0033 phase 2). Grouped into its own file
+// under `prototypes/` per the by-kind layout (ADR 0038 §2); the loader globs and merges
+// every `prototypes/*.zon` in byte-lexicographic path order, so `pac.zon` and
+// `ghosts.zon` land in one registry.
+//
+// Only pac and ghosts are script-spawned — they need a Lua handle so `scripts/rules.lua`
+// can select their nav targets and identify them in collisions. The maze walls come from
+// the scene's tilemap and the dots/pellets are scene entities (see scenes/maze.zon);
+// neither needs a handle, so neither is a prototype.
+//
+// Pac carries:
+//   - `nav_agent` (ADR 0027): the native `nav` system steers it toward its target cell.
+//   - a zero `velocity`: nav writes into this existing column each tick, so steering
+//     stays allocation-free.
+//   - a `collider` (ADR 0025) on its own layer, masking only pac (1), so the collision
+//     events are exactly pac↔ghost / pac↔pickup (see the maze scene's layer notes).
+//   - `kind` (pac=1) so `on_collision_begin` can classify a contact by data, not
+//     coordinate math.
+//   - `nav_target_col`/`nav_target_row` (the ADR 0027 selection seam): a script sets
+//     these with `mana.set` to pick a target. They default to (0,0) — a wall cell — so
+//     a freshly spawned mover is stationary until `scripts/rules.lua` selects a real target.
+//   - `appearance` (ADR 0030, shape addendum #101): the color/size/shape the renderer
+//     draws it with — a mover's collider radius is 0.4 (diameter 0.8), so `size = 0.7`
+//     reads as a solid disc filling most of its cell without abutting the wall/pickup
+//     quads next door. `shape = .circle` (not the default `.rect`) so pac reads as a
+//     round piece, not a square — a genre choice that lives here, never in `src/`.
+.{
+    .prototypes = .{
+        // The player. `score` is a data component so the engine (a debug overlay, a
+        // future HUD) can read the running score without asking the script. Yellow,
+        // the classic Pac color.
+        .{
+            .name = "pac",
+            .velocity = .{ .v = .{ .x = 0, .y = 0, .z = 0 } },
+            .collider = .{ .shape = .{ .circle = .{ .radius = 0.4 } }, .layers = .{ .layer = 1, .mask = 46 } },
+            .nav_agent = .{ .speed = 8 },
+            .appearance = .{ .color = .{ 1.0, 0.9, 0.2 }, .size = 0.7, .shape = .circle },
+            // Animated chomp sprite (ADR 0031). The sheet is a DERIVED artifact built by
+            // `mise run assets` from sprites/pac.zon (gitignored, never committed). `loop`
+            // is `.loop`, not `.ping_pong`: the `chomp` clip's frame list already runs the
+            // mouth open-then-shut (0,1,2,3,2,1), so a plain loop bounces seamlessly.
+            // `appearance` stays as the flat-quad fallback (used by the headless SVG and,
+            // until the Vulkan textured pipeline lands, the GPU path); its color is the
+            // sprite tint.
+            .sprite = .{ .sheet = "sprites/pac.msf", .clip = "chomp", .loop = .loop },
+            // Fruit-eaten flash (issue #128): rules.lua sets the existing `flash` data
+            // component to 1 on an `on_collision_begin` fruit pickup and back to 0 a
+            // short beat later (`mana.after`, no new API). Pac draws through the
+            // TEXTURED sprite path (ADR 0031 §4), whose tint MULTIPLIES the sampled
+            // texel (`gpu.SpriteQuad.tint`) rather than replacing it — so state 1 dims
+            // pac to a near-black silhouette and back to full brightness at 12 Hz (a
+            // strobe that reads as a flash on ANY base sprite color, unlike a bright
+            // tint which a multiply can only ever darken, never brighten, a texel
+            // beyond its own value).
+            .tint_cue = .{
+                .selector = "flash",
+                .states = .{
+                    .{ .color = .{ 0.15, 0.15, 0.15 }, .blink_color = .{ 1.0, 1.0, 1.0 }, .blink_hz = 12 },
+                },
+            },
+            .data = .{
+                .{ .name = "kind", .value = 1 },
+                .{ .name = "score", .value = 0 },
+                // Remaining lives, shown by the HUD (issue #133) and decremented by
+                // rules.lua on a fatal ghost catch. Declared here (ADR 0024) so the
+                // column exists — and the HUD reads 3 — from the first tick, before any
+                // `mana.set`.
+                .{ .name = "lives", .value = 3 },
+                .{ .name = "nav_target_col", .value = 0 },
+                .{ .name = "nav_target_row", .value = 0 },
+                .{ .name = "flash", .value = 0 },
+            },
+        },
+    },
+}

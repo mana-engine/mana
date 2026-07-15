@@ -49,5 +49,5 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0035 | `mana.is_walkable`: a read-only tilemap-walkability query | accepted |
 | 0036 | Text rendering: an embedded bitmap font + layout through the sprite atlas/batcher | accepted |
 | 0037 | GPU: Y-down NDC clip-space convention | accepted |
-| 0038 | Game package layout: modular, grouped (by-kind baseline + optional feature folders) content over monolithic blobs | proposed |
+| 0038 | Game package layout: modular, grouped (by-kind baseline + optional feature folders) content over monolithic blobs | accepted |
 | 0039 | UI input events: `on_click`/`on_focus`/`on_activate` | proposed |

@@ -2,10 +2,8 @@
     .name = "chronicle",
     .version = "0.0.1",
     .entry_scene = "scenes/town_square.zon",
-    .scenes = .{
-        "scenes/town_square.zon",
-        "scenes/archive.zon",
-    },
+    // Scenes are globbed from `scenes/*.zon` (ADR 0038 §4); only the entry is named
+    // (the archive scene is discovered, not listed).
     // An isometric adventure — declare the iso view (ADR 0014).
     .projection = .{ .isometric = .{ .half_w = 30, .half_h = 15, .z_height = 20 } },
 }

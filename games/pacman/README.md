@@ -1,7 +1,8 @@
 # pacman — the second North-Star content package (#62)
 
-Grid Pac-Man, implemented entirely as content: `game.zon` + `prototypes.zon` +
-`scenes/maze.zon` + `rules.lua`. **No `src/` code is part of this package** — the engine
+Grid Pac-Man, implemented entirely as content, in the modular by-kind layout (ADR
+0038): `game.zon` + `prototypes/` (globbed & merged — `pac.zon` + `ghosts.zon`) +
+`scenes/maze.zon` + `scripts/rules.lua`. **No `src/` code is part of this package** — the engine
 is genre-neutral; where it once could not express something, that was filed as a
 gap issue and fixed as a *general* engine capability, never patched here (issue #62 and
 CLAUDE.md invariant #6: genre lives in content, never in `src/`).

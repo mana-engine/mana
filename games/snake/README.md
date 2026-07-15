@@ -1,7 +1,8 @@
 # snake — the North-Star content package (#31)
 
-Grid Snake, implemented entirely as content: `game.zon` + `prototypes.zon` +
-`scenes/board.zon` + `rules.lua`. **No `src/` code is part of this package** — where
+Grid Snake, implemented entirely as content, in the modular by-kind layout (ADR 0038):
+`game.zon` + `prototypes/snake.zon` + `scenes/board.zon` + `scripts/rules.lua`. **No
+`src/` code is part of this package** — where
 the engine cannot yet express something, it is filed as a gap issue, not patched here
 (per the issue #31 constraint and CLAUDE.md invariant #6: genre lives in content).
 
