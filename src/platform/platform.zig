@@ -35,6 +35,10 @@ else
 pub const Key = port.Key;
 pub const KeySet = port.KeySet;
 pub const MouseButtons = port.MouseButtons;
+pub const GamepadButton = port.GamepadButton;
+pub const GamepadButtonSet = port.GamepadButtonSet;
+pub const GamepadAxis = port.GamepadAxis;
+pub const GamepadAxes = port.GamepadAxes;
 pub const InputSnapshot = port.InputSnapshot;
 pub const WindowConfig = port.WindowConfig;
 
