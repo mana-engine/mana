@@ -63,3 +63,13 @@ the **null backend is the default**, so ordinary and CI builds are GPU-free. See
   Vulkan with a positive-height viewport (PR #155 fix: use a negative-height viewport).
   Every backend must preserve Y-down NDC; the `gpu.captureFrame` orientation test
   guards it.
+- **lavapipe ICD manifest name is distro-dependent (CI).** The `vulkan-lavapipe` job
+  pins `VK_ICD_FILENAMES` to force the software rasterizer. Mesa on **Ubuntu Noble**
+  names the manifest `/usr/share/vulkan/icd.d/lvp_icd.json` (no arch suffix); the
+  `lvp_icd.x86_64.json` name only exists in some other distros' packaging. Pinning a
+  non-existent path makes the loader find **zero** ICDs, so `vkCreateInstance` returns
+  `VK_ERROR_INCOMPATIBLE_DRIVER` — not "wrong API version", just "no driver" (issue
+  #187). `VK_ERROR_INCOMPATIBLE_DRIVER` past `Loader.open()` always means the loader
+  loaded but enumerated no usable ICD; debug with `VK_LOADER_DEBUG=all vulkaninfo
+  --summary` and `ls /usr/share/vulkan/icd.d/` on the runner. Modern Mesa lavapipe
+  (25.x) reports Vulkan 1.4, so the backend's requested 1.3 is never the limiter.
