@@ -35,6 +35,17 @@ names **no Vulkan type**. It reaches live gameplay state only through the `Host`
   landed on the UI at all, so input can be routed to the UI **before** gameplay input.
   All pure and headless-testable, no window, no script.
 
+## File layout (issue #151)
+
+`ui.zig` crossed the ~500-line soft limit (807 lines) without the room to split it that
+this file's own former "kept as one file for now" note assumed. The maintainer follow-up
+on #151 identified the real seam: pull the shared leaf types (`Rect`/`Widget`/`Placed`/
+`hitTest`, plus `parse`/`layout`/`focusOrder`) into a sibling `types.zig`, so both
+`ui.zig` and a new `focus.zig` (`Focus`/`NavDirection`/`navDirection`/`isActivateKey`)
+import it without either importing the other back. `ui.zig` re-exports both, so the
+public API (`ui.Widget`, `ui.layout`, `ui.Focus`, …) is unchanged; it now holds only the
+`Host` seam and `boundValue`, which don't fit either sibling.
+
 ## Event dispatch to Lua (issue #134, other half — engine-side)
 
 `on_click`/`on_focus`/`on_activate` are pinned by **ADR 0039 (accepted)** and wired in
