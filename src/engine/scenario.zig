@@ -46,9 +46,37 @@ const Sim = sim_mod.Sim;
 /// primitive run-length-encoded, rather than forcing a scenario author to spell out
 /// one entry per tick for a key held across dozens of them (as every staircase here
 /// does — see `tests/acceptance_snake.zig`'s Zig-side PoC this format ports).
+///
+/// `pad_buttons`/`pad_axes` extend the trace to gamepad input (ADR 0028 amendment,
+/// #219, building on the `platform.InputSnapshot.pad_*` fields #214 landed): both are
+/// **optional and additive**. Omitting them (the zero value, `&.{}`) injects an empty
+/// gamepad state — `pad_connected = false`, no buttons held, every axis reads `0` —
+/// bit-identical to a scenario authored before this amendment. This is what lets an
+/// existing keyboard-only scenario (Snake, Pac-Man) parse and run unchanged.
 pub const InputSegment = struct {
     ticks: u32,
     keys: []const []const u8 = &.{},
+    /// Held gamepad buttons (by name, e.g. `"south"`, `"dpad_up"`, matching
+    /// `platform.GamepadButton`'s tag names) for this segment's `ticks`, mirroring
+    /// `keys`. A non-empty list sets `InputSnapshot.pad_connected = true` for the
+    /// segment (a headless scenario has no real device to poll, so "gamepad present"
+    /// is inferred from "the scenario author is driving one").
+    pad_buttons: []const []const u8 = &.{},
+    /// Analog gamepad axis values held for this segment's `ticks`, as (name, value)
+    /// pairs — `name` matches `platform.GamepadAxis`'s tag names, `value` is that
+    /// axis's raw reading (sticks `[-1,1]`, triggers `[0,1]`, per `platform.GamepadAxis`
+    /// doc). An axis not listed here reads `0`, matching `InputSnapshot`'s default. A
+    /// non-empty list, like `pad_buttons`, sets `InputSnapshot.pad_connected = true`.
+    pad_axes: []const AxisValue = &.{},
+};
+
+/// One `(axis name, value)` pair for `InputSegment.pad_axes`. `name` matches a
+/// `platform.GamepadAxis` tag name; `value` defaults to `0` (an axis explicitly
+/// listed at rest, as distinct from an axis simply omitted — both read `0`, but an
+/// explicit entry also counts toward `pad_connected`).
+pub const AxisValue = struct {
+    name: []const u8,
+    value: f32 = 0,
 };
 
 /// Either bound is optional; both null holds for any count. `min == max` expresses
@@ -193,7 +221,10 @@ pub const Report = struct {
 /// than silently skipped — a scenario-authoring bug should be loud, not quiet.
 /// Errors: `error.OutOfMemory` and whatever `Sim.tick` propagates (script/system
 /// failure is caught internally by `Sim`; only OOM crosses this boundary), plus
-/// `error.UnknownKey` if `input_trace` names a key `platform.Key` does not have.
+/// `error.UnknownKey` if `input_trace` names a key `platform.Key` does not have,
+/// `error.UnknownGamepadButton` if `pad_buttons` names one `platform.GamepadButton`
+/// does not have, and `error.UnknownGamepadAxis` likewise for `pad_axes` against
+/// `platform.GamepadAxis`.
 pub fn run(gpa: Allocator, sim: *Sim, scenario: Scenario) !Report {
     sim.setRngSeed(scenario.seed);
     var report = Report.init(gpa);
@@ -208,6 +239,15 @@ pub fn run(gpa: Allocator, sim: *Sim, scenario: Scenario) !Report {
             const key = std.meta.stringToEnum(platform.Key, name) orelse return error.UnknownKey;
             snap.keys.insert(key);
         }
+        for (seg.pad_buttons) |name| {
+            const btn = std.meta.stringToEnum(platform.GamepadButton, name) orelse return error.UnknownGamepadButton;
+            snap.pad_buttons.insert(btn);
+        }
+        for (seg.pad_axes) |av| {
+            const axis = std.meta.stringToEnum(platform.GamepadAxis, av.name) orelse return error.UnknownGamepadAxis;
+            snap.pad_axes.set(axis, av.value);
+        }
+        snap.pad_connected = seg.pad_buttons.len != 0 or seg.pad_axes.len != 0;
         for (0..seg.ticks) |_| {
             sim.setInput(snap);
             try sim.tick();
@@ -514,6 +554,79 @@ test "scenario: an unknown key name in input_trace errors instead of silently no
     defer sim.deinit();
     const scenario: Scenario = .{ .input_trace = &.{.{ .ticks = 1, .keys = &.{"not_a_real_key"} }} };
     try testing.expectError(error.UnknownKey, run(gpa, &sim, scenario));
+}
+
+test "scenario: parse round-trips pad_buttons/pad_axes on InputSegment (ADR 0028 amendment, #219)" {
+    const src =
+        \\.{
+        \\    .input_trace = .{
+        \\        .{ .ticks = 2, .pad_buttons = .{ "south", "dpad_up" }, .pad_axes = .{ .{ .name = "left_x", .value = 0.75 } } },
+        \\    },
+        \\}
+    ;
+    const s = try parse(testing.allocator, src);
+    defer free(testing.allocator, s);
+    try testing.expectEqual(@as(usize, 1), s.input_trace.len);
+    try testing.expectEqualStrings("south", s.input_trace[0].pad_buttons[0]);
+    try testing.expectEqualStrings("dpad_up", s.input_trace[0].pad_buttons[1]);
+    try testing.expectEqual(@as(usize, 1), s.input_trace[0].pad_axes.len);
+    try testing.expectEqualStrings("left_x", s.input_trace[0].pad_axes[0].name);
+    try testing.expectEqual(@as(f32, 0.75), s.input_trace[0].pad_axes[0].value);
+}
+
+test "scenario: run injects a segment's pad_buttons/pad_axes into the tick's InputSnapshot" {
+    const gpa = testing.allocator;
+    var sim = try nudgeSim(gpa);
+    defer sim.deinit();
+
+    const scenario: Scenario = .{
+        .input_trace = &.{.{
+            .ticks = 1,
+            .pad_buttons = &.{"south"},
+            .pad_axes = &.{.{ .name = "left_x", .value = 0.5 }},
+        }},
+    };
+    var report = try run(gpa, &sim, scenario);
+    defer report.deinit();
+    try testing.expect(sim.input.pad_connected);
+    try testing.expect(sim.input.pad_buttons.contains(.south));
+    try testing.expectEqual(@as(usize, 1), sim.input.pad_buttons.count());
+    try testing.expectEqual(@as(f32, 0.5), sim.input.pad_axes.get(.left_x));
+    // an axis never named in pad_axes still reads 0, exactly like InputSnapshot's default.
+    try testing.expectEqual(@as(f32, 0), sim.input.pad_axes.get(.left_y));
+}
+
+test "scenario: a keyboard-only segment (no gamepad fields) injects empty gamepad state, unchanged (back-compat, #219)" {
+    const gpa = testing.allocator;
+    var sim = try nudgeSim(gpa);
+    defer sim.deinit();
+
+    const scenario: Scenario = .{
+        .input_trace = &.{.{ .ticks = 1, .keys = &.{"right"} }},
+    };
+    var report = try run(gpa, &sim, scenario);
+    defer report.deinit();
+    try testing.expect(sim.input.keys.contains(.right)); // keyboard injection unaffected
+    try testing.expect(!sim.input.pad_connected);
+    try testing.expectEqual(@as(usize, 0), sim.input.pad_buttons.count());
+    try testing.expectEqual(@as(f32, 0), sim.input.pad_axes.get(.left_x));
+    try testing.expectEqual(@as(f32, 0), sim.input.pad_axes.get(.left_trigger));
+}
+
+test "scenario: an unknown pad_buttons name errors instead of silently no-oping" {
+    const gpa = testing.allocator;
+    var sim = try nudgeSim(gpa);
+    defer sim.deinit();
+    const scenario: Scenario = .{ .input_trace = &.{.{ .ticks = 1, .pad_buttons = &.{"not_a_real_button"} }} };
+    try testing.expectError(error.UnknownGamepadButton, run(gpa, &sim, scenario));
+}
+
+test "scenario: an unknown pad_axes name errors instead of silently no-oping" {
+    const gpa = testing.allocator;
+    var sim = try nudgeSim(gpa);
+    defer sim.deinit();
+    const scenario: Scenario = .{ .input_trace = &.{.{ .ticks = 1, .pad_axes = &.{.{ .name = "not_a_real_axis", .value = 1 }} }} };
+    try testing.expectError(error.UnknownGamepadAxis, run(gpa, &sim, scenario));
 }
 
 test "scenario: a Layer-1 invariant violation aborts the replay and is reported" {
