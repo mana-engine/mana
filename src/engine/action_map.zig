@@ -396,3 +396,19 @@ test "action_map: an `.actions` value that isn't an object is a ParseZon error (
     ;
     try testing.expectError(error.ParseZon, parse(testing.allocator, src));
 }
+
+test "action_map: a valid action followed by an invalid one frees the already-filled bindings (no leak)" {
+    // Exercises the `errdefer for (bindings[0..filled])` cleanup branch with filled > 0:
+    // `.good` fills bindings[0], then `.bad` (unbound) fails validate, so parse must free
+    // the first binding's name+action (and the bindings slice) as it unwinds. The leak-
+    // detecting testing allocator turns any missed free here into a test failure.
+    const src: [:0]const u8 =
+        \\.{
+        \\    .actions = .{
+        \\        .good = .{ .type = .button, .keys = .{.space} },
+        \\        .bad = .{ .type = .button },
+        \\    },
+        \\}
+    ;
+    try testing.expectError(error.Unbound, parse(testing.allocator, src));
+}

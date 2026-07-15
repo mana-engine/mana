@@ -216,6 +216,23 @@ fn loadPackageScript(io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest
     try sim.loadScript(src);
 }
 
+/// Load a package's action-binding table (ADR 0040 §3; issue #216) if the manifest
+/// declares an `input` path, reading `<pkg>/<input>` (package layout, ADR 0038) and
+/// parsing it via `engine.action_map.parse`. Returns an owned `ActionMap` the caller
+/// borrows onto `Sim.action_map` (mirroring how the scene's `tilemap` is borrowed), or
+/// null when the manifest declares no `input` (the package binds no actions). The
+/// caller owns the result and must `engine.action_map.free` it *after* the `Sim` that
+/// borrows it is torn down. Errors: file-read failures, plus `engine.action_map.parse`'s
+/// `ParseZon`/`Unbound`/`WrongTypedSource`/`OutOfMemory`.
+fn loadActionMap(io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest) !?engine.ActionMap {
+    const rel = manifest.input orelse return null;
+    const path = try std.fs.path.join(gpa, &.{ pkg, rel });
+    defer gpa.free(path);
+    const src = try Io.Dir.cwd().readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0);
+    defer gpa.free(src);
+    return try engine.action_map.parse(gpa, src);
+}
+
 /// Refuse a package that needs a newer scripting API than this build provides.
 fn checkScriptApi(out: *Io.Writer, manifest: Manifest) !void {
     if (manifest.script_api > provided_script_api) {
@@ -339,11 +356,18 @@ fn runRenderPlayFrame(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, 
     var protos = try loadPrototypes(io, gpa, pkg);
     defer protos.deinit();
 
+    // Action-binding table (ADR 0040 §3; issue #216): parsed before the Sim and freed
+    // after it (LIFO defers), so the `sim.action_map` borrow below never dangles —
+    // exactly how the scene's `tilemap` is scoped. Null when the manifest has no `input`.
+    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+    defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
+
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
     sim.prototypes = .{ .prototypes = protos.prototypes };
     try engine.scene.load(parsed, &sim.world);
     if (parsed.tilemap) |*tm| sim.tilemap = tm; // see runOnce: parsed outlives sim (LIFO defers)
+    if (action_map_opt) |*am| sim.action_map = am; // #216: borrowed like tilemap (outlives sim)
     try loadPackageScript(io, gpa, pkg, manifest, &sim);
     sim.enterScene(parsed.name);
     try sim.addSystem(engine.input.inputMoveSystem); // #30: same load path as --play
@@ -447,11 +471,18 @@ fn runFilmstrip(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, dir: [
     var protos = try loadPrototypes(io, gpa, pkg);
     defer protos.deinit();
 
+    // Action-binding table (ADR 0040 §3; issue #216): parsed before the Sim and freed
+    // after it (LIFO defers), so the `sim.action_map` borrow below never dangles —
+    // exactly how the scene's `tilemap` is scoped. Null when the manifest has no `input`.
+    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+    defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
+
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
     sim.prototypes = .{ .prototypes = protos.prototypes };
     try engine.scene.load(parsed, &sim.world);
     if (parsed.tilemap) |*tm| sim.tilemap = tm; // see runOnce: parsed outlives sim (LIFO defers)
+    if (action_map_opt) |*am| sim.action_map = am; // #216: borrowed like tilemap (outlives sim)
     try loadPackageScript(io, gpa, pkg, manifest, &sim);
     sim.enterScene(parsed.name);
     try registerStandardSystems(&sim);
@@ -499,11 +530,18 @@ fn runScenario(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, scenari
     var protos = try loadPrototypes(io, gpa, pkg);
     defer protos.deinit();
 
+    // Action-binding table (ADR 0040 §3; issue #216): parsed before the Sim and freed
+    // after it (LIFO defers), so the `sim.action_map` borrow below never dangles —
+    // exactly how the scene's `tilemap` is scoped. Null when the manifest has no `input`.
+    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+    defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
+
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
     sim.prototypes = .{ .prototypes = protos.prototypes };
     try engine.scene.load(parsed, &sim.world);
     if (parsed.tilemap) |*tm| sim.tilemap = tm; // see runOnce: parsed outlives sim (LIFO defers)
+    if (action_map_opt) |*am| sim.action_map = am; // #216: borrowed like tilemap (outlives sim)
     try loadPackageScript(io, gpa, pkg, manifest, &sim);
     sim.enterScene(parsed.name);
     try registerStandardSystems(&sim);
@@ -583,6 +621,12 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     var protos = try loadPrototypes(io, gpa, pkg);
     defer protos.deinit();
 
+    // Action-binding table (ADR 0040 §3; issue #216): parsed before the Sim and freed
+    // after it (LIFO defers), so the `sim.action_map` borrow below never dangles —
+    // exactly how the scene's `tilemap` is scoped. Null when the manifest has no `input`.
+    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+    defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
+
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
     sim.prototypes = .{ .prototypes = protos.prototypes };
@@ -590,6 +634,7 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     // Same tilemap borrow as the one-shot path (see runOnce): `parsed` outlives `sim`
     // (LIFO defers), so nav can path over the scene's grid; null ⇒ nav no-ops.
     if (parsed.tilemap) |*tm| sim.tilemap = tm;
+    if (action_map_opt) |*am| sim.action_map = am; // #216: borrowed like tilemap (outlives sim)
     try loadPackageScript(io, gpa, pkg, manifest, &sim); // #51: package Lua handlers
     sim.enterScene(parsed.name); // #54/ADR 0017: fire on_scene_enter on the first tick
     try sim.addSystem(engine.input.inputMoveSystem); // #30: held keys → velocity (before nav)
@@ -809,6 +854,12 @@ fn runOnce(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     var protos = try loadPrototypes(io, gpa, pkg);
     defer protos.deinit();
 
+    // Action-binding table (ADR 0040 §3; issue #216): parsed before the Sim and freed
+    // after it (LIFO defers), so the `sim.action_map` borrow below never dangles —
+    // exactly how the scene's `tilemap` is scoped. Null when the manifest has no `input`.
+    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+    defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
+
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
     sim.prototypes = .{ .prototypes = protos.prototypes };
@@ -818,6 +869,7 @@ fn runOnce(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     // before `sim`'s `defer deinit`, and defers run LIFO, so the sim is torn down first
     // and this borrow never dangles. Null tilemap ⇒ nav no-ops (see registerStandardSystems).
     if (parsed.tilemap) |*tm| sim.tilemap = tm;
+    if (action_map_opt) |*am| sim.action_map = am; // #216: borrowed like tilemap (outlives sim)
     try loadPackageScript(io, gpa, pkg, manifest, &sim); // #51: package Lua handlers
     sim.enterScene(parsed.name); // #54/ADR 0017: fire on_scene_enter on the first tick
     try registerStandardSystems(&sim);
@@ -966,6 +1018,51 @@ test "watch set: syncWatchSet globs kind-directories plus manifest and hud" {
     // `syncWatchSet` clears before re-adding (last-good re-sync is idempotent).
     try syncWatchSet(&watcher, io, gpa, pkg, manifest);
     try testing.expectEqual(@as(usize, 5), watcher.watchedCount());
+}
+
+test "load path: a manifest with `.input` loads and borrows a populated Sim.action_map (ADR 0040 §3, #216)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "input.zon",
+        .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.space} } } }
+        ,
+    });
+    const manifest: Manifest = .{ .name = "t", .version = "0", .entry_scene = "s.zon", .input = "input.zon" };
+
+    // The same load helper the five run paths call, then the same borrow onto a Sim.
+    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+    defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
+    try testing.expect(action_map_opt != null);
+
+    var sim = engine.Sim.init(gpa, core.time.default_dt);
+    defer sim.deinit();
+    if (action_map_opt) |*am| sim.action_map = am;
+
+    try testing.expect(sim.action_map != null);
+    const jump = sim.action_map.?.find("jump").?;
+    try testing.expectEqual(engine.action_map.ActionType.button, jump.type);
+    try testing.expectEqualSlices(engine.platform.Key, &.{.space}, jump.keys);
+}
+
+test "load path: a manifest with no `.input` leaves Sim.action_map null (#216)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    const manifest: Manifest = .{ .name = "t", .version = "0", .entry_scene = "s.zon" };
+    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+    defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
+    try testing.expect(action_map_opt == null); // no `.input` ⇒ nothing loaded, Sim.action_map stays default null
 }
 
 /// Watch mode: tick, poll the whole package, hot-reload on change (last-good-wins).
