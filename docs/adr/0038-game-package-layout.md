@@ -214,9 +214,9 @@ principle-based and letting real content, not speculation, settle the mechanics.
   `projection`, `native_module`. These are identity, the one start scene, and settings
   that apply to the whole package.
 - It **stops enumerating bulk content**: the redundant `scenes: []const []const u8`
-  list and the single-file `.prototypes`/`.hud` paths give way to **globbing the
+  list and the single-file `.prototypes` paths give way to **globbing the
   conventional kind-directories (`prototypes/`, `scripts/`, `scenes/`) and any feature
-  folders** (§3). Adding a prototype file or a script module needs no manifest edit —
+  folders** (§3); `.hud` remains a single named field (per §2). Adding a prototype file or a script module needs no manifest edit —
   the file's presence *is* the declaration (files-are-truth). The exact rule for how the
   loader recognises a feature folder is left to the implementation (§3).
 - Because `data.parseLenient` ignores unknown fields, an older runner still parses a
