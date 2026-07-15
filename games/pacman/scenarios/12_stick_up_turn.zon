@@ -1,0 +1,43 @@
+// Pac-Man staircase, step 12 (issue #221): the DEVICE-AGNOSTIC proof. This is
+// `08_straight_through.zon`'s open up-turn driven by a GAMEPAD LEFT STICK instead of the
+// keyboard "up" key — and it asserts the *identical* pac trajectory, proving keyboard and
+// gamepad drive the same `move` action to the same result (ADR 0040 §8; input.zon's `move`
+// axis2d binds `pad_stick = .left` alongside `keys_2d`).
+//
+// The stick is injected via the #219 scenario-harness `pad_axes` field (ADR 0028 amendment):
+// `left_y = -0.9`. Sign convention (action_resolve.zig / SDL native, preserved): left_y
+// negative = UP, positive = down; magnitude 0.9 clears input.zon's `deadzone = 0.3`
+// cleanly and, with left_x resting at 0, thresholds unambiguously to the dominant vertical
+// axis. rules.lua's `poll_move_dir` then folds that (0, -0.9) vector to the SAME discrete
+// 4-way heading (dr = -1, up) a keyboard "up" (0, -1) yields — the engine keeps the value
+// analog, content cuts it to the grid (ADR 0040 §8) — so pac's nav trajectory is bit-for-bit
+// the keyboard trip's. Hence every checkpoint below is copied verbatim from
+// `08_straight_through.zon`: an open stick-up turn onto column 8 (tick 10: still x=-1, y past
+// its start row) and the flush stop at the row-6 wall (tick 40: x=-1, y=2.0). If the stick
+// ever steered pac differently from the key, these would diverge — that is the whole test.
+//
+// (The d-pad staircase step the issue also sketched — `11_gamepad_dpad_turn.zon` — is
+// deliberately NOT authored here: d-pad buttons are not bound to the `move` axis2d action
+// yet (the resolver has no d-pad→axis2d path; input.zon binds only the stick + keys), so an
+// injected d-pad trace would be ignored by `move` and its turn assertion would fail. That
+// step is deferred to the d-pad engine issue + ADR 0040 §4 amendment; slot 11 is reserved
+// for it. The left stick IS bound today, so it is what this device-agnostic proof exercises.)
+.{
+    .steps = 40,
+    .input_trace = .{
+        .{ .ticks = 1 },
+        .{ .ticks = 39, .pad_axes = .{.{ .name = "left_y", .value = -0.9 }} },
+    },
+    .expect = .{
+        .{
+            .label = "stick (turn): an open left-stick push up (left_y=-0.9) turns pac onto column 8 heading up — identical to keyboard 'up' (still x=-1, y past its start row)",
+            .at_tick = 10,
+            .check = .{ .occupied = .{ .x = -1, .y = 3.6, .eps = 0.02 } },
+        },
+        .{
+            .label = "stick (stop): pac crosses the row-7 intersection and stops flush at the row-6 wall — bit-identical to the keyboard trip (row-7 centre)",
+            .at_tick = 40,
+            .check = .{ .occupied = .{ .x = -1, .y = 2.0, .eps = 0.02 } },
+        },
+    },
+}

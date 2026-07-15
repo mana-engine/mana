@@ -1,0 +1,41 @@
+// Pac-Man staircase, step 13 (issue #221): the device-agnostic proof, second axis. This is
+// `10_down_through.zon`'s up-then-down round trip driven by the GAMEPAD LEFT STICK instead of
+// the keyboard "up"/"down" keys, asserting the *identical* pac trajectory — proving the stick
+// drives `move` to the same result as the keyboard on the +y (down) direction too, not just
+// -y. Together with `12_stick_up_turn.zon` this pins both vertical directions device-agnostic.
+//
+// Injected via the #219 `pad_axes` field (ADR 0028 amendment): a `left_y = -0.9` push (UP)
+// held while pac climbs to row 7, then a `left_y = +0.9` push (DOWN) to ride column 8 back
+// down to its start row. Sign convention (action_resolve.zig / SDL native): left_y negative =
+// up, positive = down; 0.9 clears input.zon's `deadzone = 0.3` and, with left_x at rest,
+// thresholds cleanly to the dominant vertical axis. rules.lua's `poll_move_dir` folds each
+// analog value to the SAME discrete heading the matching key gives (dr = -1 then dr = +1) —
+// analog stays analog into the engine, content cuts it to the grid (ADR 0040 §8) — so pac's
+// nav path is bit-for-bit `10_down_through.zon`'s. The segment boundaries below (up from tick
+// 2, down from tick 41) and the checkpoints (tick 50: x=-1, y=2.8, clearly left row 7; tick
+// 90: x=-1, y=4.0, flush home at its own start row against the bottom border) are therefore
+// copied verbatim from that keyboard step. Divergence here means the stick and key steer pac
+// differently on +y — exactly what this guards against.
+//
+// (No d-pad step: d-pad is unbound on the `move` axis2d action today — deferred to the d-pad
+// engine issue + ADR 0040 §4 amendment; see `12_stick_up_turn.zon`'s note. Slot 11 reserved.)
+.{
+    .steps = 90,
+    .input_trace = .{
+        .{ .ticks = 1 },
+        .{ .ticks = 39, .pad_axes = .{.{ .name = "left_y", .value = -0.9 }} },
+        .{ .ticks = 50, .pad_axes = .{.{ .name = "left_y", .value = 0.9 }} },
+    },
+    .expect = .{
+        .{
+            .label = "stick (open turn): a left-stick push down (left_y=+0.9) after reaching row 7 turns pac's heading downward — identical to keyboard 'down' (y past row 7, still x=-1)",
+            .at_tick = 50,
+            .check = .{ .occupied = .{ .x = -1.0, .y = 2.8, .eps = 0.02 } },
+        },
+        .{
+            .label = "stick (stop): pac rides column 8 back down through row 8's gap and stops flush at its own start row — bit-identical to the keyboard 'down' trip (dr=+1, confirmed all the way home)",
+            .at_tick = 90,
+            .check = .{ .occupied = .{ .x = -1.0, .y = 4.0, .eps = 0.02 } },
+        },
+    },
+}
