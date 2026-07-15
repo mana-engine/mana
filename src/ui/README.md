@@ -35,17 +35,14 @@ names **no Vulkan type**. It reaches live gameplay state only through the `Host`
   landed on the UI at all, so input can be routed to the UI **before** gameplay input.
   All pure and headless-testable, no window, no script.
 
-## Deferred: event dispatch to Lua (issue #134, other half)
+## Event dispatch to Lua (issue #134, other half — engine-side)
 
-ADR 0034 §3 sketches `on_click`/`on_focus`/`on_activate` as the shape UI interaction
-will take, but its Consequences section explicitly leaves the concrete event names,
-payloads, and any handle type **unpinned**, calling out that wiring them is "#134, its
-own ADR per ADR 0003 §5's 'any change to the surface needs its own ADR'". Issue #134
-itself repeats the same three names without an ADR reference. Per that discipline
-(CLAUDE.md: "every scripting-API addition needs an ADR"), this module does not invent
-that surface: hit-testing and focus navigation above are complete and reusable by
-whatever dispatch mechanism a follow-on ADR pins, but calling into `script`/Lua for
-`on_click`/`on_focus`/`on_activate` needs that ADR written and accepted first.
+`on_click`/`on_focus`/`on_activate` are pinned by **ADR 0039 (accepted)** and wired in
+`engine/ui_dispatch.zig`, one tier up: it consumes the hit-test/focus primitives above,
+applies the ADR 0039 §3 "UI consumes input before gameplay" ordering, and dispatches the
+three events to the Sim's Lua handler table. `ui` itself stays the pure interpreter and
+names no Lua/handle type — its only contribution to that surface is the content-authored
+`Widget.id` (ADR 0039 §2), the stable name a handler correlates a UI event against.
 
 ## Rendering (engine-side bridge)
 
@@ -58,6 +55,6 @@ same split `render.zig` uses. A label's text is sized to fit its rect height.
 
 ## Deferred (later phased slices, ADR 0034 §8)
 
-Event dispatch to Lua (#134's other half, see above — needs its own ADR first),
-styling/theming, `image` widget resolution, and intrinsic (text-driven) label sizing
-(today a label's rect drives its text scale, not the reverse).
+Styling/theming, `image` widget resolution, and intrinsic (text-driven) label sizing
+(today a label's rect drives its text scale, not the reverse). Event dispatch to Lua
+(#134's other half) is done — see the section above and `engine/ui_dispatch.zig`.
