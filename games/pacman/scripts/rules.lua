@@ -13,7 +13,10 @@
 --     (ADR 0025), classified by a `kind` data tag — not Lua coordinate math.
 --
 -- What stayed (never a gap): mode timing via `mana.every`/`mana.after`, per-entity data
--- (`score`/`frightened`, ADR 0024), and the input→heading path (`on_key`) Snake proved.
+-- (`score`/`frightened`, ADR 0024). The input→heading path moved OFF raw `on_key` onto the
+-- data-driven `move` action (ADR 0040; games/pacman/input.zon): `poll_move_dir` reads
+-- `mana.action_vector("move")` and thresholds the vector to a 4-way grid heading in Lua,
+-- so keyboard/WASD and a gamepad left stick drive pac through one device-agnostic action.
 
 -- Grid frame — must match scenes/maze.zon's tilemap (origin/cell_size). Cell (col,row)
 -- maps to world (col-9, row-5, 0); world maps back by rounding to the nearest cell.
@@ -110,6 +113,32 @@ local function pac_cell()
     return entity_cell(pac)
 end
 
+-- Sample the device-agnostic `move` action (ADR 0040 §2, input.zon) and fold it into
+-- pac's 4-way grid heading. `mana.action_vector` returns the resolved (x, y) as two
+-- numbers (never a table — no per-tick heap alloc), device-agnostic: arrow keys, WASD,
+-- or the gamepad left stick all land here identically, already dead-zoned engine-side.
+--   * Sign convention is the engine's (action_resolve.zig): right +x, left -x, down +y,
+--     up -y — which maps STRAIGHT onto pac's (dc, dr) cell delta, so a bare sign is the
+--     heading.
+--   * Pac-Man is a grid/4-way game, so the (possibly analog or diagonal) vector is
+--     thresholded to its DOMINANT axis IN LUA (ADR 0040 §8 — the engine keeps analog
+--     analog; content decides the grid cut). Dominant-axis wins; an exact |x| == |y|
+--     tie (a clean diagonal) breaks toward horizontal, an arbitrary-but-deterministic
+--     choice.
+--   * A zero vector (nothing held / inside the stick dead-zone) LEAVES pac_dir untouched
+--     — pac holds its current lane until the player picks a new direction, exactly the
+--     old `on_key`-edge behaviour (a release never re-steered pac).
+local function poll_move_dir()
+    local vx, vy = mana.action_vector("move")
+    local ax, ay = math.abs(vx), math.abs(vy)
+    if ax < 0.01 and ay < 0.01 then return end -- no deliberate input this tick
+    if ax >= ay then
+        pac_dir = { dc = (vx > 0) and 1 or -1, dr = 0 }
+    else
+        pac_dir = { dc = 0, dr = (vy > 0) and 1 or -1 }
+    end
+end
+
 -- One selection pass (a coarse timer, a handful of movers — never a per-frame world
 -- scan). Pac targets the FARTHEST walkable cell along its heading (#139), not the single
 -- next cell (#108's original fix): a one-cell-ahead target let pac *reach* its target
@@ -138,6 +167,7 @@ end
 --     pac; inside that radius he flees to his own scatter corner instead, so he never
 --     closes the final few cells.
 local function retarget()
+    poll_move_dir() -- device-agnostic `move` action → pac_dir (ADR 0040), before we use it
     local pc, pr = pac_cell()
     set_target(pac, farthest_open(pc, pr, pac_dir.dc, pac_dir.dr))
 
@@ -287,17 +317,10 @@ return {
             if frightened then send_home(other) else reset_actors() end
         end
     end,
-
-    -- Directional input (ADR 0021): a key press sets pac's heading; the next selection
-    -- pass turns that into a nav target. Issue #159: `cell_to_world` puts row+ at
-    -- higher world y, and post-#155 (the live Vulkan vertical-flip fix) higher world y
-    -- renders LOWER on screen, so row- (toward row 0, the top of the maze's ASCII art)
-    -- is up on screen, not row+.
-    on_key = function(ev)
-        if not ev.pressed then return end
-        if ev.key == "up" then pac_dir = { dc = 0, dr = -1 } end
-        if ev.key == "down" then pac_dir = { dc = 0, dr = 1 } end
-        if ev.key == "left" then pac_dir = { dc = -1, dr = 0 } end
-        if ev.key == "right" then pac_dir = { dc = 1, dr = 0 } end
-    end,
+    -- Directional input is no longer an `on_key` edge: `poll_move_dir` (above) reads the
+    -- device-agnostic `move` action inside the `retarget` timer — the same pass that
+    -- consumes `pac_dir` — so keyboard/WASD and a gamepad stick steer pac identically
+    -- (ADR 0040 §2/§8). Issue #159 still holds: `cell_to_world` puts row+ at higher world
+    -- y, and post-#155 higher world y renders LOWER on screen, so the engine's up = -y
+    -- maps to pac's dr = -1 (toward row 0, the top of the maze's ASCII art) = up on screen.
 }

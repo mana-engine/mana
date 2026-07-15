@@ -40,6 +40,11 @@ const PackagePaths = struct {
     dir: []const u8,
     scene: []const u8,
     rules: []const u8,
+    /// Optional `input.zon` action-binding table (ADR 0040 §3). When set, `load` parses it
+    /// into the `Sim.action_map` the resolver reads for `mana.action_*` polls — exactly as
+    /// `src/runtime/main.zig`'s `runScenario` load path does (`loadActionMap`). Null for a
+    /// package that binds no actions (Snake), matching a manifest with no `.input`.
+    input: ?[]const u8 = null,
 };
 
 const snake_paths: PackagePaths = .{
@@ -52,6 +57,7 @@ const pacman_paths: PackagePaths = .{
     .dir = "games/pacman",
     .scene = "games/pacman/scenes/maze.zon",
     .rules = "games/pacman/scripts/rules.lua",
+    .input = "games/pacman/input.zon",
 };
 
 /// A loaded, ready-to-replay game package: prototypes → scene (+ tilemap, if any) →
@@ -67,6 +73,10 @@ const Package = struct {
     scene_src: [:0]u8,
     scene: engine.Scene,
     rules: [:0]u8,
+    /// Owned parsed `input.zon` (ADR 0040 §3), or null for a package with no `.input`.
+    /// `sim.action_map` borrows `&self.action_map.?` — stable because `Package` is
+    /// heap-allocated (the create above), so the borrow outlives every replay tick.
+    action_map: ?engine.action_map.ActionMap,
     sim: engine.Sim,
 
     fn load(gpa: Allocator, io: Io, paths: PackagePaths) !*Package {
@@ -87,11 +97,22 @@ const Package = struct {
         self.rules = try readFile(gpa, io, paths.rules);
         errdefer gpa.free(self.rules);
 
+        // Action-binding table (ADR 0040 §3), parsed from `input.zon` before the Sim and
+        // freed after it (deinit, LIFO of load), so the `sim.action_map` borrow never
+        // dangles — exactly `runScenario`'s scoping. Null for a package with no `.input`.
+        self.action_map = if (paths.input) |input_path| blk: {
+            const src = try readFile(gpa, io, input_path);
+            defer gpa.free(src);
+            break :blk try engine.action_map.parse(gpa, src);
+        } else null;
+        errdefer if (self.action_map) |am| engine.action_map.free(gpa, am);
+
         self.sim = engine.Sim.init(gpa, core.time.default_dt);
         errdefer self.sim.deinit();
         self.sim.prototypes = .{ .prototypes = self.protos.prototypes };
         try engine.scene.load(self.scene, &self.sim.world);
         if (self.scene.tilemap) |*tm| self.sim.tilemap = tm;
+        if (self.action_map) |*am| self.sim.action_map = am; // #216: borrowed like tilemap
         try self.sim.loadScript(self.rules);
         self.sim.enterScene(self.scene.name);
         try self.sim.addSystem(engine.nav.navSystem);
@@ -104,6 +125,7 @@ const Package = struct {
     fn deinit(self: *Package) void {
         const gpa = self.gpa;
         self.sim.deinit();
+        if (self.action_map) |am| engine.action_map.free(gpa, am);
         self.protos.deinit();
         engine.scene.free(gpa, self.scene);
         gpa.free(self.scene_src);
