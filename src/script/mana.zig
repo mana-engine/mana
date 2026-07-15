@@ -6,7 +6,7 @@
 //! surface — one small `zlua.wrap` shim per `mana.*` member, registered in one
 //! `pushManaTable`, with each member's behavior test beside it. Splitting the table
 //! across files would scatter the single versioned API and its shape test for no
-//! gain; it grows only when an ADR adds a member (this one added `is_walkable`).
+//! gain; it grows only when an ADR adds a member (this one added `key_down`).
 //!
 //! Members that need no live Sim — `version`, `log` — are implemented directly.
 //! The live-Sim members reach the world/clock/command-buffer/RNG through the ADR
@@ -14,20 +14,23 @@
 //! for the duration of each event dispatch, and these accessors call through it.
 //! Wired: the reads `is_valid`, `position`, `now`, `get` (named data components, ADR
 //! 0024), `random`, `random_int` (ADR 0022, issue #47), `is_walkable` (the scene
-//! tilemap's walkability grid, ADR 0035), and the deferred mutations `set` (named
+//! tilemap's walkability grid, ADR 0035), `key_down` (the raw-device held-state
+//! keyboard poll, ADR 0021 §5 / ADR 0040 §2), and the deferred mutations `set` (named
 //! data components, ADR 0024), `set_velocity`, `set_position`, `despawn`, `spawn`
 //! (queued on the buffer, applied at the next flush — never a mid-dispatch world
 //! mutation). `is_valid` prefers the host when present (authoritative live-world
 //! check) and falls back to this `State`'s own `handle.Registry` when no Sim is
 //! dispatching, so its pre-seam behavior and tests still hold; mutations with no host
 //! installed are dropped (`spawn` returns an invalid handle); reads (`get`/`position`/
-//! `now`/`random`/`random_int`/`is_walkable`) return nil/0/lo/false with no host
-//! installed (the same graceful degradation). Timers `after`/`every`/`cancel` (ADR
-//! 0019) reference the Lua callback in the registry and schedule it on the engine's
-//! wheel through the host, firing host-live in the dispatch phase.
+//! `now`/`random`/`random_int`/`is_walkable`/`key_down`) return nil/0/lo/false with no
+//! host installed (the same graceful degradation). Timers `after`/`every`/`cancel`
+//! (ADR 0019) reference the Lua callback in the registry and schedule it on the
+//! engine's wheel through the host, firing host-live in the dispatch phase.
 //!
-//! With `get`/`set`/`is_walkable` this table is the complete ADR 0003 §2 (as amended
-//! by ADR 0035) `mana` v1 surface — no member remains deferred.
+//! With `get`/`set`/`is_walkable`/`key_down` this table is the ADR 0003 §2 `mana` v1
+//! surface as amended by ADR 0035 and ADR 0021 §5/ADR 0040 §2 — `key_down` was the
+//! last deferred half; `action_down`/`action_axis`/`action_vector`/`on_action` (ADR
+//! 0040 §2) remain a separate lane (#193/the data-driven action map).
 
 const std = @import("std");
 const zlua = @import("zlua");
@@ -128,6 +131,10 @@ pub fn pushManaTable(l: *Lua, entities: *const Registry, host: *const ?Host) voi
     l.pushLightUserdata(@ptrCast(host));
     l.pushClosure(zlua.wrap(manaIsWalkable), 1);
     l.setField(-2, "is_walkable");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaKeyDown), 1);
+    l.setField(-2, "key_down");
 }
 
 /// Read a `*const ?Host` back from closure upvalue `idx` (a light-userdata pointer
@@ -397,6 +404,23 @@ fn pushFalse(l: *Lua) i32 {
     return 1;
 }
 
+/// `mana.key_down(name) -> bool` (ADR 0021 §5; ADR 0040 §2): the raw-device
+/// held-state keyboard poll — is `name` (the same `@tagName` string `on_key`
+/// already uses, e.g. `"up"`, `"w"`, `"escape"`) currently held on the sim's
+/// current `InputSnapshot`. It is a pure, immediate read — never queued, and never
+/// part of the state hash (input is hash-excluded, ADR 0009 §4). Coexists with the
+/// device-agnostic `mana.action_down`: `key_down` names a specific physical key,
+/// `action_down` names an action bound to one-or-many physical inputs. Degrades to
+/// `false` (never raises) for a name that is not a known key — a content typo — or
+/// when no Sim is dispatching, the same graceful-degradation policy `is_walkable`
+/// uses for an out-of-grid read.
+fn manaKeyDown(l: *Lua) !i32 {
+    const name = l.checkString(1);
+    const held = if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.keyDown(name) else false;
+    l.pushBoolean(held);
+    return 1;
+}
+
 const testing = std.testing;
 
 test "mana: table shape exposes exactly the wired members (version..despawn); version == 1" {
@@ -417,12 +441,12 @@ test "mana: table shape exposes exactly the wired members (version..despawn); ve
         key_count += 1;
         l.pop(1); // drop value; keep key on the stack to advance `next`
     }
-    try testing.expectEqual(@as(usize, 17), key_count);
+    try testing.expectEqual(@as(usize, 18), key_count);
 
     try testing.expectEqual(zlua.LuaType.number, l.getField(t, "version"));
     try testing.expectEqual(@as(i64, 1), try l.toInteger(-1));
     l.pop(1);
-    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "set_position", "despawn", "spawn", "every", "after", "cancel", "random", "random_int", "get", "set", "is_walkable" }) |name| {
+    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "set_position", "despawn", "spawn", "every", "after", "cancel", "random", "random_int", "get", "set", "is_walkable", "key_down" }) |name| {
         try testing.expectEqual(zlua.LuaType.function, l.getField(t, name));
         l.pop(1);
     }
@@ -615,6 +639,10 @@ const FakeGridHost = struct {
         _ = .{ ctx, lo, hi };
         unreachable;
     }
+    fn keyDown(ctx: *anyopaque, name: []const u8) bool {
+        _ = .{ ctx, name };
+        unreachable;
+    }
     const vtable: Host.VTable = .{
         .is_valid = isValid,
         .position = position,
@@ -631,6 +659,7 @@ const FakeGridHost = struct {
         .random = random,
         .random_int = randomInt,
         .is_walkable = isWalkable,
+        .key_down = keyDown,
     };
 };
 
@@ -673,4 +702,148 @@ test "mana.is_walkable: an out-of-i32-range coordinate returns false, never a pa
     try testing.expect(!l.toBoolean(-2));
     try testing.expect(!l.toBoolean(-1));
     l.pop(2);
+}
+
+test "mana.key_down: no Sim dispatching returns false, never raises" {
+    var l = try Lua.init(testing.allocator);
+    defer l.deinit();
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+    var host: ?Host = null;
+
+    pushManaTable(l, &registry, &host);
+    l.setGlobal("mana");
+
+    try l.doString("return mana.key_down('up')");
+    try testing.expect(!l.toBoolean(-1));
+    l.pop(1);
+}
+
+/// A fake host whose `key_down` reports one fixed held key by name — enough to
+/// exercise `mana.key_down`'s wiring (arg marshaling, host dispatch, return value)
+/// without `script` importing `platform.Key` (DAG: `script → core` only; the real
+/// held-key set is `platform.InputSnapshot`, resolved engine-side, ADR 0021 §5 /
+/// ADR 0040 §2). Every other accessor is an `unreachable` stub — proof no test below
+/// exercises anything but `key_down`.
+const FakeKeyHost = struct {
+    held: []const u8,
+
+    fn keyDown(ctx: *anyopaque, name: []const u8) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return std.mem.eql(u8, name, self.held);
+    }
+    fn isValid(ctx: *anyopaque, h: u64) bool {
+        _ = .{ ctx, h };
+        unreachable;
+    }
+    fn position(ctx: *anyopaque, h: u64) ?core_mod.Vec3 {
+        _ = .{ ctx, h };
+        unreachable;
+    }
+    fn now(ctx: *anyopaque) f64 {
+        _ = ctx;
+        unreachable;
+    }
+    fn get(ctx: *anyopaque, h: u64, name: []const u8) ?f64 {
+        _ = .{ ctx, h, name };
+        unreachable;
+    }
+    fn set(ctx: *anyopaque, h: u64, name: []const u8, value: f64) void {
+        _ = .{ ctx, h, name, value };
+        unreachable;
+    }
+    fn setVelocity(ctx: *anyopaque, h: u64, v: core_mod.Vec3) void {
+        _ = .{ ctx, h, v };
+        unreachable;
+    }
+    fn setPosition(ctx: *anyopaque, h: u64, pos: core_mod.Vec3) void {
+        _ = .{ ctx, h, pos };
+        unreachable;
+    }
+    fn despawn(ctx: *anyopaque, h: u64) void {
+        _ = .{ ctx, h };
+        unreachable;
+    }
+    fn spawn(ctx: *anyopaque, name: []const u8, pos: core_mod.Vec3) u64 {
+        _ = .{ ctx, name, pos };
+        unreachable;
+    }
+    fn timerAfter(ctx: *anyopaque, ref: i32, delay: f32) u64 {
+        _ = .{ ctx, ref, delay };
+        unreachable;
+    }
+    fn timerEvery(ctx: *anyopaque, ref: i32, interval: f32) u64 {
+        _ = .{ ctx, ref, interval };
+        unreachable;
+    }
+    fn timerCancel(ctx: *anyopaque, h: u64) void {
+        _ = .{ ctx, h };
+        unreachable;
+    }
+    fn random(ctx: *anyopaque) f32 {
+        _ = ctx;
+        unreachable;
+    }
+    fn randomInt(ctx: *anyopaque, lo: i64, hi: i64) i64 {
+        _ = .{ ctx, lo, hi };
+        unreachable;
+    }
+    fn isWalkable(ctx: *anyopaque, col: i32, row: i32) bool {
+        _ = .{ ctx, col, row };
+        unreachable;
+    }
+    const vtable: Host.VTable = .{
+        .is_valid = isValid,
+        .position = position,
+        .now = now,
+        .get = get,
+        .set = set,
+        .set_velocity = setVelocity,
+        .set_position = setPosition,
+        .despawn = despawn,
+        .spawn = spawn,
+        .timer_after = timerAfter,
+        .timer_every = timerEvery,
+        .timer_cancel = timerCancel,
+        .random = random,
+        .random_int = randomInt,
+        .is_walkable = isWalkable,
+        .key_down = keyDown,
+    };
+};
+
+test "key_down: reports held key true, released key false" {
+    var l = try Lua.init(testing.allocator);
+    defer l.deinit();
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+    var fake: FakeKeyHost = .{ .held = "up" };
+    var host: ?Host = .{ .ctx = &fake, .vtable = &FakeKeyHost.vtable };
+
+    pushManaTable(l, &registry, &host);
+    l.setGlobal("mana");
+
+    try l.doString("return mana.key_down('up'), mana.key_down('down')");
+    try testing.expect(l.toBoolean(-2)); // held
+    try testing.expect(!l.toBoolean(-1)); // not held
+    l.pop(2);
+}
+
+test "key_down: an unknown key name degrades to false rather than raising" {
+    var l = try Lua.init(testing.allocator);
+    defer l.deinit();
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+    var fake: FakeKeyHost = .{ .held = "up" };
+    var host: ?Host = .{ .ctx = &fake, .vtable = &FakeKeyHost.vtable };
+
+    pushManaTable(l, &registry, &host);
+    l.setGlobal("mana");
+
+    // The host resolves the name against `platform.Key`; a name that is not a real
+    // key (a content typo) simply never matches the held one, so this reaches the
+    // same `false` a real engine-side `stringToEnum` miss would — never a raise.
+    try l.doString("return mana.key_down('not_a_real_key')");
+    try testing.expect(!l.toBoolean(-1));
+    l.pop(1);
 }
