@@ -1,6 +1,6 @@
 # 0039. UI input events: `on_click`/`on_focus`/`on_activate`
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-15
 
 ## Context

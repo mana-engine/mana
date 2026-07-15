@@ -20,14 +20,16 @@
 //! order, `Focus` tracks and moves the focused widget (`next`/`prev`/directional
 //! `move`/pointer-driven `focusAt`), and `consumesPointer` says whether a click lands
 //! on the UI at all — so a caller can route input to the UI **before** gameplay input
-//! sees it, without gameplay ever touching `ui` internals. **Not** in this slice: event
-//! dispatch to Lua (`on_click`/`on_focus`/`on_activate`) — ADR 0034 explicitly leaves
-//! those event names/payloads unpinned pending #134's own ADR (ADR 0003 §5: any
-//! surface addition needs one); see `src/ui/README.md`.
+//! sees it, without gameplay ever touching `ui` internals. Event *dispatch* to Lua
+//! (`on_click`/`on_focus`/`on_activate`, ADR 0039, now accepted) lives one tier up in
+//! `src/engine/ui_dispatch.zig`, which consumes these primitives — `ui` itself stays the
+//! pure interpreter and names no Lua/handle type. What `ui` contributes to that surface
+//! is the content-authored `Widget.id` (ADR 0039 §2), the stable name a script's UI-event
+//! handler correlates against.
 //!
 //! Deferred to later phased slices (ADR 0034 §8): GPU draw-list emission and text/glyph
-//! metrics (#131/#133, done), event dispatch to Lua (#134, blocked on a new ADR, see
-//! above), styling/theming. This slice is the pure interpreter: parse + layout rects +
+//! metrics (#131/#133, done), event dispatch to Lua (#134, wired in `engine/ui_dispatch`
+//! per ADR 0039), styling/theming. This slice is the pure interpreter: parse + layout rects +
 //! hit-test + focus nav + a one-way binding read, all allocator-explicit and free of
 //! hidden global state (hot-reload friendly — re-`parse` a file into a fresh `Screen`).
 //!
@@ -153,6 +155,13 @@ pub const Widget = struct {
     /// Name of a bound gameplay value read one-way through the `Host` (e.g. "score").
     /// Empty ⇒ the widget is not bound. See `boundValue`.
     bind: []const u8 = "",
+    /// Content-authored stable name a script correlates a UI event to (ADR 0039 §2):
+    /// `on_click`/`on_focus`/`on_activate` carry it as `ev.id`, so a handler can tell
+    /// *which* widget fired (`if ev.id == "start_button" then …`) without walking the
+    /// tree. Empty (`""`) ⇒ anonymous: the widget still gets a handle and still fires
+    /// events, it is simply not addressable by name — the same empty-string-sentinel
+    /// convention `bind`/`text` use. Purely a content label; never hashed (ADR 0034 §4).
+    id: []const u8 = "",
     /// Image reference for an `image` widget (resolved render-side, deferred slice).
     image: []const u8 = "",
     /// RGBA tint for `panel`/`label`, 0..1. Cosmetic; never hashed.
@@ -537,6 +546,25 @@ test "ui: parse round-trips a nested widget tree with defaults" {
     try testing.expectEqual(@as(f32, 1), screen.root.color[3]);
     try testing.expectEqualStrings("score", screen.root.children[0].bind);
     try testing.expectEqualStrings("lives", screen.root.children[1].bind);
+}
+
+test "ui: parse reads the optional id field, defaulting to empty (ADR 0039 §2)" {
+    const src =
+        \\.{
+        \\    .root = .{
+        \\        .kind = .container,
+        \\        .children = .{
+        \\            .{ .kind = .label, .id = "start_button", .focusable = true },
+        \\            .{ .kind = .label }, // no id ⇒ anonymous but real
+        \\        },
+        \\    },
+        \\}
+    ;
+    const screen = try parse(testing.allocator, src);
+    defer free(testing.allocator, screen);
+    try testing.expectEqualStrings("start_button", screen.root.children[0].id);
+    // An unauthored `id` defaults to the empty-string sentinel, like `bind`/`text`.
+    try testing.expectEqualStrings("", screen.root.children[1].id);
 }
 
 test "ui: parse rejects malformed ZON with ParseZon" {

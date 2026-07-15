@@ -365,6 +365,57 @@ pub const State = struct {
         return self.invokeHandler(1);
     }
 
+    /// Dispatch a UI pointer click `on_click(ev = { widget, id, x, y })` (ADR 0039 §1)
+    /// where `widget` is the opaque widget handle (§2), `id` the hit widget's authored
+    /// name (`""` when anonymous), and `x`/`y` the press point in screen pixels. No
+    /// `self` — UI screens are not entities, like `on_key`/`on_scene_enter`. A missing
+    /// key is a no-op; a handler error is caught and reported (§9). `id` is borrowed for
+    /// the call. The `index`/`generation` are the engine-assigned widget-table fields;
+    /// the handle packing stays inside `script`, so no Lua/handle type leaks upward.
+    pub fn dispatchClick(self: *State, index: u32, generation: u32, id: []const u8, x: f32, y: f32) DispatchOutcome {
+        if (!self.pushHandler("on_click")) return .no_handler;
+        const l = self.lua;
+        l.newTable(); // arg 1: ev (no self — UI is global, not entity-level)
+        self.pushWidgetHandle(index, generation);
+        l.setField(-2, "widget");
+        _ = l.pushString(id);
+        l.setField(-2, "id");
+        l.pushNumber(x);
+        l.setField(-2, "x");
+        l.pushNumber(y);
+        l.setField(-2, "y");
+        return self.invokeHandler(1);
+    }
+
+    /// Dispatch a UI focus entry `on_focus(ev = { widget, id })` (ADR 0039 §1) — fired
+    /// when keyboard/gamepad/pointer navigation moves focus *onto* a new widget. No
+    /// `x`/`y`: nav-driven focus has no pointer coordinate (§1). Same no-`self`, caught-
+    /// error semantics as `dispatchClick`. `id` is borrowed for the call.
+    pub fn dispatchFocus(self: *State, index: u32, generation: u32, id: []const u8) DispatchOutcome {
+        return self.dispatchWidgetEvent("on_focus", index, generation, id);
+    }
+
+    /// Dispatch a UI activation `on_activate(ev = { widget, id })` (ADR 0039 §1) — fired
+    /// on the currently focused widget when an activate key's press edge lands. No
+    /// `x`/`y`: key-driven activation has no pointer coordinate (§1). Same semantics as
+    /// `dispatchFocus`. `id` is borrowed for the call.
+    pub fn dispatchActivate(self: *State, index: u32, generation: u32, id: []const u8) DispatchOutcome {
+        return self.dispatchWidgetEvent("on_activate", index, generation, id);
+    }
+
+    /// Shared body of `dispatchFocus`/`dispatchActivate` (ADR 0039 §1): both carry the
+    /// identical `ev = { widget, id }` payload and differ only in the handler key.
+    fn dispatchWidgetEvent(self: *State, comptime key: [:0]const u8, index: u32, generation: u32, id: []const u8) DispatchOutcome {
+        if (!self.pushHandler(key)) return .no_handler;
+        const l = self.lua;
+        l.newTable(); // arg 1: ev (no self)
+        self.pushWidgetHandle(index, generation);
+        l.setField(-2, "widget");
+        _ = l.pushString(id);
+        l.setField(-2, "id");
+        return self.invokeHandler(1);
+    }
+
     /// Invoke a Lua timer callback by its registry `ref` (ADR 0019 `mana.after`/
     /// `every`). Pushes the referenced function and calls it in protected mode with
     /// no arguments; a throwing callback is caught and reported via the return value
@@ -457,6 +508,15 @@ pub const State = struct {
     /// above `script`.
     fn pushHandle(self: *State, index: u32, generation: u32) void {
         const raw = mana.Handle.pack(.{ .index = index, .generation = generation });
+        self.lua.pushInteger(@bitCast(raw));
+    }
+
+    /// Push an opaque **widget** handle (ADR 0039 §2) as the single Lua integer a UI
+    /// event's `ev.widget` field carries. A distinct handle kind from `pushHandle`'s
+    /// entity handle (drawn from the widget-handle table), sharing only the bit layout;
+    /// the packing stays here so no handle/Lua type leaks above `script`.
+    fn pushWidgetHandle(self: *State, index: u32, generation: u32) void {
+        const raw = mana.WidgetHandle.pack(.{ .index = index, .generation = generation });
         self.lua.pushInteger(@bitCast(raw));
     }
 };
@@ -830,4 +890,88 @@ test "dispatch: loadHandlerTable replaces the previous table (hot reload)" {
     try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("generation").?);
     try state.loadHandlerTable("return { generation = 2 }");
     try std.testing.expectEqual(@as(i64, 2), state.handlerFieldInt("generation").?);
+}
+
+// --- UI event dispatch (ADR 0039 §1) ----------------------------------------
+
+test "dispatch: on_click delivers the widget handle, id, and pointer coords" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    // The handler records the packed widget handle, whether the id matched, and the
+    // coordinates — everything ADR 0039 §1 says `on_click`'s `ev` carries.
+    try state.loadHandlerTable(
+        \\local t = { clicks = 0, widget = 0, id_ok = 0, x = 0, y = 0 }
+        \\function t.on_click(ev)
+        \\  t.clicks = t.clicks + 1
+        \\  t.widget = ev.widget
+        \\  if ev.id == "start" then t.id_ok = 1 end
+        \\  t.x = ev.x
+        \\  t.y = ev.y
+        \\end
+        \\return t
+    );
+
+    // Widget at pre-order index 3, generation 1, id "start", clicked at (12, 34).
+    const expect: i64 = @bitCast(mana.WidgetHandle.pack(.{ .index = 3, .generation = 1 }));
+    try std.testing.expectEqual(State.DispatchOutcome.ok, state.dispatchClick(3, 1, "start", 12, 34));
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("clicks").?);
+    try std.testing.expectEqual(expect, state.handlerFieldInt("widget").?);
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("id_ok").?);
+    try std.testing.expectEqual(@as(i64, 12), state.handlerFieldInt("x").?);
+    try std.testing.expectEqual(@as(i64, 34), state.handlerFieldInt("y").?);
+}
+
+test "dispatch: on_focus and on_activate carry widget + id, no coordinates" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    try state.loadHandlerTable(
+        \\local t = { focus = 0, activate = 0, f_widget = 0, a_id_ok = 0, saw_xy = 0 }
+        \\function t.on_focus(ev)
+        \\  t.focus = t.focus + 1
+        \\  t.f_widget = ev.widget
+        \\  if ev.x ~= nil or ev.y ~= nil then t.saw_xy = 1 end
+        \\end
+        \\function t.on_activate(ev)
+        \\  t.activate = t.activate + 1
+        \\  if ev.id == "ok_button" then t.a_id_ok = 1 end
+        \\end
+        \\return t
+    );
+
+    const w: i64 = @bitCast(mana.WidgetHandle.pack(.{ .index = 2, .generation = 5 }));
+    try std.testing.expectEqual(State.DispatchOutcome.ok, state.dispatchFocus(2, 5, "ok_button"));
+    try std.testing.expectEqual(State.DispatchOutcome.ok, state.dispatchActivate(2, 5, "ok_button"));
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("focus").?);
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("activate").?);
+    try std.testing.expectEqual(w, state.handlerFieldInt("f_widget").?);
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("a_id_ok").?);
+    // on_focus/on_activate carry no x/y (ADR 0039 §1).
+    try std.testing.expectEqual(@as(i64, 0), state.handlerFieldInt("saw_xy").?);
+}
+
+test "dispatch: UI events with no matching handler key are silent no-ops" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+    try state.loadHandlerTable("return { unrelated = 1 }");
+    try std.testing.expectEqual(State.DispatchOutcome.no_handler, state.dispatchClick(0, 0, "", 0, 0));
+    try std.testing.expectEqual(State.DispatchOutcome.no_handler, state.dispatchFocus(0, 0, ""));
+    try std.testing.expectEqual(State.DispatchOutcome.no_handler, state.dispatchActivate(0, 0, ""));
+}
+
+test "dispatch: a throwing on_click is caught and reported, leaving the state usable" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+    try state.loadHandlerTable(
+        \\local t = { focuses = 0 }
+        \\function t.on_click(ev) error("boom") end
+        \\function t.on_focus(ev) t.focuses = t.focuses + 1 end
+        \\return t
+    );
+    try std.testing.expectEqual(State.DispatchOutcome.errored, state.dispatchClick(0, 0, "x", 1, 1));
+    try std.testing.expect(std.mem.indexOf(u8, state.lastError(), "boom") != null);
+    // The stack unwound cleanly: a later dispatch still runs.
+    try std.testing.expectEqual(State.DispatchOutcome.ok, state.dispatchFocus(0, 0, "y"));
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("focuses").?);
 }
