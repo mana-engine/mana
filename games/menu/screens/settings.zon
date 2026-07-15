@@ -1,0 +1,22 @@
+// games/menu/screens/settings.zon — the settings panel (issue #135; ADR 0034/0039):
+// volume +/- and a difficulty cycle button, plus a way back to the main menu. Values
+// live in scripts/rules.lua as plain Lua state (the same "local mirrored onto the
+// handler table" shape games/pacman/scripts/rules.lua already uses for score/lives);
+// a driver reads them off the handler table after each on_activate and persists them
+// to save/settings.zon (files are the source of truth, invariant #1).
+.{
+    .name = "settings",
+    .root = .{
+        .kind = .container,
+        .layout = .flex,
+        .direction = .column,
+        .padding = 40,
+        .gap = 14,
+        .children = .{
+            .{ .kind = .label, .id = "volume_up", .focusable = true, .width = 260, .height = 26, .text = "VOLUME +" },
+            .{ .kind = .label, .id = "volume_down", .focusable = true, .width = 260, .height = 26, .text = "VOLUME -" },
+            .{ .kind = .label, .id = "difficulty_cycle", .focusable = true, .width = 260, .height = 26, .text = "DIFFICULTY" },
+            .{ .kind = .label, .id = "back_button", .focusable = true, .width = 260, .height = 26, .text = "BACK" },
+        },
+    },
+}

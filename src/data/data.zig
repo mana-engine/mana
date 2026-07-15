@@ -18,6 +18,11 @@ pub const serialize = zon.serialize;
 pub const parse = zon.parse;
 pub const parseLenient = zon.parseLenient;
 pub const free = zon.free;
+/// Read+parse a ZON file from disk (issue #135's generic settings-persistence
+/// primitive); see `zon.loadFile`.
+pub const loadFile = zon.loadFile;
+/// Serialize a value to ZON and write it to disk; see `zon.saveFile`.
+pub const saveFile = zon.saveFile;
 pub const Watcher = watch.Watcher;
 
 /// Marker that the module is wired into the build graph.

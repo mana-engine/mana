@@ -15,6 +15,12 @@ shapes them into a dialogue/inventory/save-archive feel instead of sandbox's
 combat feel — proof the engine carries no genre assumptions. See its README for
 the specifics.
 
+`games/menu/` (issue #135) is the first *interactive* UI package: a navigable main
+menu + settings screen built on the widget/layout + focus-navigation + `on_click`/
+`on_focus`/`on_activate` dispatch (ADR 0034, ADR 0039), with settings values that
+persist to a ZON file. See its README for the details and the current runner-
+integration gap.
+
 ## Running & playing the samples (Linux **and** Windows)
 
 Every command below is a single `zig build` invocation and runs **verbatim** in bash,

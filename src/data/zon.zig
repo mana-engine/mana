@@ -5,6 +5,7 @@
 //! property tests below — it must never regress.
 
 const std = @import("std");
+const Io = std.Io;
 const Writer = std.Io.Writer;
 const Allocator = std.mem.Allocator;
 
@@ -113,6 +114,31 @@ pub fn free(gpa: Allocator, value: anytype) void {
     std.zon.parse.free(gpa, value);
 }
 
+/// Read `path` (relative to `dir`) and `parse` it as `T` — the file-level half of the
+/// round trip `saveFile` writes (issue #135: a generic, genre-agnostic "load a ZON
+/// table from disk" primitive; a game package supplies `T`'s shape, e.g. a settings
+/// struct). The result owns heap allocations; free with `free`. Errors: whatever
+/// `Io.Dir.readFileAllocOptions` reports (missing file, I/O failure) plus `parse`'s
+/// `OutOfMemory`/`ParseZon`.
+pub fn loadFile(comptime T: type, gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) !T {
+    const src = try dir.readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0);
+    defer gpa.free(src);
+    return parse(T, gpa, src);
+}
+
+/// `serialize` `value` and write it to `path` (relative to `dir`), creating or
+/// truncating the file — the generic "persist a ZON table to disk" primitive (issue
+/// #135) `loadFile` reads back. Content (a game package) decides *what* gets saved and
+/// *when*; this is genre-agnostic file I/O only, no policy. Errors: whatever
+/// `Io.Dir.writeFile` reports (I/O failure) plus a writer error from `serialize` (never
+/// hit in practice — the destination is an in-memory buffer).
+pub fn saveFile(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, value: anytype) !void {
+    var aw: Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try serialize(value, &aw.writer);
+    try dir.writeFile(io, .{ .sub_path = path, .data = aw.written() });
+}
+
 // --- Tests ------------------------------------------------------------------
 
 const testing = std.testing;
@@ -169,6 +195,35 @@ test "zon round-trip: strings needing escapes" {
 test "zon round-trip: empty containers" {
     const S = struct { items: []const u32, sub: struct {} };
     try expectRoundTrip(S, .{ .items = &.{}, .sub = .{} });
+}
+
+test "zon file persistence: saveFile writes ZON that loadFile parses back (round trip)" {
+    const S = struct { volume: u8, name: []const u8 };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+
+    const value: S = .{ .volume = 7, .name = "prefs" };
+    try saveFile(gpa, io, tmp.dir, "settings.zon", value);
+
+    const loaded = try loadFile(S, gpa, io, tmp.dir, "settings.zon");
+    defer free(gpa, loaded);
+    try testing.expectEqualDeep(value, loaded);
+}
+
+test "zon file persistence: a second saveFile overwrites the first, loadFile sees the latest" {
+    const S = struct { n: i32 };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+
+    try saveFile(gpa, io, tmp.dir, "s.zon", S{ .n = 1 });
+    try saveFile(gpa, io, tmp.dir, "s.zon", S{ .n = 2 });
+
+    const loaded = try loadFile(S, gpa, io, tmp.dir, "s.zon");
+    try testing.expectEqual(@as(i32, 2), loaded.n);
 }
 
 test "zon serialize: exact pretty-printed shape" {

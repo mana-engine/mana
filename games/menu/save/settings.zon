@@ -1,0 +1,12 @@
+// games/menu/save/settings.zon — shipped default user preferences (issue #135): the
+// FILE is the source of truth (invariant #1); scripts/rules.lua's local defaults
+// mirror it (the same content-authored-defaults-kept-in-sync convention hud.zon's
+// static fallback text already uses for score/lives). A real runner would seed the
+// settings screen from this file at load and overwrite it (via the new
+// `data.zon.saveFile` engine primitive) on every change; this shipped copy is
+// read-only content — a test never writes here, only to a temp path (see
+// tests/menu_acceptance.zig).
+.{
+    .volume = 7,
+    .difficulty = .normal,
+}
