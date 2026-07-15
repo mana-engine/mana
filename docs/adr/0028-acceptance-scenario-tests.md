@@ -151,3 +151,32 @@ Zig integration test that drives the real `games/snake` package via the existing
 primitives (input-trace replay + state queries + the invariant checker) as an
 incremental staircase, proving the oracle concept on a real game without yet building
 the ZON scenario format.
+
+## Amendment (#219): gamepad injection on `InputSegment`
+
+Layer 2's `input_trace` (`src/engine/scenario.zig`'s `InputSegment`) carried only
+`keys` (by name, matching `platform.Key`), so a scenario could drive keyboard-shaped
+input but not a gamepad-driven staircase — there was no headless way to assert a
+mechanic gated on `InputSnapshot.pad_buttons`/`pad_axes` (ADR 0040 §5, #214).
+
+`InputSegment` gains two **optional, additive** fields, injected into the tick's
+`InputSnapshot` exactly as `keys` already is:
+
+- `pad_buttons: []const []const u8 = &.{}` — held gamepad buttons by name (matching
+  `platform.GamepadButton` tag names).
+- `pad_axes: []const AxisValue = &.{}` — analog axis values as `(name, value)` pairs
+  (name matching `platform.GamepadAxis`; value in that axis's range — sticks
+  `[-1,1]`, triggers `[0,1]`).
+
+A non-empty `pad_buttons` or `pad_axes` sets `InputSnapshot.pad_connected = true` for
+the segment (a headless scenario has no device to poll, so "connected" is inferred
+from "the scenario drives one"). Both fields default to empty, which injects an
+empty gamepad state (`pad_connected = false`, no buttons, every axis `0`) —
+**bit-identical to a scenario authored before this amendment**, so every existing
+keyboard-only scenario (Snake, Pac-Man) parses and runs unchanged.
+
+**Explicitly out of scope for this amendment**: asserting a *resolved action* value
+(e.g. a `move` action's value after `action_map` resolution) — that depends on the
+`on_action`/resolver surface (#217/#218), not yet merged. This amendment is the
+physical-input half only (needs just #214, already on `main`); the action-level
+staircase is a follow-up once #218 lands (#221).

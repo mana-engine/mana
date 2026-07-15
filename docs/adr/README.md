@@ -39,7 +39,7 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0025 | Content-declarable colliders: `.collider` in the scene/prototype schema | accepted |
 | 0026 | Tilemap level data: a grid-of-cells scene resource the engine materializes | accepted |
 | 0027 | Native pathfinding + steering: Lua selects the target, the engine steers | accepted |
-| 0028 | Acceptance / scenario tests: a behavioral oracle atop the deterministic sim | accepted |
+| 0028 | Acceptance / scenario tests: a behavioral oracle atop the deterministic sim | accepted (amended #219: optional `pad_buttons`/`pad_axes` gamepad injection on `InputSegment`) |
 | 0029 | Headless SVG render output: a GPU-free way to see a level | accepted |
 | 0030 | Entity appearance as data: `.appearance` in the scene/prototype schema | accepted |
 | 0031 | Sprite rendering: cosmetic sprite/animation component, dependency-free sheet asset, gpu texture path | accepted |
