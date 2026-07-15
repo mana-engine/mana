@@ -107,6 +107,24 @@ pub const Host = struct {
         /// gracefully) or when no Sim is dispatching. `name` is borrowed for the call
         /// only.
         key_down: *const fn (ctx: *anyopaque, name: []const u8) bool,
+        /// True iff the device-agnostic `button` action `name` is held this tick — the
+        /// logical OR of every source bound to it on the sim's current `InputSnapshot`
+        /// (`mana.action_down`, ADR 0040 §2). Coexists with `key_down`: `action_down`
+        /// names a content action bound to one-or-many physical inputs, `key_down` a
+        /// specific physical key. `false` for an unknown or wrong-typed action name, or
+        /// when no Sim is dispatching. `name` is borrowed for the call only.
+        action_down: *const fn (ctx: *anyopaque, name: []const u8) bool,
+        /// The `axis1d` action `name`'s value this tick (`mana.action_axis`, ADR 0040
+        /// §2) — already dead-zoned and clamped engine-side, so content never
+        /// re-implements analog handling. `0` for an unknown or wrong-typed action name,
+        /// or when no Sim is dispatching. `name` is borrowed for the call only.
+        action_axis: *const fn (ctx: *anyopaque, name: []const u8) f32,
+        /// The `axis2d` action `name`'s `(x, y)` value this tick (`mana.action_vector`,
+        /// ADR 0040 §2). The seam carries the `core`-only `Vec2`; the Lua binding
+        /// surfaces it as two returns (never a per-tick heap-allocated table, invariant
+        /// #3). Zero vector for an unknown or wrong-typed action name, or when no Sim is
+        /// dispatching. `name` is borrowed for the call only.
+        action_vector: *const fn (ctx: *anyopaque, name: []const u8) core.Vec2,
     };
 
     /// Thin forwarders so callers read `host.position(h)` rather than threading
@@ -159,6 +177,15 @@ pub const Host = struct {
     pub fn keyDown(self: Host, name: []const u8) bool {
         return self.vtable.key_down(self.ctx, name);
     }
+    pub fn actionDown(self: Host, name: []const u8) bool {
+        return self.vtable.action_down(self.ctx, name);
+    }
+    pub fn actionAxis(self: Host, name: []const u8) f32 {
+        return self.vtable.action_axis(self.ctx, name);
+    }
+    pub fn actionVector(self: Host, name: []const u8) core.Vec2 {
+        return self.vtable.action_vector(self.ctx, name);
+    }
 };
 
 const testing = @import("std").testing;
@@ -190,6 +217,12 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         last_walkable_row: i32 = 0,
         key_held: bool = false,
         last_key_name: []const u8 = "",
+        action_held: bool = false,
+        last_action_down_name: []const u8 = "",
+        axis_value: f32 = 0,
+        last_action_axis_name: []const u8 = "",
+        vector_value: core.Vec2 = .{ .x = 0, .y = 0 },
+        last_action_vector_name: []const u8 = "",
 
         fn isValid(ctx: *anyopaque, handle: u64) bool {
             _ = handle;
@@ -266,6 +299,21 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
             self.last_key_name = name;
             return self.key_held;
         }
+        fn actionDown(ctx: *anyopaque, name: []const u8) bool {
+            const self = fromOpaque(ctx);
+            self.last_action_down_name = name;
+            return self.action_held;
+        }
+        fn actionAxis(ctx: *anyopaque, name: []const u8) f32 {
+            const self = fromOpaque(ctx);
+            self.last_action_axis_name = name;
+            return self.axis_value;
+        }
+        fn actionVector(ctx: *anyopaque, name: []const u8) core.Vec2 {
+            const self = fromOpaque(ctx);
+            self.last_action_vector_name = name;
+            return self.vector_value;
+        }
         fn fromOpaque(ctx: *anyopaque) *@This() {
             return @ptrCast(@alignCast(ctx));
         }
@@ -286,6 +334,9 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
             .random_int = randomInt,
             .is_walkable = isWalkable,
             .key_down = keyDown,
+            .action_down = actionDown,
+            .action_axis = actionAxis,
+            .action_vector = actionVector,
         };
     };
 
@@ -328,4 +379,14 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
     fake.key_held = true;
     try testing.expect(host.keyDown("up"));
     try testing.expectEqualStrings("up", fake.last_key_name);
+
+    fake.action_held = true;
+    try testing.expect(host.actionDown("jump"));
+    try testing.expectEqualStrings("jump", fake.last_action_down_name);
+    fake.axis_value = 0.75;
+    try testing.expectEqual(@as(f32, 0.75), host.actionAxis("throttle"));
+    try testing.expectEqualStrings("throttle", fake.last_action_axis_name);
+    fake.vector_value = .{ .x = 0.5, .y = -0.25 };
+    try testing.expect(host.actionVector("move").approxEql(.{ .x = 0.5, .y = -0.25 }, 1e-6));
+    try testing.expectEqualStrings("move", fake.last_action_vector_name);
 }

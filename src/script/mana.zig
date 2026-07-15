@@ -6,7 +6,8 @@
 //! surface — one small `zlua.wrap` shim per `mana.*` member, registered in one
 //! `pushManaTable`, with each member's behavior test beside it. Splitting the table
 //! across files would scatter the single versioned API and its shape test for no
-//! gain; it grows only when an ADR adds a member (this one added `key_down`).
+//! gain; it grows only when an ADR adds a member (ADR 0021 §5 added `key_down`; ADR
+//! 0040 §2 added `action_down`/`action_axis`/`action_vector`).
 //!
 //! Members that need no live Sim — `version`, `log` — are implemented directly.
 //! The live-Sim members reach the world/clock/command-buffer/RNG through the ADR
@@ -27,10 +28,12 @@
 //! (ADR 0019) reference the Lua callback in the registry and schedule it on the
 //! engine's wheel through the host, firing host-live in the dispatch phase.
 //!
-//! With `get`/`set`/`is_walkable`/`key_down` this table is the ADR 0003 §2 `mana` v1
-//! surface as amended by ADR 0035 and ADR 0021 §5/ADR 0040 §2 — `key_down` was the
-//! last deferred half; `action_down`/`action_axis`/`action_vector`/`on_action` (ADR
-//! 0040 §2) remain a separate lane (#193/the data-driven action map).
+//! With `key_down` (raw device) plus the device-agnostic `action_down`/`action_axis`/
+//! `action_vector` (ADR 0040 §2, resolved engine-side against the borrowed action map),
+//! this table is the ADR 0003 §2 `mana` v1 surface as amended by ADR 0035 and ADR 0040.
+//! The action *polls* live here; the matching `on_action` edge *event* is dispatched by
+//! `lua.zig`'s `dispatchAction` (driven by the engine's per-tick action diff, ADR 0040
+//! §2). The surface stays additive, so `mana.version` remains `1` (ADR 0003 §5).
 
 const std = @import("std");
 const zlua = @import("zlua");
@@ -135,6 +138,18 @@ pub fn pushManaTable(l: *Lua, entities: *const Registry, host: *const ?Host) voi
     l.pushLightUserdata(@ptrCast(host));
     l.pushClosure(zlua.wrap(manaKeyDown), 1);
     l.setField(-2, "key_down");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaActionDown), 1);
+    l.setField(-2, "action_down");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaActionAxis), 1);
+    l.setField(-2, "action_axis");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaActionVector), 1);
+    l.setField(-2, "action_vector");
 }
 
 /// Read a `*const ?Host` back from closure upvalue `idx` (a light-userdata pointer
@@ -421,6 +436,48 @@ fn manaKeyDown(l: *Lua) !i32 {
     return 1;
 }
 
+/// `mana.action_down(name) -> bool` (ADR 0040 §2): is the device-agnostic `button`
+/// action `name` held this tick — the OR of every physical source bound to it, resolved
+/// engine-side against the current `InputSnapshot`. A pure, immediate read (input is
+/// hash-excluded, ADR 0009 §4). Coexists with `mana.key_down`: `action_down` is
+/// device-agnostic ("is this action held, by whatever is bound"), `key_down` names a
+/// specific physical key. Degrades to `false` (never raises) for an unknown or
+/// wrong-typed action name — a content typo, or polling an analog action as a button —
+/// or when no Sim is dispatching. `name` is borrowed for the call only.
+fn manaActionDown(l: *Lua) !i32 {
+    const name = l.checkString(1);
+    const held = if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.actionDown(name) else false;
+    l.pushBoolean(held);
+    return 1;
+}
+
+/// `mana.action_axis(name) -> f32` (ADR 0040 §2): the `axis1d` action `name`'s value
+/// this tick — already dead-zoned and clamped to `[-1, 1]` engine-side, so content
+/// never re-implements analog handling. A pure, immediate read. Degrades to `0` (never
+/// raises) for an unknown or wrong-typed action name, or when no Sim is dispatching.
+/// `name` is borrowed for the call only.
+fn manaActionAxis(l: *Lua) !i32 {
+    const name = l.checkString(1);
+    const v: f32 = if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.actionAxis(name) else 0;
+    l.pushNumber(v);
+    return 1;
+}
+
+/// `mana.action_vector(name) -> x, y` (ADR 0040 §2): the `axis2d` action `name`'s value
+/// this tick, as **two returns** (not a table — a per-tick poll returning a fresh Lua
+/// table would heap-allocate every frame, which invariant #3 forbids; two numbers on the
+/// stack allocate nothing). Follows the `mana.position(h) -> x, y, z` convention. A pure,
+/// immediate read; the value is dead-zoned/clamped engine-side. Degrades to `0, 0` (never
+/// raises) for an unknown or wrong-typed action name, or when no Sim is dispatching.
+/// `name` is borrowed for the call only.
+fn manaActionVector(l: *Lua) !i32 {
+    const name = l.checkString(1);
+    const v = if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.actionVector(name) else core_mod.Vec2.zero;
+    l.pushNumber(v.x);
+    l.pushNumber(v.y);
+    return 2;
+}
+
 const testing = std.testing;
 
 test "mana: table shape exposes exactly the wired members (version..despawn); version == 1" {
@@ -441,12 +498,12 @@ test "mana: table shape exposes exactly the wired members (version..despawn); ve
         key_count += 1;
         l.pop(1); // drop value; keep key on the stack to advance `next`
     }
-    try testing.expectEqual(@as(usize, 18), key_count);
+    try testing.expectEqual(@as(usize, 21), key_count);
 
     try testing.expectEqual(zlua.LuaType.number, l.getField(t, "version"));
     try testing.expectEqual(@as(i64, 1), try l.toInteger(-1));
     l.pop(1);
-    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "set_position", "despawn", "spawn", "every", "after", "cancel", "random", "random_int", "get", "set", "is_walkable", "key_down" }) |name| {
+    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "set_position", "despawn", "spawn", "every", "after", "cancel", "random", "random_int", "get", "set", "is_walkable", "key_down", "action_down", "action_axis", "action_vector" }) |name| {
         try testing.expectEqual(zlua.LuaType.function, l.getField(t, name));
         l.pop(1);
     }
@@ -643,6 +700,18 @@ const FakeGridHost = struct {
         _ = .{ ctx, name };
         unreachable;
     }
+    fn actionDown(ctx: *anyopaque, name: []const u8) bool {
+        _ = .{ ctx, name };
+        unreachable;
+    }
+    fn actionAxis(ctx: *anyopaque, name: []const u8) f32 {
+        _ = .{ ctx, name };
+        unreachable;
+    }
+    fn actionVector(ctx: *anyopaque, name: []const u8) core_mod.Vec2 {
+        _ = .{ ctx, name };
+        unreachable;
+    }
     const vtable: Host.VTable = .{
         .is_valid = isValid,
         .position = position,
@@ -660,6 +729,9 @@ const FakeGridHost = struct {
         .random_int = randomInt,
         .is_walkable = isWalkable,
         .key_down = keyDown,
+        .action_down = actionDown,
+        .action_axis = actionAxis,
+        .action_vector = actionVector,
     };
 };
 
@@ -702,6 +774,25 @@ test "mana.is_walkable: an out-of-i32-range coordinate returns false, never a pa
     try testing.expect(!l.toBoolean(-2));
     try testing.expect(!l.toBoolean(-1));
     l.pop(2);
+}
+
+test "mana.action_down/axis/vector: no Sim dispatching degrades to false / 0 / 0,0, never raises" {
+    var l = try Lua.init(testing.allocator);
+    defer l.deinit();
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+    var host: ?Host = null;
+
+    pushManaTable(l, &registry, &host);
+    l.setGlobal("mana");
+
+    try l.doString("return mana.action_down('jump'), mana.action_axis('throttle'), mana.action_vector('move')");
+    // action_vector returns two values, so the stack is: [down, axis, vx, vy].
+    try testing.expect(!l.toBoolean(-4)); // action_down → false
+    try testing.expectEqual(@as(f64, 0), try l.toNumber(-3)); // action_axis → 0
+    try testing.expectEqual(@as(f64, 0), try l.toNumber(-2)); // action_vector x → 0
+    try testing.expectEqual(@as(f64, 0), try l.toNumber(-1)); // action_vector y → 0
+    l.pop(4);
 }
 
 test "mana.key_down: no Sim dispatching returns false, never raises" {
@@ -792,6 +883,18 @@ const FakeKeyHost = struct {
         _ = .{ ctx, col, row };
         unreachable;
     }
+    fn actionDown(ctx: *anyopaque, name: []const u8) bool {
+        _ = .{ ctx, name };
+        unreachable;
+    }
+    fn actionAxis(ctx: *anyopaque, name: []const u8) f32 {
+        _ = .{ ctx, name };
+        unreachable;
+    }
+    fn actionVector(ctx: *anyopaque, name: []const u8) core_mod.Vec2 {
+        _ = .{ ctx, name };
+        unreachable;
+    }
     const vtable: Host.VTable = .{
         .is_valid = isValid,
         .position = position,
@@ -809,6 +912,9 @@ const FakeKeyHost = struct {
         .random_int = randomInt,
         .is_walkable = isWalkable,
         .key_down = keyDown,
+        .action_down = actionDown,
+        .action_axis = actionAxis,
+        .action_vector = actionVector,
     };
 };
 

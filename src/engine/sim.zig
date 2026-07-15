@@ -18,7 +18,8 @@ const script = @import("script");
 const platform = @import("platform");
 const prototype = @import("prototype.zig");
 const Tilemap = @import("tilemap.zig").Tilemap;
-const ActionMap = @import("action_map.zig").ActionMap;
+const action_map = @import("action_map.zig");
+const ActionMap = action_map.ActionMap;
 const ui_dispatch = @import("ui_dispatch.zig");
 
 const Allocator = std.mem.Allocator;
@@ -290,6 +291,7 @@ pub const Sim = struct {
             .rng = &self.rng,
             .tilemap = self.tilemap,
             .input = self.input,
+            .action_map = self.action_map,
         };
         // The dispatch phase is bounded by one Tracy zone: this is the ADR 0003 §6
         // per-frame script-dispatch budget site (the fine per-handler `script.*`
@@ -320,6 +322,23 @@ pub const Sim = struct {
                     const ui_consumed = try self.ui_input.keyEdge(ctx.scratch, &self.script_runtime, dc, k, now_held);
                     if (!ui_consumed) {
                         try self.script_runtime.dispatchKey(@tagName(k), now_held, dc);
+                    }
+                }
+            }
+            // Action edges (ADR 0040 §2): with a borrowed action map, diff each `button`
+            // action's OR-combined held-state between last tick and this one — the exact
+            // snapshot diff the key loop above does, but device-agnostic — and dispatch
+            // `on_action` host-live, before timers, in the map's stable binding order. An
+            // `axis1d`/`axis2d` action never fires an edge (it is polled). No map ⇒ no
+            // action events, as before this field existed. Runs off `prev_input` (still
+            // last tick's snapshot here), so it must precede the reset below.
+            if (self.action_map) |map| {
+                for (map.bindings) |b| {
+                    if (b.action.type != .button) continue;
+                    switch (action_map.resolveButtonEdge(b.action, self.input, self.prev_input)) {
+                        .none => {},
+                        .pressed => try self.script_runtime.dispatchAction(b.name, true, dc),
+                        .released => try self.script_runtime.dispatchAction(b.name, false, dc),
                     }
                 }
             }
@@ -697,6 +716,62 @@ test "sim: mana.key_down polls this tick's held InputSnapshot, not just the on_k
     try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("up_down").?);
     try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("left_down").?);
     try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("bogus_down").?);
+}
+
+test "sim: on_action dispatches button edges by binding, and action_* polls resolve via the map (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    const gpa = testing.allocator;
+    // A minimal `input.zon`: a `button` action (space→jump) and an `axis2d` action
+    // (arrows→move). The button drives `on_action` edges; the analog action is polled.
+    const src: [:0]const u8 =
+        \\.{
+        \\    .actions = .{
+        \\        .jump = .{ .type = .button, .keys = .{.space} },
+        \\        .move = .{ .type = .axis2d, .keys_2d = .{ .up = .{.up}, .down = .{.down}, .left = .{.left}, .right = .{.right} } },
+        \\    },
+        \\}
+    ;
+    const map = try action_map.parse(gpa, src);
+    defer action_map.free(gpa, map);
+
+    var sim = Sim.init(gpa, 1.0);
+    defer sim.deinit();
+    sim.action_map = &map;
+    try sim.loadScript(
+        \\local t = { presses = 0, releases = 0, last_jump = 0, jump_down = 0, move_right = 0 }
+        \\function t.on_action(ev)
+        \\  if ev.pressed then
+        \\    t.presses = t.presses + 1
+        \\    t.last_jump = (ev.action == "jump") and 1 or 0
+        \\  else
+        \\    t.releases = t.releases + 1
+        \\  end
+        \\  -- polls resolve host-live against this tick's snapshot + the action map.
+        \\  t.jump_down = mana.action_down("jump") and 1 or 0
+        \\  local x, _ = mana.action_vector("move")
+        \\  t.move_right = (x == 1) and 1 or 0
+        \\end
+        \\return t
+    );
+
+    var held = platform.KeySet.initEmpty();
+    held.insert(.space);
+    held.insert(.right);
+    sim.setInput(.{ .keys = held });
+    try sim.tick(); // space newly held → on_action(action="jump", pressed=true)
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("presses").?);
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("last_jump").?);
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("jump_down").?); // action_down held
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("move_right").?); // action_vector x == 1
+
+    sim.setInput(.{}); // space released
+    try sim.tick(); // combined held-state falls → on_action(pressed=false)
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("releases").?);
+
+    try sim.tick(); // no change this tick → no further on_action
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("presses").?);
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("releases").?);
 }
 
 test "sim: mana.every fires a Lua timer host-live each interval (requires -Denable-lua)" {
