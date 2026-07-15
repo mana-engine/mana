@@ -26,7 +26,7 @@
 core → (nothing above; only std)
 data, ecs, gpu, platform, script → core
 gpu → may import Vulkan (ONLY place); null backend is the real default
-platform → SDL3 adapter (deferred); headless adapter is the real default
+platform → SDL3 adapter (ADR 0013); headless adapter is the real default
 engine → core + data + ecs + gpu + platform + physics + script
 runtime (exe) + tools → engine
 ```
@@ -145,13 +145,36 @@ runtime (exe) + tools → engine
       decision was made.
 - [ ] New public API has `///` docs + behavior-named tests.
 
-## Deferred (stubs today; each needs its own task + ADR before wiring)
-Vulkan gpu backend, SDL3 platform adapter, ziglua scripting, Tracy, VMA. Selecting a
-deferred backend (`-Denable-vulkan` / `-Denable-sdl3`) fails the build on purpose.
-**Scripting API contract:** ADR 0003 (accepted) fixes the Lua API table, event
-list, opaque handle semantics, versioning, sandbox, state/hot-reload, and error
-policy. `src/script` must implement exactly that; any surface change needs a new
-ADR. Building it is a separate task that adds the ziglua dependency (ask first).
+## Shipped backends (opt-in via build options; default build stays headless/null)
+The Vulkan gpu backend, the SDL3 platform adapter, and the Lua 5.4 (ziglua)
+scripting backend have all landed — each behind its own comptime flag, none
+built by default:
+- **Vulkan gpu backend** (ADR 0006, ADR 0012 accepted): `-Denable-vulkan` wires
+  a real swapchain + present path (`src/gpu/vulkan/backend.zig`); the null
+  backend stays the default and the only test double.
+- **SDL3 platform adapter** (ADR 0013 accepted): `-Denable-sdl3` wires a real
+  window + input adapter (`src/platform/sdl3`); the headless adapter stays the
+  default. `-Denable-vulkan -Denable-sdl3` together drive the live `--play`
+  windowed loop (`src/runtime/main.zig`).
+- **Lua 5.4 scripting backend** (ADR 0003 accepted): `-Denable-lua` wires
+  `src/script/lua.zig` (ziglua). `mise run test-lua` — part of the canonical
+  `mise run check` gate — always exercises it, so it is never merely a stub.
+  ADR 0003 still fixes the Lua API table, event list, opaque handle semantics,
+  versioning, sandbox, and error policy; any surface change needs a new ADR.
+
+`-Denable-vulkan` / `-Denable-sdl3` / `-Denable-lua` compile a real backend, not
+a build-error placeholder — see ADR 0002 for the original stub-everything
+decision and its "one at a time" plan, which the above completed.
+
+## Still deferred (stubs today; each needs its own task + ADR before wiring)
+- **Tracy profiler** (ADR 0023, status **proposed**, not yet accepted): zones/
+  plots already exist behind `-Denable-tracy` (`src/core/tracy.zig`, sim/script/
+  runtime call sites), but the ADR itself hasn't been accepted — treat as
+  provisional until it is.
+- **VMA**: no allocator integration yet; the Vulkan backend still does manual
+  allocation. Slots in behind the existing `gpu` port when it becomes
+  load-bearing (see ADR 0006 §"Dependencies, added per milestone").
+- **Audio port**: no `src/audio` module or backend exists yet.
 
 ## Hard-won knowledge (append when learned the hard way)
 - **Zig 0.16 build API:** `b.addExecutable(.{ .name, .root_module = b.createModule(
