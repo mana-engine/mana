@@ -1,0 +1,34 @@
+// Injected GAMEPAD LEFT-STICK trace for the headless filmstrip of Pac-Man (issue #222,
+// ADR 0040 §5). Fed to the runner's SVG scrub:
+//
+//   mise run pacman-gamepad-filmstrip        # or: zig build run -Denable-lua -- \
+//     games/pacman --filmstrip <out-dir> --scenario games/pacman/captures/gamepad_stick.zon
+//
+// It reuses the scenario `input_trace` format (ADR 0028 amendment, #219) purely as an
+// input source — no assertions; the filmstrip renders one SVG per tick, it does not
+// referee. Each `input_trace` segment is a deterministic `InputSnapshot` held for `ticks`.
+//
+// ⚠ STICK, not d-pad. Only the LEFT STICK (`pad_stick = .left`) and the keyboard are bound
+// to Pac-Man's `move` action (games/pacman/input.zon); the d-pad buttons are NOT bound
+// (deferred, ADR 0040 §4). So this trace drives the analog `left_y` axis, not `dpad_*`
+// buttons — a d-pad trace would be silently ignored and pac would not move. The value −1.0
+// clears the action's `deadzone = 0.3`; rules.lua thresholds the analog vector to a 4-way
+// grid heading IN LUA (ADR 0040 §8), so a full-magnitude push turns pac cleanly.
+//
+// left_y = −1 is screen-UP (engine sign convention, input.zon: up = −y). From pac's start
+// cell (col 8, row 9) the up-column is open, so this reproduces the exact OPEN TURN
+// `scenarios/08_straight_through.zon` pins with the "up" KEY — here proving a gamepad STICK
+// drives the same device-agnostic `move` action: pac leaves its default LEFT heading, turns
+// onto column 8, climbs it, and glides flush to the row-6 wall, then holds. Watching the
+// frames, x stays put (pac did NOT drift left) while pac visibly moves up — unambiguous
+// stick control, with no controller and no display.
+.{
+    .steps = 60,
+    .input_trace = .{
+        // Tick 0: neutral, so pac's components register before the first steer (matching
+        // 08_straight_through's leading empty tick).
+        .{ .ticks = 1 },
+        // Hold the left stick fully UP for the rest of the strip.
+        .{ .ticks = 59, .pad_axes = .{.{ .name = "left_y", .value = -1.0 }} },
+    },
+}

@@ -56,7 +56,10 @@ pub fn main(init: std.process.Init) !void {
     // composite headlessly (null backend, no GPU) after N fixed ticks (issue #122);
     // `--render-svg <out.svg>` renders one frame to SVG, no GPU needed (ADR 0029);
     // `--filmstrip <out-dir> [--ticks N]` runs N ticks, writing one SVG per tick
-    // (ADR 0029); `--play` runs the live windowed loop (needs -Denable-sdl3 -Denable-vulkan).
+    // (ADR 0029) — free-running, OR, when `--scenario <trace.zon>` is *also* given,
+    // replaying that scenario's `input_trace` (keyboard AND injected gamepad, ADR 0040
+    // §5) one snapshot per tick so a human can scrub a controller-driven playthrough
+    // headlessly (issue #222); `--play` runs the live windowed loop (needs -Denable-sdl3 -Denable-vulkan).
     const args = try init.minimal.args.toSlice(arena);
     var pkg_path: ?[]const u8 = null;
     var watch = false;
@@ -144,7 +147,7 @@ pub fn main(init: std.process.Init) !void {
     if (render_out) |path| return runRender(out, io, gpa, pkg, path);
     if (render_play_out) |path| return runRenderPlayFrame(out, io, gpa, pkg, path, filmstrip_ticks);
     if (render_svg_out) |path| return runRenderSvg(out, io, gpa, pkg, path);
-    if (filmstrip_dir) |dir| return runFilmstrip(out, io, gpa, pkg, dir, filmstrip_ticks);
+    if (filmstrip_dir) |dir| return runFilmstrip(out, io, gpa, pkg, dir, filmstrip_ticks, scenario_path);
     if (scenario_path) |path| return runScenario(out, io, gpa, pkg, path);
     if (play) return runPlay(out, io, gpa, pkg);
     if (watch) return runWatch(out, io, gpa, pkg);
@@ -449,14 +452,21 @@ fn runRenderSvg(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, path: 
 }
 
 /// Scrub a headless playthrough (ADR 0029): build a full `Sim` — the same load path as
-/// `runOnce` (standard systems, package script, prototypes) — advance it `ticks` fixed
-/// steps, and write one SVG per tick to `dir/frame_NNNN.svg` (4-digit, zero-padded).
-/// Frame `frame_0000.svg` is the state *after* the first tick (so `on_scene_enter`'s
-/// spawns are already visible, matching `runOnce`'s "fires on the first tick" note).
-/// Lets a human scrub ghosts nav-moving and pickups getting eaten entirely offscreen.
-/// Deliberately does not accept an input trace — that is the scenario-test harness's
-/// concern (ADR 0028, separate lane); this only free-runs the sim.
-fn runFilmstrip(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, dir: []const u8, ticks: u32) !void {
+/// `runOnce` (standard systems, package script, prototypes) — advance it fixed steps, and
+/// write one SVG per tick to `dir/frame_NNNN.svg` (4-digit, zero-padded). Frame
+/// `frame_0000.svg` is the state *after* the first tick (so `on_scene_enter`'s spawns are
+/// already visible, matching `runOnce`'s "fires on the first tick" note). Lets a human
+/// scrub ghosts nav-moving and pickups getting eaten entirely offscreen.
+///
+/// With no `trace_path` it free-runs `ticks` steps (no input). With a `trace_path` it
+/// instead replays that scenario file's `input_trace` — the SAME data format and snapshot
+/// builder the scenario referee uses (`engine.scenario`), keyboard AND injected gamepad
+/// alike (ADR 0040 §5) — setting one deterministic `InputSnapshot` per tick before each
+/// step, one SVG per tick, so a human SEES a controller-driven playthrough with no device
+/// or display (issue #222; invariant #4). Frame count is then the trace's total tick span,
+/// `ticks` is ignored. Assertions in the trace file, if any, are not evaluated here — this
+/// is a visual scrub, not the referee (`--scenario` alone runs the referee).
+fn runFilmstrip(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, dir: []const u8, ticks: u32, trace_path: ?[]const u8) !void {
     const manifest = try loadManifest(io, gpa, pkg);
     defer manifest_mod.free(gpa, manifest);
     try checkScriptApi(out, manifest);
@@ -490,21 +500,58 @@ fn runFilmstrip(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, dir: [
     try Io.Dir.cwd().createDirPath(io, dir);
     const view: engine.render.View = .{ .width = svg_view_size, .height = svg_view_size, .projection = manifest.projection };
 
-    var name_buf: [32]u8 = undefined;
-    var t: u32 = 0;
-    while (t < ticks) : (t += 1) {
-        try sim.tick();
-        const quads = try engine.render.project(gpa, &sim.world, view, &engine.render.default_palette, null);
-        defer gpa.free(quads);
-        const svg = try engine.render_svg.toSvg(gpa, quads, view, engine.render_svg.default_background);
-        defer gpa.free(svg);
-        const name = try std.fmt.bufPrint(&name_buf, "frame_{d:0>4}.svg", .{t});
-        const frame_path = try std.fs.path.join(gpa, &.{ dir, name });
-        defer gpa.free(frame_path);
-        try Io.Dir.cwd().writeFile(io, .{ .sub_path = frame_path, .data = svg });
+    // Injected input trace (issue #222): when a scenario file is given, replay its
+    // `input_trace` one snapshot per tick — `segmentSnapshot` builds the exact deterministic
+    // `InputSnapshot` (keyboard + gamepad) the scenario referee builds, so a gamepad
+    // LEFT-STICK trace drives the `move` action through the same resolver the live game uses,
+    // no device needed. `setInput` runs *before* each `tick` so the tick sees the input.
+    // Frame count = the trace's total tick span. An absent (or empty) trace free-runs `ticks`.
+    var frame_count: u32 = 0;
+    if (trace_path) |tp| {
+        const trace_src = try Io.Dir.cwd().readFileAllocOptions(io, tp, gpa, .unlimited, .of(u8), 0);
+        defer gpa.free(trace_src);
+        const scenario = try engine.scenario.parse(gpa, trace_src);
+        defer engine.scenario.free(gpa, scenario);
+        for (scenario.input_trace) |seg| {
+            const snap = try engine.scenario.segmentSnapshot(seg);
+            var s: u32 = 0;
+            while (s < seg.ticks) : (s += 1) {
+                sim.setInput(snap);
+                try sim.tick();
+                try writeFilmstripFrame(io, gpa, &sim.world, view, dir, frame_count);
+                frame_count += 1;
+            }
+        }
     }
-    try out.print("mana: filmstrip '{s}' — {d} frames, {d}x{d} → {s}\n", .{ manifest.name, ticks, view.width, view.height, dir });
+    if (frame_count == 0) { // no trace, or a trace with an empty input_trace: free-run.
+        var t: u32 = 0;
+        while (t < ticks) : (t += 1) {
+            try sim.tick();
+            try writeFilmstripFrame(io, gpa, &sim.world, view, dir, t);
+            frame_count += 1;
+        }
+    }
+    try out.print(
+        "mana: filmstrip '{s}' — {d} frames, {d}x{d} → {s}{s}\n",
+        .{ manifest.name, frame_count, view.width, view.height, dir, if (trace_path != null) " (input trace)" else "" },
+    );
     try out.flush();
+}
+
+/// Project the current world to one filmstrip frame and write `dir/frame_NNNN.svg`
+/// (4-digit, zero-padded `index`). Shared by both `runFilmstrip` branches (free-run and
+/// trace replay). No GPU: an SVG is text (ADR 0029), so this works on the default null
+/// build. Errors: projection/SVG/OOM and the file write.
+fn writeFilmstripFrame(io: Io, gpa: Allocator, world: *engine.World, view: engine.render.View, dir: []const u8, index: u32) !void {
+    const quads = try engine.render.project(gpa, world, view, &engine.render.default_palette, null);
+    defer gpa.free(quads);
+    const svg = try engine.render_svg.toSvg(gpa, quads, view, engine.render_svg.default_background);
+    defer gpa.free(svg);
+    var name_buf: [32]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "frame_{d:0>4}.svg", .{index});
+    const frame_path = try std.fs.path.join(gpa, &.{ dir, name });
+    defer gpa.free(frame_path);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = frame_path, .data = svg });
 }
 
 /// Run a data-driven scenario (ADR 0028 layer 2, issue #94): load `pkg` exactly as
@@ -1063,6 +1110,59 @@ test "load path: a manifest with no `.input` leaves Sim.action_map null (#216)" 
     const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
     defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
     try testing.expect(action_map_opt == null); // no `.input` ⇒ nothing loaded, Sim.action_map stays default null
+}
+
+/// Count regular files ending in `ext` directly under `<pkg>/<subdir>` (test helper).
+fn countFilesWithExt(io: Io, pkg: []const u8, subdir: []const u8, ext: []const u8, gpa: Allocator) !usize {
+    const sub = try std.fs.path.join(gpa, &.{ pkg, subdir });
+    defer gpa.free(sub);
+    var dir = try Io.Dir.cwd().openDir(io, sub, .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    var n: usize = 0;
+    while (try it.next(io)) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ext)) n += 1;
+    }
+    return n;
+}
+
+test "filmstrip: an injected gamepad+key trace drives one SVG frame per trace tick, headlessly (issue #222)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    // A minimal, genre-neutral package: a manifest, a one-entity scene, and a trace file
+    // that injects a LEFT-STICK push (`left_x`) then a key. No Lua, no tilemap — this pins
+    // the trace-driving/render plumbing on the default null backend, not any game's rules.
+    try tmp.dir.writeFile(io, .{ .sub_path = "game.zon", .data =
+        \\.{ .name = "filmstrip_test", .version = "0", .entry_scene = "scenes/s.zon" }
+    });
+    try tmp.dir.createDirPath(io, "scenes");
+    try tmp.dir.writeFile(io, .{ .sub_path = "scenes/s.zon", .data =
+        \\.{ .name = "s", .entities = .{ .{ .name = "e", .transform = .{ .pos = .{ .x = 0, .y = 0, .z = 0 } } } } }
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "trace.zon", .data =
+        \\.{ .input_trace = .{
+        \\    .{ .ticks = 3, .pad_axes = .{ .{ .name = "left_x", .value = 1.0 } } },
+        \\    .{ .ticks = 2, .keys = .{ "up" } },
+        \\} }
+    });
+
+    const dir = try std.fs.path.join(gpa, &.{ pkg, "frames" });
+    defer gpa.free(dir);
+    const trace = try std.fs.path.join(gpa, &.{ pkg, "trace.zon" });
+    defer gpa.free(trace);
+
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+    // `ticks` (99) is deliberately NOT 5: a present trace governs the frame count, so this
+    // proves the trace span — 3 + 2 = 5 ticks — wins over the free-run `--ticks`.
+    try runFilmstrip(&out_w, io, gpa, pkg, dir, 99, trace);
+
+    try testing.expectEqual(@as(usize, 5), try countFilesWithExt(io, pkg, "frames", ".svg", gpa));
 }
 
 /// Watch mode: tick, poll the whole package, hot-reload on change (last-good-wins).
