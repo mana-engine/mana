@@ -33,20 +33,16 @@ jobs:
   vulkan-lavapipe:
     runs-on: ubuntu-latest
     env:
-      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+      # Restrict the loader to lavapipe (the runner has no GPU). Mesa on Ubuntu Noble
+      # names the manifest `lvp_icd.json` (no `.x86_64` arch suffix — that naming only
+      # exists in some other distros' mesa packaging), so the arch-suffixed path is a
+      # non-existent file: the loader then finds zero ICDs and vkCreateInstance returns
+      # VK_ERROR_INCOMPATIBLE_DRIVER (issue #187).
+      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
       - run: mise install
       - name: Install Mesa lavapipe (software Vulkan ICD)
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
-      - name: Vulkan driver diagnostics
-        run: |
-          echo "== VK_ICD_FILENAMES=$VK_ICD_FILENAMES =="
-          echo "== /usr/share/vulkan/icd.d =="; ls -la /usr/share/vulkan/icd.d/ || true
-          echo "== lavapipe manifest =="; cat /usr/share/vulkan/icd.d/lvp_icd.x86_64.json || true
-          echo "== lavapipe lib deps =="; ldd /usr/lib/x86_64-linux-gnu/libvulkan_lvp.so 2>&1 | head -40 || true
-          echo "== loader in ldconfig =="; ldconfig -p | grep -i vulkan || true
-          echo "== vulkaninfo WITH pinned ICD =="; VK_LOADER_DEBUG=all vulkaninfo --summary 2>&1 | head -120 || true
-          echo "== vulkaninfo WITHOUT pin (auto-discover) =="; env -u VK_ICD_FILENAMES vulkaninfo --summary 2>&1 | tail -40 || true
       - run: mise run test-vulkan
