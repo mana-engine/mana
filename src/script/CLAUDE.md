@@ -116,3 +116,22 @@ deferred (see the last bullet below).
   not comptime. `NoopRuntime` mirrors `armedCapture`/`clearCapture`/
   `dispatchInputCaptured` as inert no-ops so `ui_dispatch.zig` stays backend-agnostic
   under a default (no-Lua) build.
+- **Reading handler-table state is NOT `mana` surface, and does not move the version
+  gate.** `State.handlerFieldInt` and its table-valued sibling
+  `State.handlerFieldStrMap` (ADR 0041 §4, issue #238) are *engine → state reads*, not
+  script-callables: nothing is added to the `mana` table, so ADR 0003 §5's version stays
+  1. This is the #135 persistence seam — content accumulates plain values in handler
+  fields, an engine-side driver (`src/engine/input_override.zig`) reads them and owns the
+  file write, because ADR 0003 §7 means a script can never touch the filesystem itself.
+  `handlerFieldStrMap` **copies** both strings of every pair out with the caller's
+  allocator (`State.freeStrMap` frees the result), so no returned string is a borrow into
+  Lua memory a later collection could invalidate. Two gotchas it encodes: only slots
+  *already* of type `.string` are read (`toString` coerces a number **in place**, which
+  would rewrite the key slot and corrupt `lua_next`'s traversal), and the stack is
+  restored by absolute height (`getTop`/`setTop`) rather than counted pops, since the
+  traversal leaves a variable number of values behind on an early error return.
+- **Plain-data leaf types shared with the engine live in `types.zig`**, not in
+  `script.zig` or `lua.zig`. `script.zig` comptime-selects `lua.zig`, so `lua.zig` must
+  not import `script.zig` back — yet the no-Lua stub build still has to name the types
+  the engine's inert `NoopRuntime` mirrors. A third leaf file both import is the way out
+  (the same split `engine` uses for `action_types.zig`).

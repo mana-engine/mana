@@ -395,6 +395,53 @@ const ActionMapState = struct {
     }
 };
 
+/// One `--play` poll of the rebinding-persistence driver (ADR 0041 §4, issue #238):
+/// write the override file if the package script accepted a rebind since the last poll,
+/// and report what happened on `out`.
+///
+/// **Nothing here is fatal to the session.** A save that fails means this rebind is not
+/// durable — not that the game stops: the live map still swapped (ADR 0041 §3), so the
+/// player keeps playing with the binding they just chose, and the next rebind retries.
+/// The most likely failure is `FileNotFound`, a package with no `save/` directory (the
+/// engine creates none; #240 moves this path to the OS config dir). `OutOfMemory` is a
+/// real resource failure, not a content error, so it alone propagates — the same benign
+/// case / `else => return err` split `loadEffectiveActionMap` uses.
+///
+/// A `.unchanged` poll — the steady state, every poll of every session that never
+/// rebinds — logs nothing, writes nothing, and allocates nothing.
+fn persistBindings(
+    out: *Io.Writer,
+    io: Io,
+    gpa: Allocator,
+    path: []const u8,
+    writer: *engine.input_override.OverrideWriter,
+    rt: *engine.script_runtime.Runtime,
+) !void {
+    const outcome = writer.poll(gpa, io, Io.Dir.cwd(), path, rt) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            try out.print(
+                "mana: could not save bindings to '{s}' ({s}) — this rebind applies now but will not persist\n",
+                .{ path, @errorName(err) },
+            );
+            try out.flush();
+            return;
+        },
+    };
+    switch (outcome) {
+        .unchanged => return,
+        .written => |n| try out.print("mana: bindings saved to '{s}' — {d} action(s) overridden\n", .{ path, n }),
+        // The driver could not express what the script proposed (an unknown source, an
+        // action name that is not a ZON identifier), so it wrote nothing at all rather
+        // than a file the loader could only reject — the last saved bindings stand.
+        .rejected => |reason| try out.print(
+            "mana: rebind rejected ({s}) — '{s}' not written, keeping the last saved bindings\n",
+            .{ @tagName(reason), path },
+        ),
+    }
+    try out.flush();
+}
+
 /// Log a benign user-override fallback (ADR 0041 §3): the override at `path` was
 /// `reason` (`err`), so the runner keeps the package-only map. Factored out so the
 /// two fallback sites in `loadEffectiveActionMap` share one message shape.
@@ -809,8 +856,10 @@ fn runPlay(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
 /// (its sole caller is `runPlay`'s comptime-true branch), so SDL/Vulkan types appear only
 /// here. Loads the scene into a `Sim` (reusing the `runOnce` load path plus the #30
 /// input-translation system so keys drive gameplay), watches the package's two
-/// action-binding files so a live remap applies without a restart (ADR 0041 §3), opens
-/// the window *before* the
+/// action-binding files so a live remap applies without a restart (ADR 0041 §3) and
+/// persists any rebind the package script accepted to the user-override file (ADR 0041
+/// §4 — the engine owns the write; a script cannot touch the filesystem, ADR 0003 §7),
+/// opens the window *before* the
 /// `gpu.Device` (ADR 0012 §8: SDL video must be up so the surface extensions resolve),
 /// then drives the accumulator loop: poll → tick N fixed steps → render the projected
 /// scene into the acquired image → present, recreating the swapchain on out-of-date /
@@ -851,6 +900,12 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     defer input_watcher.deinit();
     try watchActionMapFiles(&input_watcher, io, gpa, pkg, manifest);
 
+    // The one path the persistence driver writes and the load/watch paths read — the
+    // same join `loadEffectiveActionMap` makes, so all three agree on which file the
+    // player's bindings live in (ADR 0041 §2.1's accepted Option B).
+    const override_path = try std.fs.path.join(gpa, &.{ pkg, action_override_rel });
+    defer gpa.free(override_path);
+
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
     sim.prototypes = .{ .prototypes = protos.prototypes };
@@ -860,6 +915,10 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     if (parsed.tilemap) |*tm| sim.tilemap = tm;
     sim.action_map = action_map_state.borrow(); // #216: borrowed like tilemap (outlives sim)
     try loadPackageScript(io, gpa, pkg, manifest, &sim); // #51: package Lua handlers
+    // Rebinding persistence (ADR 0041 §4; issue #238), seeded AFTER the script is loaded
+    // so whatever bindings its handler table starts with count as already on disk — the
+    // script loaded them FROM there. A package that proposes none never writes.
+    var override_writer: engine.input_override.OverrideWriter = .init(&sim.script_runtime);
     sim.enterScene(parsed.name); // #54/ADR 0017: fire on_scene_enter on the first tick
     try sim.addSystem(engine.input.inputMoveSystem); // #30: held keys → velocity (before nav)
     try registerStandardSystems(&sim);
@@ -996,6 +1055,16 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
         watch_accum_s += elapsed_s;
         if (watch_accum_s >= watch_poll_s) {
             watch_accum_s = 0;
+            // Persist first (ADR 0041 §4), on the same tick boundary and cadence: the
+            // write the driver may just have made is then exactly the change the
+            // watcher below detects, so an accepted rebind is saved AND applied within
+            // one iteration — "persists and applies in one motion" (§4.3). Ordering
+            // them the other way would delay every rebind by a poll interval.
+            {
+                const z = tracy.zone(@src(), "input_persist");
+                defer z.end();
+                try persistBindings(out, io, gpa, override_path, &override_writer, &sim.script_runtime);
+            }
             if (input_watcher.poll(io)) {
                 const z = tracy.zone(@src(), "input_reload");
                 defer z.end();

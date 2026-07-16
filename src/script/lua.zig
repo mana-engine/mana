@@ -15,6 +15,9 @@
 const std = @import("std");
 const zlua = @import("zlua");
 const mana = @import("mana.zig");
+const types = @import("types.zig");
+
+const Allocator = std.mem.Allocator;
 
 /// The Lua binding type, re-exported so callers need not import `zlua` directly.
 pub const Lua = zlua.Lua;
@@ -36,6 +39,7 @@ test {
     // (which in turn imports `handle`) here pulls both files' tests into that
     // same binary the same way — otherwise they would silently never run.
     _ = mana;
+    _ = types;
 }
 
 /// Create a fresh, unsandboxed Lua 5.4 interpreter state with no standard
@@ -492,6 +496,74 @@ pub const State = struct {
         return l.toInteger(-1) catch null;
     }
 
+    /// Read the string→string entries of *table*-valued field `key` off the loaded
+    /// handler table — the table-valued sibling to `handlerFieldInt` (ADR 0041 §4; the
+    /// #135 "engine reads handler-table state" seam generalised from a scalar to a
+    /// table, so an engine-side driver can read a set of proposed `name = "value"`
+    /// data the script accumulated in plain Lua state). Adds nothing to the `mana`
+    /// surface itself — it is an engine→state read, not a script-callable — so ADR
+    /// 0003 §5's version gate does not move.
+    ///
+    /// Returns null when no handler table is loaded or `key` is absent/not a table.
+    /// Otherwise returns a fresh slice of pairs, allocated from `gpa`: **the caller
+    /// owns it and every string in it** (both are copied out of Lua, so they outlive
+    /// the Lua values and any later collection) — free with `freeStrMap`. An empty
+    /// table yields an empty (non-null) slice: "declared but empty" and "not declared"
+    /// are different answers a driver acts on differently.
+    ///
+    /// Entries whose key or value is not a Lua string are **skipped**, not an error:
+    /// this is a read of plain script-authored state, and the driver's contract is
+    /// over string→string entries only. Iteration order is Lua's internal hash order
+    /// and therefore unspecified — a caller that writes these to a file must sort
+    /// them itself. Errors: `OutOfMemory` only.
+    pub fn handlerFieldStrMap(self: *State, gpa: Allocator, key: [:0]const u8) Allocator.Error!?[]types.StrPair {
+        const l = self.lua;
+        const ref = self.handler_ref orelse return null;
+        // Restore the stack by absolute height rather than counted pops: the traversal
+        // below leaves a variable number of values behind on an early `return err`.
+        const base = l.getTop();
+        defer l.setTop(base);
+
+        _ = l.getIndexRaw(zlua.registry_index, ref); // push the handler table
+        if (l.getField(-1, key) != .table) return null; // absent, or not a table
+
+        var pairs: std.ArrayList(types.StrPair) = .empty;
+        errdefer {
+            for (pairs.items) |p| {
+                gpa.free(p.key);
+                gpa.free(p.value);
+            }
+            pairs.deinit(gpa);
+        }
+
+        l.pushNil(); // `next`'s "start from the beginning" seed
+        while (l.next(-2)) {
+            // stack: [..., handler_table, field_table, key, value]
+            defer l.pop(1); // the value; `next` consumes the key on the following call
+            // Only *already*-string slots are read: `toString` coerces a number in
+            // place, which would rewrite the key slot and corrupt `next`'s traversal.
+            if (l.typeOf(-2) != .string or l.typeOf(-1) != .string) continue;
+            const k = l.toString(-2) catch unreachable; // proven `.string` above
+            const v = l.toString(-1) catch unreachable; // proven `.string` above
+            const k_owned = try gpa.dupe(u8, k);
+            errdefer gpa.free(k_owned);
+            const v_owned = try gpa.dupe(u8, v);
+            errdefer gpa.free(v_owned);
+            try pairs.append(gpa, .{ .key = k_owned, .value = v_owned });
+        }
+        return try pairs.toOwnedSlice(gpa);
+    }
+
+    /// Free a `handlerFieldStrMap` result: every string in `pairs`, then `pairs`
+    /// itself. `gpa` must be the allocator that produced it.
+    pub fn freeStrMap(gpa: Allocator, pairs: []const types.StrPair) void {
+        for (pairs) |p| {
+            gpa.free(p.key);
+            gpa.free(p.value);
+        }
+        gpa.free(pairs);
+    }
+
     /// The most recent caught handler error message (ADR 0003 §9), valid until the
     /// next dispatch. Empty when the last dispatch did not error.
     pub fn lastError(self: *const State) []const u8 {
@@ -835,6 +907,108 @@ test "dispatch: on_spawn fires for a loaded handler table" {
     try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("spawns").?);
     try std.testing.expectEqual(State.DispatchOutcome.ok, state.dispatchSpawn(2, 0));
     try std.testing.expectEqual(@as(i64, 2), state.handlerFieldInt("spawns").?);
+}
+
+// --- handlerFieldStrMap (ADR 0041 §4) ---------------------------------------
+
+/// Look `key` up in an unsorted `handlerFieldStrMap` result (Lua hash order is
+/// unspecified, so a test may never index by position).
+fn findPair(pairs: []const types.StrPair, key: []const u8) ?[]const u8 {
+    for (pairs) |p| {
+        if (std.mem.eql(u8, p.key, key)) return p.value;
+    }
+    return null;
+}
+
+test "handlerFieldStrMap: a table-valued handler field's string entries are copied out as owned pairs" {
+    const gpa = std.testing.allocator;
+    var state = try State.init(gpa);
+    defer state.deinit();
+
+    try state.loadHandlerTable(
+        \\local t = {}
+        \\t.bindings = { jump = "f", fire = "pad_south" }
+        \\return t
+    );
+
+    const pairs = (try state.handlerFieldStrMap(gpa, "bindings")).?;
+    defer State.freeStrMap(gpa, pairs);
+
+    try std.testing.expectEqual(@as(usize, 2), pairs.len);
+    try std.testing.expectEqualStrings("f", findPair(pairs, "jump").?);
+    try std.testing.expectEqualStrings("pad_south", findPair(pairs, "fire").?);
+}
+
+test "handlerFieldStrMap: the copies survive the Lua values being replaced and collected" {
+    const gpa = std.testing.allocator;
+    var state = try State.init(gpa);
+    defer state.deinit();
+
+    try state.loadHandlerTable("return { bindings = { jump = \"f\" } }");
+    const pairs = (try state.handlerFieldStrMap(gpa, "bindings")).?;
+    defer State.freeStrMap(gpa, pairs);
+
+    // Drop every Lua reference to the strings just read and force a full GC: the
+    // returned pair must be a copy, not a borrow into collected Lua memory.
+    try state.loadHandlerTable("return { bindings = {} }");
+    state.lua.gcCollect();
+
+    try std.testing.expectEqualStrings("jump", pairs[0].key);
+    try std.testing.expectEqualStrings("f", pairs[0].value);
+}
+
+test "handlerFieldStrMap: an empty table yields an empty slice, an absent/non-table field yields null" {
+    const gpa = std.testing.allocator;
+    var state = try State.init(gpa);
+    defer state.deinit();
+
+    try state.loadHandlerTable("return { bindings = {}, revision = 3 }");
+
+    // Declared-but-empty and not-declared are distinct answers a driver acts on
+    // differently ("the player cleared every rebind" vs "this package never rebinds").
+    const empty = (try state.handlerFieldStrMap(gpa, "bindings")).?;
+    defer State.freeStrMap(gpa, empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+
+    try std.testing.expect(try state.handlerFieldStrMap(gpa, "absent") == null);
+    try std.testing.expect(try state.handlerFieldStrMap(gpa, "revision") == null); // not a table
+}
+
+test "handlerFieldStrMap: non-string entries are skipped, and reading them never corrupts the traversal" {
+    const gpa = std.testing.allocator;
+    var state = try State.init(gpa);
+    defer state.deinit();
+
+    // Numeric keys (an array part), a numeric value, and a table value all sit
+    // alongside the two real string→string entries.
+    try state.loadHandlerTable(
+        \\local t = {}
+        \\t.bindings = { "arraypart", jump = "f", volume = 7, nested = {}, fire = "pad_north" }
+        \\return t
+    );
+
+    const pairs = (try state.handlerFieldStrMap(gpa, "bindings")).?;
+    defer State.freeStrMap(gpa, pairs);
+
+    try std.testing.expectEqual(@as(usize, 2), pairs.len);
+    try std.testing.expectEqualStrings("f", findPair(pairs, "jump").?);
+    try std.testing.expectEqualStrings("pad_north", findPair(pairs, "fire").?);
+}
+
+test "handlerFieldStrMap: with no table loaded the answer is null, and the Lua stack is left balanced" {
+    const gpa = std.testing.allocator;
+    var state = try State.init(gpa);
+    defer state.deinit();
+
+    const before = state.lua.getTop();
+    try std.testing.expect(try state.handlerFieldStrMap(gpa, "bindings") == null);
+    try state.loadHandlerTable("return { bindings = { jump = \"f\" } }");
+
+    const pairs = (try state.handlerFieldStrMap(gpa, "bindings")).?;
+    State.freeStrMap(gpa, pairs);
+    try std.testing.expect(try state.handlerFieldStrMap(gpa, "absent") == null);
+    // Every path — null, empty, and populated — restores the stack it was called on.
+    try std.testing.expectEqual(before, state.lua.getTop());
 }
 
 test "dispatch: a missing handler key is a silent no-op" {

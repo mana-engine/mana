@@ -704,6 +704,28 @@ const LuaRuntime = struct {
         return s.handlerFieldInt(key);
     }
 
+    /// Read table-valued handler field `key`'s string→string entries, or null when no
+    /// script is loaded or the field is absent/not a table — the table-valued sibling
+    /// to `handlerFieldInt` (ADR 0041 §4), for an engine-side driver that persists a
+    /// *set* of values the script proposed rather than one scalar (#135's pattern
+    /// generalised). Additive engine→state read only: no `mana` member is added, so
+    /// ADR 0003 §5's version gate is untouched.
+    ///
+    /// The result and every string in it are `gpa`-owned copies (never a borrow into
+    /// Lua memory, so a later collection cannot invalidate them) — free with
+    /// `freeStrMap`. Order is unspecified (Lua hash order); sort before writing to a
+    /// file. Errors: `OutOfMemory` only.
+    pub fn handlerFieldStrMap(self: *LuaRuntime, gpa: Allocator, key: [:0]const u8) Allocator.Error!?[]const script.StrPair {
+        const s = if (self.state) |*st| st else return null;
+        return s.handlerFieldStrMap(gpa, key);
+    }
+
+    /// Free a `handlerFieldStrMap` result (its strings and the slice). `gpa` must be
+    /// the allocator that produced it.
+    pub fn freeStrMap(gpa: Allocator, pairs: []const script.StrPair) void {
+        script.lua.State.freeStrMap(gpa, pairs);
+    }
+
     /// True once `key`'s circuit breaker has tripped (ADR 0003 §9): `dispatch`
     /// skips it silently from this point on, until the next `loadHandlers`.
     /// Test/observability seam; the engine itself never needs to ask.
@@ -848,6 +870,20 @@ const NoopRuntime = struct {
         _ = self;
         _ = key;
         return null;
+    }
+
+    /// Always null under the default (no-Lua) build: there is no handler table to
+    /// read, so an engine-side persistence driver (ADR 0041 §4) sees "the package
+    /// proposes nothing" and never writes — the same inert shape `handlerFieldInt`
+    /// already has.
+    pub fn handlerFieldStrMap(self: *NoopRuntime, gpa: Allocator, key: [:0]const u8) Allocator.Error!?[]const script.StrPair {
+        _ = .{ self, gpa, key };
+        return null;
+    }
+
+    /// A no-op: `handlerFieldStrMap` above never allocates, so there is nothing to free.
+    pub fn freeStrMap(gpa: Allocator, pairs: []const script.StrPair) void {
+        _ = .{ gpa, pairs };
     }
 };
 

@@ -18,8 +18,59 @@ pub fn serialize(value: anytype, w: *Writer) Writer.Error!void {
     try w.writeByte('\n');
 }
 
+/// A ZON object whose field **names are runtime data**, not a Zig struct's comptime
+/// fields — `serialize` writes it as an ordinary `.{ .<name> = <value>, … }` struct
+/// literal, so the bytes are indistinguishable from any hand-written ZON object and
+/// the matching parser reads them back unchanged.
+///
+/// This exists because `serialize` is a comptime reflection walk: a Zig type can only
+/// describe an object whose field names are known at compile time. `input.zon`'s
+/// `.actions` table (ADR 0040 §3) is the opposite — its field names *are* the
+/// content-declared action names, unbounded and unknown to `src/**` (invariant #6) —
+/// which is exactly why its *parser* (`engine/action_parse.zig`) had to walk the ZON
+/// tree by hand rather than use `std.zon.parse` at the top level. `Object` is the
+/// symmetric escape hatch on the *write* side, so persisting an override `input.zon`
+/// (ADR 0041 §4) still goes through `saveFile` instead of hand-rolling ZON text.
+///
+/// `fields` is **borrowed** for the duration of the `serialize`/`saveFile` call; this
+/// type owns nothing and frees nothing.
+///
+/// Each `name` is emitted **verbatim**, so it must be a valid bare ZON identifier —
+/// the caller checks (`std.zig.isValidId`), because only the caller knows what to do
+/// with a name that is not one. Names round-tripped out of a parsed ZON object always
+/// are.
+pub fn Object(comptime V: type) type {
+    return struct {
+        /// Marker `writeValue` dispatches on — its presence, not its value, is what
+        /// distinguishes an `Object` from a plain struct that happens to have a
+        /// `fields` member.
+        pub const zon_object_value = V;
+
+        pub const Field = struct { name: []const u8, value: V };
+
+        fields: []const Field,
+    };
+}
+
 fn writeIndent(w: *Writer, depth: usize) Writer.Error!void {
     for (0..depth) |_| try w.writeAll("    ");
+}
+
+/// Write an `Object(V)` as a `.{ .<name> = <value>, … }` literal — the runtime-named
+/// counterpart of the comptime `.@"struct"` branch below, sharing its layout exactly.
+fn writeObject(obj: anytype, w: *Writer, depth: usize) Writer.Error!void {
+    if (obj.fields.len == 0) return w.writeAll(".{}");
+    try w.writeAll(".{\n");
+    for (obj.fields) |f| {
+        try writeIndent(w, depth + 1);
+        try w.writeByte('.');
+        try w.writeAll(f.name);
+        try w.writeAll(" = ");
+        try writeValue(f.value, w, depth + 1);
+        try w.writeAll(",\n");
+    }
+    try writeIndent(w, depth);
+    try w.writeByte('}');
 }
 
 fn writeValue(value: anytype, w: *Writer, depth: usize) Writer.Error!void {
@@ -36,6 +87,8 @@ fn writeValue(value: anytype, w: *Writer, depth: usize) Writer.Error!void {
             if (value) |v| try writeValue(v, w, depth) else try w.writeAll("null");
         },
         .@"struct" => |s| {
+            // A runtime-named object (`Object(V)`) writes its own field names.
+            if (@hasDecl(T, "zon_object_value")) return writeObject(value, w, depth);
             if (s.fields.len == 0) return w.writeAll(".{}");
             try w.writeAll(".{\n");
             inline for (s.fields) |f| {
@@ -224,6 +277,62 @@ test "zon file persistence: a second saveFile overwrites the first, loadFile see
 
     const loaded = try loadFile(S, gpa, io, tmp.dir, "s.zon");
     try testing.expectEqual(@as(i32, 2), loaded.n);
+}
+
+test "zon serialize: an Object's runtime field names produce the same literal a comptime struct would" {
+    // The proof `Object` is not a new dialect: an object built from *runtime* names
+    // must be byte-identical to the equivalent hand-written Zig struct's output.
+    const Inner = struct { hp: u32 };
+    const gpa = testing.allocator;
+
+    var dynamic: Writer.Allocating = .init(gpa);
+    defer dynamic.deinit();
+    const Obj = Object(Inner);
+    // Names as `[]const u8` *values* — the shape a name read out of a file or a script
+    // arrives in, and one no Zig struct's field list could have described.
+    const fields = [_]Obj.Field{
+        .{ .name = "crate", .value = .{ .hp = 10 } },
+        .{ .name = "barrel", .value = .{ .hp = 3 } },
+    };
+    try serialize(Obj{ .fields = &fields }, &dynamic.writer);
+
+    var static: Writer.Allocating = .init(gpa);
+    defer static.deinit();
+    try serialize(struct { crate: Inner, barrel: Inner }{
+        .crate = .{ .hp = 10 },
+        .barrel = .{ .hp = 3 },
+    }, &static.writer);
+
+    try testing.expectEqualStrings(static.written(), dynamic.written());
+}
+
+test "zon round-trip: an Object nested in a struct parses back through std.zon.parse" {
+    // `Object` is write-side only (the read side of a runtime-named table is the
+    // caller's own walk — e.g. `engine/action_parse.zig`), so the round trip is proven
+    // against a *fixed*-shape `T` whose field names happen to match the ones written.
+    const Inner = struct { hp: u32 };
+    const gpa = testing.allocator;
+    const Obj = Object(Inner);
+    const fields = [_]Obj.Field{.{ .name = "crate", .value = .{ .hp = 10 } }};
+
+    var aw: Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try serialize(struct { items: Obj }{ .items = .{ .fields = &fields } }, &aw.writer);
+
+    const z = try gpa.dupeZ(u8, aw.written());
+    defer gpa.free(z);
+    const parsed = try parse(struct { items: struct { crate: Inner } }, gpa, z);
+    defer free(gpa, parsed);
+    try testing.expectEqual(@as(u32, 10), parsed.items.crate.hp);
+}
+
+test "zon serialize: an empty Object writes the empty literal" {
+    const gpa = testing.allocator;
+    const Obj = Object(u8);
+    var aw: Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try serialize(Obj{ .fields = &.{} }, &aw.writer);
+    try testing.expectEqualStrings(".{}\n", aw.written());
 }
 
 test "zon serialize: exact pretty-printed shape" {

@@ -38,4 +38,15 @@ CPU atlas packer (`Atlas`/`buildAtlas`/`merge`). Both re-export through their pa
 (`render.projectSprites`, `sprite.Atlas`/`buildAtlas`/`merge`), so the public API is
 unchanged — see each file's header for the split rationale.
 
+`input_override.zig` is the rebinding **persistence driver** (ADR 0041 §4, issue #238):
+it reads the bindings a script accepted off its handler table (`Runtime.
+handlerFieldStrMap`) and writes them to the user-override `input.zon` that
+`action_map.merge` layers over the package map. Persistence is engine-side Zig because
+a script can never touch the filesystem (ADR 0003 §7) and must not — the engine owns the
+file, the script only proposes data (invariant #1). The `bindings`/`bindings_revision`
+handler-table contract is engine-generic: it names no action, key, or game; a package
+declaring neither never writes. Cosmetic and hash-excluded, like the rest of ADR 0041.
+The runner (`runtime/main.zig`'s `playLoop`) polls it at a tick boundary just *before*
+the action-map watcher, so a rebind saves and applies within one iteration.
+
 **Imported by:** `runtime`, `tools`.
