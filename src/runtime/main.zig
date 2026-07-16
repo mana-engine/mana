@@ -31,6 +31,10 @@ const provided_script_api: u32 = engine.script_api_version;
 const tick_steps: u32 = 60;
 /// Poll cadence for `--watch`, in milliseconds.
 const watch_poll_ms: i64 = 100;
+/// The same cadence in seconds, for `--play`'s wall-clock-accumulator poll of the
+/// action-binding files (ADR 0041 §3) — `playLoop` has no sleep to hang it off, so it
+/// counts elapsed frame time instead of blocking like `runWatch` does.
+const watch_poll_s: f32 = @as(f32, @floatFromInt(watch_poll_ms)) / std.time.ms_per_s;
 /// Pixel dimensions for `--render-svg`/`--filmstrip` (ADR 0029) — matches `runRender`'s
 /// PNG size so an SVG and a PNG render of the same scene are directly comparable.
 const svg_view_size: u32 = 512;
@@ -224,31 +228,38 @@ fn loadPackageScript(io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest
     try sim.loadScript(src);
 }
 
+/// The outcome of one `loadEffectiveActionMap` attempt: the owned effective map (null
+/// when the package declares no `input` and has no usable override) plus whether the
+/// user override was *present but rejected*. The two callers want different things from
+/// that flag, which is why it is reported rather than swallowed: startup
+/// (`loadActionMap`) proceeds with the package-only map — there is no earlier map to
+/// keep — while a live reload (`ActionMapState.reload`) discards this result and keeps
+/// the current effective map, exactly ADR 0041 §3's last-good-wins. `map` is owned by
+/// the caller either way; free it with `engine.action_map.free`.
+const ActionMapLoad = struct {
+    map: ?engine.ActionMap,
+    override_rejected: bool = false,
+};
+
 /// Load a package's *effective* action-binding table: the package `input.zon` (ADR
 /// 0040 §3, issue #216) if the manifest declares an `input` path, with a v1 user
 /// override (ADR 0041 §2, issue #236) merged OVER it when one exists at the
 /// package-local `action_override_rel` path (ADR 0041 §2.1's accepted Option B).
-/// Returns the owned, effective `ActionMap` the caller borrows onto `Sim.action_map`
-/// (mirroring how the scene's `tilemap` is borrowed), or null when the package has
-/// neither a declared `input` nor a usable override.
 ///
 /// **The package map is load-bearing; the override is best-effort.** A declared
-/// `.input` that fails to read or parse still fails this load (unchanged from before
-/// #236) — that is shipped content, expected to be well-formed. The *override*,
-/// by contrast, is player-editable/engine-written state: if `action_override_rel` is
-/// absent, behavior is exactly as before #236 (package map only, no log — "absent" is
-/// not an error). If it is present but unreadable, fails to parse, or fails to
-/// `engine.action_map.merge` (an unknown action, a `type` mismatch, or an analog-rule
-/// violation), the failure is logged to `out` and this returns the package-only map
-/// unchanged — never crashing startup on a bad override (ADR 0041 §3's last-good-wins
-/// spirit; the full watch/reload retry loop is phase 3, #237, this is only the
-/// startup half).
+/// `.input` that fails to read or parse fails this load — that is shipped content,
+/// expected to be well-formed. The *override*, by contrast, is player-editable/
+/// engine-written state: if `action_override_rel` is absent, the package map is
+/// returned as-is (no log — "absent" is not an error). If it is present but fails to
+/// parse or fails to `engine.action_map.merge` (an unknown action, a `type` mismatch,
+/// or an analog-rule violation), the failure is logged to `out` and the returned
+/// `map` is the package-only map with `override_rejected = true`.
 ///
-/// The caller owns the result and must `engine.action_map.free` it *after* the `Sim`
-/// that borrows it is torn down. Errors: file-read failures for the *package* map,
-/// plus `engine.action_map.parse`'s `ParseZon`/`Unbound`/`WrongTypedSource`/
-/// `OutOfMemory` — again, for the package map only.
-fn loadActionMap(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest) !?engine.ActionMap {
+/// The caller owns `map` and must `engine.action_map.free` it *after* any `Sim` that
+/// borrows it is torn down. Errors: file-read failures for the *package* map, plus
+/// `engine.action_map.parse`'s `ParseZon`/`Unbound`/`WrongTypedSource`/`OutOfMemory`
+/// — for the package map only.
+fn loadEffectiveActionMap(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest) !ActionMapLoad {
     var pkg_map: ?engine.ActionMap = null;
     if (manifest.input) |rel| {
         const path = try std.fs.path.join(gpa, &.{ pkg, rel });
@@ -263,12 +274,12 @@ fn loadActionMap(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, manif
     // last-good spirit ADR 0041 §3) — but only for *benign* failures. A resource
     // error like `OutOfMemory` is a real bug, not a malformed override, so it
     // propagates rather than being masked as a "using package input only" log line —
-    // the same benign-case/`else => return err` split `watchDir` (:1011) uses.
+    // the same benign-case/`else => return err` split `watchDir` uses.
     const override_path = try std.fs.path.join(gpa, &.{ pkg, action_override_rel });
     defer gpa.free(override_path);
     const override_src = Io.Dir.cwd().readFileAllocOptions(io, override_path, gpa, .unlimited, .of(u8), 0) catch |err| switch (err) {
         // No override file at all ⇒ package map only, silently (the common case).
-        error.FileNotFound => return pkg_map,
+        error.FileNotFound => return .{ .map = pkg_map },
         else => return err,
     };
     defer gpa.free(override_src);
@@ -277,7 +288,7 @@ fn loadActionMap(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, manif
         // A malformed/invalid override file: log and fall back to the package map.
         error.ParseZon, error.Unbound, error.WrongTypedSource => {
             try logOverrideFallback(out, override_path, "failed to parse", err);
-            return pkg_map;
+            return .{ .map = pkg_map, .override_rejected = true };
         },
         error.OutOfMemory => return err,
     };
@@ -289,17 +300,104 @@ fn loadActionMap(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, manif
         // fall back (an unknown action, a `type` mismatch, or an analog-rule violation).
         error.UnknownAction, error.TypeMismatch, error.Unbound, error.WrongTypedSource => {
             try logOverrideFallback(out, override_path, "rejected", err);
-            return pkg_map;
+            return .{ .map = pkg_map, .override_rejected = true };
         },
         error.OutOfMemory => return err,
     };
     if (pkg_map) |m| engine.action_map.free(gpa, m);
-    return effective;
+    return .{ .map = effective };
 }
+
+/// Startup half of the effective action-map load: `loadEffectiveActionMap` with the
+/// override-rejection flag dropped, because at startup there is no earlier map to keep
+/// — a bad override simply yields the package-only map (never crashing startup, ADR
+/// 0041 §3's last-good-wins spirit). Returns the owned, effective `ActionMap` the
+/// caller borrows onto `Sim.action_map` (mirroring how the scene's `tilemap` is
+/// borrowed), or null when the package has neither a declared `input` nor a usable
+/// override. The caller owns the result and must `engine.action_map.free` it *after*
+/// the `Sim` that borrows it is torn down. Errors: as `loadEffectiveActionMap`.
+fn loadActionMap(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest) !?engine.ActionMap {
+    const loaded = try loadEffectiveActionMap(out, io, gpa, pkg, manifest);
+    return loaded.map;
+}
+
+/// The single owner of a live, reloadable effective action map (ADR 0041 §3, issue
+/// #237) — the `--play` counterpart of the one-shot `loadActionMap` + `defer free`
+/// pair the headless modes use.
+///
+/// **Ownership.** `map` is the one owned effective `ActionMap`; nothing else frees it.
+/// `deinit` frees whatever is current. `Sim.action_map` borrows `&state.map.?`, a
+/// pointer *into this struct*, so the borrow's address is stable for the state's whole
+/// lifetime: `reload` replaces the optional's payload **in place** and frees the old
+/// map only after the new one is fully built, so no dangling reference to a freed map
+/// can survive a swap. The state must outlive the `Sim` that borrows it (LIFO defers
+/// in `playLoop`, exactly as the parsed scene's `tilemap` borrow is scoped).
+///
+/// `borrow()` is the single source of that pointer, and callers re-assign
+/// `sim.action_map = state.borrow()` after every `reload` rather than pointing at it
+/// once at load: the payload address is stable but its *presence* is `reload`'s to
+/// decide, and nothing here should encode which of the two a given package happens to
+/// resolve to.
+const ActionMapState = struct {
+    gpa: Allocator,
+    map: ?engine.ActionMap,
+
+    /// Take ownership of an already-loaded effective map (`loadActionMap`'s result).
+    fn init(gpa: Allocator, map: ?engine.ActionMap) ActionMapState {
+        return .{ .gpa = gpa, .map = map };
+    }
+
+    fn deinit(self: *ActionMapState) void {
+        if (self.map) |m| engine.action_map.free(self.gpa, m);
+        self.* = undefined;
+    }
+
+    /// The borrow to hand `Sim.action_map`: a pointer into `self` (stable), or null
+    /// when the package currently resolves no bindings at all. `self` must outlive
+    /// every `Sim` given this pointer.
+    fn borrow(self: *ActionMapState) ?*const engine.ActionMap {
+        return if (self.map) |*m| m else null;
+    }
+
+    /// Re-read the package `input.zon` + the user override, re-merge them, and swap
+    /// `map` to the fresh effective map, freeing the previous one — **last-good-wins**
+    /// (ADR 0005 §3, ADR 0041 §3): if the package map fails to read/parse, or the
+    /// override is present but rejected, the current `map` is kept untouched and the
+    /// failure is logged to `out`. A malformed edit therefore never clears bindings and
+    /// never crashes the session; the next change retries.
+    ///
+    /// Call only at a tick boundary — the swap is atomic from the sim's view (the map
+    /// is a pure lookup table the resolver reads per tick, ADR 0040 §4), but only if no
+    /// tick is mid-flight. Allocates only when a change was detected, so the
+    /// steady-state loop stays alloc-free. Errors: `error.OutOfMemory` only (a real
+    /// resource failure, never a content error — those are the logged, kept-last-good
+    /// cases).
+    fn reload(self: *ActionMapState, out: *Io.Writer, io: Io, pkg: []const u8, manifest: Manifest) !void {
+        const loaded = loadEffectiveActionMap(out, io, self.gpa, pkg, manifest) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                try out.print("mana: input reload failed ({s}) — keeping last good bindings\n", .{@errorName(err)});
+                try out.flush();
+                return;
+            },
+        };
+        if (loaded.override_rejected) {
+            // `loadEffectiveActionMap` already logged *why*; its package-only fallback
+            // is the right answer at startup but not here — a live session keeps the
+            // effective map it is already running (ADR 0041 §3).
+            if (loaded.map) |m| engine.action_map.free(self.gpa, m);
+            return;
+        }
+        if (self.map) |old| engine.action_map.free(self.gpa, old);
+        self.map = loaded.map;
+        try out.print("mana: input reloaded — {d} actions bound\n", .{if (self.map) |m| m.bindings.len else 0});
+        try out.flush();
+    }
+};
 
 /// Log a benign user-override fallback (ADR 0041 §3): the override at `path` was
 /// `reason` (`err`), so the runner keeps the package-only map. Factored out so the
-/// two fallback sites in `loadActionMap` share one message shape.
+/// two fallback sites in `loadEffectiveActionMap` share one message shape.
 fn logOverrideFallback(out: *Io.Writer, path: []const u8, reason: []const u8, err: anyerror) !void {
     try out.print("mana: override '{s}' {s} ({s}) — ignoring, using package input only\n", .{ path, reason, @errorName(err) });
     try out.flush();
@@ -710,7 +808,9 @@ fn runPlay(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
 /// The interactive loop for `runPlay` — reached only under `-Denable-sdl3 -Denable-vulkan`
 /// (its sole caller is `runPlay`'s comptime-true branch), so SDL/Vulkan types appear only
 /// here. Loads the scene into a `Sim` (reusing the `runOnce` load path plus the #30
-/// input-translation system so keys drive gameplay), opens the window *before* the
+/// input-translation system so keys drive gameplay), watches the package's two
+/// action-binding files so a live remap applies without a restart (ADR 0041 §3), opens
+/// the window *before* the
 /// `gpu.Device` (ADR 0012 §8: SDL video must be up so the surface extensions resolve),
 /// then drives the accumulator loop: poll → tick N fixed steps → render the projected
 /// scene into the acquired image → present, recreating the swapchain on out-of-date /
@@ -737,11 +837,19 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     var protos = try loadPrototypes(io, gpa, pkg);
     defer protos.deinit();
 
-    // Action-binding table (ADR 0040 §3; issue #216): parsed before the Sim and freed
-    // after it (LIFO defers), so the `sim.action_map` borrow below never dangles —
-    // exactly how the scene's `tilemap` is scoped. Null when the manifest has no `input`.
-    const action_map_opt = try loadActionMap(out, io, gpa, pkg, manifest);
-    defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
+    // Action-binding table (ADR 0040 §3; issue #216), owned by a reloadable state (ADR
+    // 0041 §3; issue #237) declared before the Sim and torn down after it (LIFO defers),
+    // so the `sim.action_map` borrow below never dangles — exactly how the scene's
+    // `tilemap` is scoped. Null map when the package binds nothing.
+    var action_map_state: ActionMapState = .init(gpa, try loadActionMap(out, io, gpa, pkg, manifest));
+    defer action_map_state.deinit();
+
+    // Watch ONLY the two files the action map is derived from (ADR 0041 §3): a live
+    // remap must apply without restarting the session. `--play` reloads the bindings and
+    // nothing else — scene/script hot reload in a windowed session is `--watch`'s job.
+    var input_watcher = data.Watcher.init(gpa, Io.Dir.cwd());
+    defer input_watcher.deinit();
+    try watchActionMapFiles(&input_watcher, io, gpa, pkg, manifest);
 
     var sim = engine.Sim.init(gpa, core.time.default_dt);
     defer sim.deinit();
@@ -750,7 +858,7 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     // Same tilemap borrow as the one-shot path (see runOnce): `parsed` outlives `sim`
     // (LIFO defers), so nav can path over the scene's grid; null ⇒ nav no-ops.
     if (parsed.tilemap) |*tm| sim.tilemap = tm;
-    if (action_map_opt) |*am| sim.action_map = am; // #216: borrowed like tilemap (outlives sim)
+    sim.action_map = action_map_state.borrow(); // #216: borrowed like tilemap (outlives sim)
     try loadPackageScript(io, gpa, pkg, manifest, &sim); // #51: package Lua handlers
     sim.enterScene(parsed.name); // #54/ADR 0017: fire on_scene_enter on the first tick
     try sim.addSystem(engine.input.inputMoveSystem); // #30: held keys → velocity (before nav)
@@ -848,6 +956,11 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     var frames: u32 = 0;
     var fps_window_s: f32 = 0;
     var title_buf: [128]u8 = undefined;
+    // Wall-clock accumulator for the binding-file poll (ADR 0041 §3): `--watch`'s
+    // `watch_poll_ms` cadence rather than every frame, so a 60 fps session does not
+    // `stat` the two files 60 times a second. Cosmetic timing — the reload is an
+    // external input applied at a tick boundary, never hashed (ADR 0005 §4).
+    var watch_accum_s: f32 = 0;
 
     while (!window.shouldClose()) {
         // One Tracy frame boundary per loop iteration (ADR 0023), marked first so
@@ -873,6 +986,24 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
         const elapsed_s: f32 = @as(f32, @floatFromInt(prev.durationTo(now).nanoseconds)) / std.time.ns_per_s;
         prev = now;
         const steps = ts.advance(elapsed_s);
+
+        // Live binding reload (ADR 0041 §3), on a TICK BOUNDARY: the previous
+        // iteration's steps are done and this iteration's have not started, so no
+        // system can observe a half-swapped map. Re-borrow from the owner rather than
+        // assume the load-time pointer still describes it — `reload` owns whether a map
+        // is present. A rejected edit keeps the last-good map, so `sim` never loses its
+        // bindings to a bad save. Nothing allocates unless a file actually changed.
+        watch_accum_s += elapsed_s;
+        if (watch_accum_s >= watch_poll_s) {
+            watch_accum_s = 0;
+            if (input_watcher.poll(io)) {
+                const z = tracy.zone(@src(), "input_reload");
+                defer z.end();
+                try action_map_state.reload(out, io, pkg, manifest);
+                sim.action_map = action_map_state.borrow();
+            }
+        }
+
         {
             const z = tracy.zone(@src(), "tick");
             defer z.end();
@@ -1001,16 +1132,33 @@ fn runOnce(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
 /// Register the package's watch set (ADR 0005; ADR 0038 §4/§5), replacing any previous
 /// set: `game.zon`, the named HUD screen (if any), and every file the loader discovers
 /// by globbing the conventional kind-directories — `scenes/*.zon`, `prototypes/*.zon`,
-/// and `scripts/*.lua`. The set is derived from the filesystem, not enumerated in the
-/// manifest, so a newly-added content file is watched without a manifest edit
-/// (invariant #1). A missing kind-directory is silently skipped.
+/// and `scripts/*.lua` — plus the two action-binding files (ADR 0041 §3). The set is
+/// derived from the filesystem, not enumerated in the manifest, so a newly-added
+/// content file is watched without a manifest edit (invariant #1). A missing
+/// kind-directory is silently skipped.
 fn syncWatchSet(watcher: *data.Watcher, io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest) !void {
     watcher.clear();
     try watchFile(watcher, io, gpa, pkg, "game.zon");
     if (manifest.hud) |hud| try watchFile(watcher, io, gpa, pkg, hud);
+    try watchActionMapFiles(watcher, io, gpa, pkg, manifest);
     try watchDir(watcher, io, gpa, pkg, "scenes", ".zon");
     try watchDir(watcher, io, gpa, pkg, "prototypes", ".zon");
     try watchDir(watcher, io, gpa, pkg, "scripts", ".lua");
+}
+
+/// Add the two files the effective action map is derived from (ADR 0041 §3) to
+/// `watcher`, reusing `watchFile`: the package `input.zon` (only when the manifest
+/// declares one) and the user override at `action_override_rel`. The override is added
+/// **whether or not it exists yet** — `Watcher.add` accepts a currently-missing path
+/// and reports its later creation as a change, which is exactly the "the player just
+/// rebound a key for the first time" case (phase 4, #238, writes that file).
+///
+/// Factored out of `syncWatchSet` because `playLoop` watches *only* these two files:
+/// it reloads the action map and nothing else, so watching the scene/script set there
+/// would report changes it cannot act on.
+fn watchActionMapFiles(watcher: *data.Watcher, io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest) !void {
+    if (manifest.input) |rel| try watchFile(watcher, io, gpa, pkg, rel);
+    try watchFile(watcher, io, gpa, pkg, action_override_rel);
 }
 
 /// Add a single package-relative file (`<pkg>/<rel>`) to the watch set.
@@ -1121,9 +1269,10 @@ test "watch set: syncWatchSet globs kind-directories plus manifest and hud" {
     defer watcher.deinit();
     try syncWatchSet(&watcher, io, gpa, pkg, manifest);
 
-    // game.zon + hud.zon + 2 scenes + 1 script; prototypes/ (missing) contributes 0;
-    // scenes/readme.txt is filtered by extension.
-    try testing.expectEqual(@as(usize, 5), watcher.watchedCount());
+    // game.zon + hud.zon + save/input.zon + 2 scenes + 1 script; prototypes/ (missing)
+    // contributes 0; scenes/readme.txt is filtered by extension. The manifest declares
+    // no `.input`, so only the override half of the binding pair is watched.
+    try testing.expectEqual(@as(usize, 6), watcher.watchedCount());
     try testing.expect(watchSetHasSuffix(&watcher, "game.zon"));
     try testing.expect(watchSetHasSuffix(&watcher, "hud.zon"));
     try testing.expect(watchSetHasSuffix(&watcher, "scenes/a.zon"));
@@ -1133,7 +1282,189 @@ test "watch set: syncWatchSet globs kind-directories plus manifest and hud" {
 
     // `syncWatchSet` clears before re-adding (last-good re-sync is idempotent).
     try syncWatchSet(&watcher, io, gpa, pkg, manifest);
-    try testing.expectEqual(@as(usize, 5), watcher.watchedCount());
+    try testing.expectEqual(@as(usize, 6), watcher.watchedCount());
+}
+
+test "watch set: both binding files are watched — the package input.zon and the (not-yet-existing) user override (ADR 0041 §3)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "input.zon", .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.space} } } }
+    });
+    // Deliberately NO `save/input.zon`: the override must be watched before it exists,
+    // so the first-ever rebind (which creates the file) registers as a change.
+    const manifest: Manifest = .{ .name = "t", .version = "0", .entry_scene = "s.zon", .input = "input.zon" };
+
+    var watcher = data.Watcher.init(gpa, Io.Dir.cwd());
+    defer watcher.deinit();
+    try watchActionMapFiles(&watcher, io, gpa, pkg, manifest);
+
+    try testing.expectEqual(@as(usize, 2), watcher.watchedCount());
+    try testing.expect(watchSetHasSuffix(&watcher, "input.zon"));
+    try testing.expect(watchSetHasSuffix(&watcher, "save/input.zon"));
+
+    // Creating the override is a change the watcher reports (the phase-4 write path).
+    try tmp.dir.createDirPath(io, "save");
+    try tmp.dir.writeFile(io, .{ .sub_path = "save/input.zon", .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.enter} } } }
+    });
+    try testing.expect(watcher.poll(io));
+
+    // A package with no `.input` watches only the override half.
+    var bare = data.Watcher.init(gpa, Io.Dir.cwd());
+    defer bare.deinit();
+    try watchActionMapFiles(&bare, io, gpa, pkg, .{ .name = "t", .version = "0", .entry_scene = "s.zon" });
+    try testing.expectEqual(@as(usize, 1), bare.watchedCount());
+}
+
+test "action map reload: a rewritten package input.zon swaps the live bindings, and the Sim borrow follows the swap (ADR 0041 §3)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "input.zon", .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.space} } } }
+    });
+    const manifest: Manifest = .{ .name = "t", .version = "0", .entry_scene = "s.zon", .input = "input.zon" };
+
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+    const out = &out_w;
+
+    var state: ActionMapState = .init(gpa, try loadActionMap(out, io, gpa, pkg, manifest));
+    defer state.deinit();
+
+    var sim = engine.Sim.init(gpa, core.time.default_dt);
+    defer sim.deinit();
+    sim.action_map = state.borrow();
+    try testing.expectEqualSlices(engine.platform.Key, &.{.space}, sim.action_map.?.find("jump").?.keys);
+
+    // The player (or an editor) rewrites the binding; the reload swaps it in.
+    try tmp.dir.writeFile(io, .{ .sub_path = "input.zon", .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.enter} } } }
+    });
+    try state.reload(out, io, pkg, manifest);
+    sim.action_map = state.borrow();
+    try testing.expectEqualSlices(engine.platform.Key, &.{.enter}, sim.action_map.?.find("jump").?.keys);
+}
+
+test "action map reload: bad parse keeps previous bindings (last-good-wins, never cleared, ADR 0005 §3)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "input.zon", .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.space} } } }
+    });
+    const manifest: Manifest = .{ .name = "t", .version = "0", .entry_scene = "s.zon", .input = "input.zon" };
+
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+    const out = &out_w;
+
+    var state: ActionMapState = .init(gpa, try loadActionMap(out, io, gpa, pkg, manifest));
+    defer state.deinit();
+
+    // A package file saved mid-edit (unterminated literal): the reload must keep the
+    // running map rather than crash or clear the bindings.
+    try tmp.dir.writeFile(io, .{ .sub_path = "input.zon", .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.enter}
+    });
+    try state.reload(out, io, pkg, manifest);
+    try testing.expectEqualSlices(engine.platform.Key, &.{.space}, state.borrow().?.find("jump").?.keys);
+    try testing.expect(std.mem.indexOf(u8, out_w.buffered(), "keeping last good bindings") != null);
+
+    // A rejected *override* (an action the package never declares) is the other
+    // last-good path: `loadEffectiveActionMap` would fall back to the package-only map
+    // at startup, but a live session keeps the map it is already running.
+    try tmp.dir.writeFile(io, .{ .sub_path = "input.zon", .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.escape} } } }
+    });
+    try tmp.dir.createDirPath(io, "save");
+    try tmp.dir.writeFile(io, .{ .sub_path = "save/input.zon", .data =
+        \\.{ .actions = .{ .crouch = .{ .type = .button, .keys = .{.a} } } }
+    });
+    try state.reload(out, io, pkg, manifest);
+    try testing.expectEqualSlices(engine.platform.Key, &.{.space}, state.borrow().?.find("jump").?.keys);
+}
+
+test "action map reload: the override still merges over the package after a reload (ADR 0041 §2 + §3)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "input.zon", .data =
+        \\.{
+        \\    .actions = .{
+        \\        .jump = .{ .type = .button, .keys = .{.space} },
+        \\        .pause = .{ .type = .button, .keys = .{.escape} },
+        \\    },
+        \\}
+    });
+    const manifest: Manifest = .{ .name = "t", .version = "0", .entry_scene = "s.zon", .input = "input.zon" };
+
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+    const out = &out_w;
+
+    var state: ActionMapState = .init(gpa, try loadActionMap(out, io, gpa, pkg, manifest));
+    defer state.deinit();
+    try testing.expect(state.borrow() != null); // package-only to start: no override yet
+
+    // The rebind lands as a freshly-written override (what phase 4, #238, will write).
+    try tmp.dir.createDirPath(io, "save");
+    try tmp.dir.writeFile(io, .{ .sub_path = "save/input.zon", .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.enter} } } }
+    });
+    try state.reload(out, io, pkg, manifest);
+
+    const effective = state.borrow().?;
+    try testing.expectEqualSlices(engine.platform.Key, &.{.enter}, effective.find("jump").?.keys); // override-wins
+    try testing.expectEqualSlices(engine.platform.Key, &.{.escape}, effective.find("pause").?.keys); // unlisted ⇒ package default
+}
+
+test "action map reload: an override naming actions a package never declares is rejected — the unbound map is kept, not replaced (ADR 0041 §3)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    // No `.input` in the manifest and no override on disk ⇒ nothing bound at load.
+    const manifest: Manifest = .{ .name = "t", .version = "0", .entry_scene = "s.zon" };
+
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+    const out = &out_w;
+
+    var state: ActionMapState = .init(gpa, try loadActionMap(out, io, gpa, pkg, manifest));
+    defer state.deinit();
+    try testing.expect(state.borrow() == null);
+
+    // An override for a package that declares no actions merges over an EMPTY package
+    // map, so every action it names is unknown — rejected, and the null map is kept.
+    try tmp.dir.createDirPath(io, "save");
+    try tmp.dir.writeFile(io, .{ .sub_path = "save/input.zon", .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.enter} } } }
+    });
+    try state.reload(out, io, pkg, manifest);
+    try testing.expect(state.borrow() == null);
+    try testing.expect(std.mem.indexOf(u8, out_w.buffered(), "rejected") != null);
 }
 
 test "load path: a manifest with `.input` loads and borrows a populated Sim.action_map (ADR 0040 §3, #216)" {
