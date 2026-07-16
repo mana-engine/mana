@@ -397,7 +397,7 @@ const ActionMapState = struct {
 
 /// Log a benign user-override fallback (ADR 0041 §3): the override at `path` was
 /// `reason` (`err`), so the runner keeps the package-only map. Factored out so the
-/// two fallback sites in `loadActionMap` share one message shape.
+/// two fallback sites in `loadEffectiveActionMap` share one message shape.
 fn logOverrideFallback(out: *Io.Writer, path: []const u8, reason: []const u8, err: anyerror) !void {
     try out.print("mana: override '{s}' {s} ({s}) — ignoring, using package input only\n", .{ path, reason, @errorName(err) });
     try out.flush();
