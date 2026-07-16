@@ -21,6 +21,16 @@ here, not in `ui`, because the glyph atlas/text layout are engine-tier, exactly 
 resolves to the same-named data component (ADR 0024) on the first entity carrying it —
 read-only and genre-neutral (the key comes from the game's HUD ZON, never from `src/`).
 
+`ui_host.zig` is its **script-backed** sibling (issue #248): `ScriptHost` resolves a
+`bind` of the form `field.key` to the string at `key` of table-valued handler field
+`field` (the `handlerFieldStrMap` seam), and chains every other name on to another host
+— so ONE host installed by the runner's `projectHud` serves both a HUD's numeric
+`score` and a controls row's live input binding (`bindings.fire`, ADR 0041 §4). Equally
+genre-neutral: the field and key names come from the game's ZON. Read-only, additive
+(no `mana` member, so ADR 0003 §5's version gate is untouched), hash-excluded, and
+inert on a no-Lua build (every bind falls through and static text renders). It caches
+nothing — build one per projection, `deinit` it after.
+
 `ui_dispatch.zig` is the UI input-event → Lua bridge (ADR 0039, accepted; issue #134
 phase B): `UiInput` holds the one active screen + focus state and turns synthetic
 pointer/keyboard edges into `on_click`/`on_focus`/`on_activate` dispatches at the Sim's

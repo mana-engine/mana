@@ -54,6 +54,11 @@ pub const render_sprite = @import("render_sprite.zig");
 pub const render_svg = @import("render_svg.zig");
 pub const render_ui = @import("render_ui.zig");
 pub const ui_dispatch = @import("ui_dispatch.zig");
+/// The script-backed `ui.Host` fill (issue #248): resolves a `bind` of the form
+/// `field.key` against the loaded script's handler table, chaining anything else on to
+/// another host (`render_ui.worldHost`). Re-exported for the render path and for a
+/// `tests/` file asserting what a screen actually displays.
+pub const ui_host = @import("ui_host.zig");
 /// The Sim-owned script-dispatch bridge (ADR 0003 §1/§8; ADR 0039). Re-exported so a
 /// caller outside `engine` (e.g. a `tests/` acceptance file driving `ui_dispatch.UiInput`
 /// directly against a real Lua handler table) can name `Runtime`/`DispatchCtx` without

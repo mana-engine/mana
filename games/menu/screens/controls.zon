@@ -5,15 +5,17 @@
 // src/ui gains no remap concept from this file.
 //
 // Each row is a flex ROW of two labels: the action's caption and its binding. The
-// binding label shows the SHIPPED DEFAULT from ../input.zon as static text — a live
-// echo of the *current* binding would need a script-backed `ui.Host`. Text-valued
-// bindings already work (`ui.Value` has a `.text` variant); what is missing is a host
-// exposing the script's handler table, since the only one installed
-// (`render_ui.worldHost`) resolves a bound name to a numeric data component on the live
-// world, which a string source like "pad_south" is not. The
-// accepted binding IS tracked, in scripts/rules.lua's `bindings` handler field (the
-// engine driver reads exactly that field to persist it, ADR 0041 §4) — see
-// games/menu/README.md's "Known gaps" for the missing display half.
+// binding label BINDS to `bindings.<action>` (issue #248) — the live player override
+// scripts/rules.lua records on an accepted capture, read one-way through the engine's
+// script-backed `ui.Host` (`engine/ui_host.zig`), the same handler field the
+// persistence driver reads to write ../save/input.zon (ADR 0041 §4). The `text` beside
+// it is the SHIPPED DEFAULT from ../input.zon and is what shows while that binding is
+// unset (`ui.boundValue` falls back to static text) — correct, because an action the
+// player never rebound IS on its default. Rebind FIRE to D and the row reads "d".
+//
+// The vocabulary is capture's, verbatim (ADR 0041 §1.1): a key bare ("d"), a pad button
+// `pad_`-prefixed ("pad_south"). The defaults below must therefore stay in step with
+// ../input.zon — the acceptance staircase pins exactly that (tests/menu_acceptance.zig).
 .{
     .name = "controls",
     .root = .{
@@ -34,7 +36,7 @@
                 .gap = 10,
                 .children = .{
                     .{ .kind = .label, .width = 150, .height = 26, .text = "FIRE" },
-                    .{ .kind = .label, .width = 100, .height = 26, .text = "W" },
+                    .{ .kind = .label, .width = 100, .height = 26, .bind = "bindings.fire", .text = "W" },
                 },
             },
             .{
@@ -48,7 +50,7 @@
                 .gap = 10,
                 .children = .{
                     .{ .kind = .label, .width = 150, .height = 26, .text = "INTERACT" },
-                    .{ .kind = .label, .width = 100, .height = 26, .text = "A" },
+                    .{ .kind = .label, .width = 100, .height = 26, .bind = "bindings.interact", .text = "A" },
                 },
             },
             .{
@@ -62,7 +64,7 @@
                 .gap = 10,
                 .children = .{
                     .{ .kind = .label, .width = 150, .height = 26, .text = "PAUSE" },
-                    .{ .kind = .label, .width = 100, .height = 26, .text = "S" },
+                    .{ .kind = .label, .width = 100, .height = 26, .bind = "bindings.pause", .text = "S" },
                 },
             },
             .{ .kind = .label, .id = "back_button", .focusable = true, .width = 260, .height = 26, .text = "BACK" },
