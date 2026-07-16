@@ -609,13 +609,26 @@ fn loadHud(io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest, scene_at
 }
 
 /// Project a loaded `hud` (if any) over the current frame into a `render_ui.DrawList`,
-/// reading live gameplay state one-way through `worldHost` (issue #133). `null` when the
-/// package declares no HUD. The draw list samples `render_atlas` (the font-merged one), so
-/// pass `hud.atlas(&scene_atlas)` as both the sprite atlas and here. Caller owns the result
-/// (`deinit`). Errors: `error.OutOfMemory`.
-fn projectHud(gpa: Allocator, hud: *HudState, world: *engine.World, view: engine.render.View, render_atlas: *const engine.sprite.Atlas) !?engine.render_ui.DrawList {
+/// reading live state one-way through the host chain (issue #133, issue #248): a
+/// `ui_host.ScriptHost` over `sim`'s handler table in front of `render_ui.worldHost` over
+/// `sim.world`, so ONE installed host serves both a `bind` naming a numeric data component
+/// (`score`) and one naming a script-owned string (`bindings.fire` — the player's live input
+/// binding). Which of the two a name goes to is decided by the package's ZON alone; the
+/// runner names no binding key. `null` when the package declares no HUD. The draw list
+/// samples `render_atlas` (the font-merged one), so pass `hud.atlas(&scene_atlas)` as both
+/// the sprite atlas and here. Caller owns the result (`deinit`). Errors: `error.OutOfMemory`.
+fn projectHud(gpa: Allocator, hud: *HudState, sim: *engine.Sim, view: engine.render.View, render_atlas: *const engine.sprite.Atlas) !?engine.render_ui.DrawList {
     const screen = hud.screen orelse return null;
-    return try engine.render_ui.project(gpa, &screen, engine.render_ui.worldHost(world), view.width, view.height, render_atlas, .{});
+    // Scoped to this projection: the host's string copies outlive only the `project` call
+    // that turns them into glyph quads, which is exactly how long a `.text` must live.
+    var host: engine.ui_host.ScriptHost = .init(gpa, &sim.script_runtime, engine.render_ui.worldHost(&sim.world));
+    defer host.deinit();
+    var draw = try engine.render_ui.project(gpa, &screen, host.host(), view.width, view.height, render_atlas, .{});
+    errdefer draw.deinit();
+    // `ui.Host.value` cannot fail, so a resolve that ran out of memory latched instead of
+    // erroring — surface it rather than silently drawing a label's stale static text.
+    if (host.oomed()) return error.OutOfMemory;
+    return draw;
 }
 
 /// Capture the `--play` textured-sprite composite to a PNG, headlessly (issue #122). This
@@ -658,6 +671,15 @@ fn runRenderPlayFrame(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, 
     if (parsed.tilemap) |*tm| sim.tilemap = tm; // see runOnce: parsed outlives sim (LIFO defers)
     if (action_map_opt) |*am| sim.action_map = am; // #216: borrowed like tilemap (outlives sim)
     try loadPackageScript(io, gpa, pkg, manifest, &sim);
+    // Seed the script with the override on disk, exactly as `playLoop` does (ADR 0041 §4
+    // amendment, #247). `loadActionMap` above already merged that override into the map
+    // this path RESOLVES through, so without this the two halves disagree: `fire` would
+    // really be on D while a `bindings.fire`-bound label resolved nothing and fell back to
+    // its shipped-default text — #248's lie, reappearing in the headless path (invariant
+    // #1) alone. Both render paths seed identically; only the loop around them differs.
+    const override_path = try std.fs.path.join(gpa, &.{ pkg, action_override_rel });
+    defer gpa.free(override_path);
+    try syncScriptBindings(out, io, gpa, override_path, &sim.script_runtime);
     sim.enterScene(parsed.name);
     try sim.addSystem(engine.input.inputMoveSystem); // #30: same load path as --play
     try registerStandardSystems(&sim);
@@ -689,9 +711,9 @@ fn runRenderPlayFrame(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, 
     defer gpa.free(sprites);
 
     // Composite the data-bound HUD over the game frame in the SAME capture: project it
-    // (reading live score/lives through worldHost), then concatenate its panel quads and
-    // glyph sprites onto the game's before the single `captureFrame` call.
-    var hud_draw = try projectHud(gpa, &hud, &sim.world, view, render_atlas);
+    // (reading live score/lives through the host chain), then concatenate its panel quads
+    // and glyph sprites onto the game's before the single `captureFrame` call.
+    var hud_draw = try projectHud(gpa, &hud, &sim, view, render_atlas);
     defer if (hud_draw) |*d| d.deinit();
     const hud_rects: []const engine.gpu.Quad = if (hud_draw) |d| d.rects else &.{};
     const hud_glyphs: []const engine.gpu.SpriteQuad = if (hud_draw) |d| d.glyphs else &.{};
@@ -1193,12 +1215,12 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
             // Textured sprite quads (ADR 0031 §4): the current animation frame's atlas
             // sub-rect, tinted and rotated to face travel; drawn over the flat quads.
             const sprite_quads = try engine.render.projectSprites(fa, &sim.world, view, &sheets, render_atlas);
-            // HUD (issue #133): project the data-bound score/lives over the frame (reading
-            // live state through worldHost) and append its panels + glyphs to the two draw
-            // lists — one bound (merged) atlas, one renderFrame call, no extra pass.
-            // The draw list is allocated from the frame arena (freed at next reset), so it
-            // needs no explicit deinit.
-            const hud_draw = try projectHud(fa, &hud, &sim.world, view, render_atlas);
+            // HUD (issue #133): project the data-bound screen over the frame (reading live
+            // world AND script state through the host chain, issue #248) and append its
+            // panels + glyphs to the two draw lists — one bound (merged) atlas, one
+            // renderFrame call, no extra pass. The draw list is allocated from the frame
+            // arena (freed at next reset), so it needs no explicit deinit.
+            const hud_draw = try projectHud(fa, &hud, &sim, view, render_atlas);
             const hud_rects: []const engine.gpu.Quad = if (hud_draw) |d| d.rects else &.{};
             const hud_glyphs: []const engine.gpu.SpriteQuad = if (hud_draw) |d| d.glyphs else &.{};
             const all_quads = try std.mem.concat(fa, engine.gpu.Quad, &.{ quads, hud_rects });
@@ -2039,6 +2061,52 @@ fn onChange(
         try out.print("mana: reload failed ({s}) — keeping last good\n", .{@errorName(err)});
     }
     try out.flush();
+}
+
+test "play path: projectHud resolves a script-bound label live, and still resolves a world-bound one (#248)" {
+    // `projectHud` is the ONE host install point both render paths share (`playLoop`'s
+    // render zone is comptime-gated behind -Denable-sdl3 -Denable-vulkan, so this is
+    // where the chain is provable headlessly). It pins that the script host is actually
+    // dispatched from the live path — not merely available — and that chaining it in
+    // front of `worldHost` did not cost the numeric HUD binding it used to serve alone.
+    if (engine.script_api_version == 0) return error.SkipZigTest; // no handler table to read
+    const gpa = testing.allocator;
+
+    // A HUD screen shaped like a package's: one label bound to a script handler field
+    // (`bindings.fire`), one to a numeric world data component (`score`). Both keys come
+    // from this ZON — the runner names neither.
+    const screen = try engine.ui.parse(gpa,
+        \\.{
+        \\    .name = "hud",
+        \\    .root = .{
+        \\        .kind = .container,
+        \\        .layout = .flex,
+        \\        .direction = .column,
+        \\        .children = .{
+        \\            .{ .kind = .label, .width = 200, .height = 14, .bind = "bindings.fire", .text = "W" },
+        \\            .{ .kind = .label, .width = 200, .height = 14, .bind = "score", .text = "0" },
+        \\        },
+        \\    },
+        \\}
+    );
+    var hud: HudState = .{ .gpa = gpa, .screen = screen, .font = try engine.text.buildFontAtlas(gpa) };
+    defer hud.deinit();
+
+    var sim = engine.Sim.init(gpa, core.time.default_dt);
+    defer sim.deinit();
+    // The live script state a rebind would have produced (ADR 0041 §4's `bindings`), and
+    // the live world state a HUD reads (ADR 0024).
+    try sim.loadScript("return { bindings = { fire = \"pad_south\" } }");
+    const player = try sim.world.spawn();
+    try sim.world.setDataByName(player, "score", 1200);
+
+    const view: engine.render.View = .{ .width = 256, .height = 64, .projection = .{ .orthographic = .{} } };
+    var draw = (try projectHud(gpa, &hud, &sim, view, &hud.font.?)).?;
+    defer draw.deinit();
+
+    // "pad_south" (9 glyphs, the LIVE script value — not the 1-glyph static "W") plus
+    // "1200" (4 glyphs, the live world value — not the 1-glyph static "0").
+    try testing.expectEqual(@as(usize, 13), draw.glyphs.len);
 }
 
 test "runtime can import the engine" {

@@ -90,14 +90,14 @@ interpreter, no window:
   logged rather than silent: a *hand-edited* override entry binding several sources to one
   action can't fit the script's one-source-per-action field, so it applies but won't
   survive the next rebind — the remap UI cannot produce such an entry.
-- **No live echo of the current binding.** A row shows its shipped default as static
-  text; showing the *accepted* one needs a **script-backed `ui.Host`**. Text-valued
-  bindings are not the gap — they already work (`ui.Value` has a `.text` variant,
-  `Host.VTable.value` returns it, `src/ui/ui.zig:90`, tested at `:150`). The gap is that
-  the only installed host (`render_ui.worldHost`) reads numeric World data components,
-  and nothing exposes the script handler table as a `ui.Host`. That host would live in
-  `src/engine`, so content cannot supply it. The accepted source IS tracked, in
-  `rules.lua`'s `bindings` field — only the display half is missing.
+- ~~**No live echo of the current binding.**~~ **Closed by #248**: `engine/ui_host.zig`
+  fills the `ui.Host` seam from the script's handler table, so a `bind = "bindings.<action>"`
+  reads the live accepted source out of `rules.lua`'s `bindings` field — the same field the
+  persistence driver writes `save/input.zon` from. `screens/controls.zon`'s binding cells
+  use it; each row's `text` is the shipped default, which `ui.boundValue` still falls back
+  to while the player has not overridden that action (correct: that IS its binding). The
+  runner installs it in front of `render_ui.worldHost` (`projectHud`), so one screen can
+  bind both a numeric world component and a script string.
 
 **Known gaps (not this issue's scope, #209):**
 - **No visual focus indicator.** `ui.Widget` has no "focused" styling hook, so a

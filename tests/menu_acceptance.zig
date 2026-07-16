@@ -225,6 +225,24 @@ fn recordedBinding(gpa: Allocator, sim: *engine.Sim, action: []const u8) !?[]con
     return null;
 }
 
+/// The binding label of controls row `row`: the SECOND label of the row container (the
+/// first is the action's caption), the one `screens/controls.zon` binds to the live
+/// player override. Borrowed from `controls`.
+fn bindingLabel(controls: *const engine.ui.Screen, row: usize) *const engine.ui.Widget {
+    return &controls.root.children[row].children[1];
+}
+
+/// What the player actually SEES in row `row`'s binding cell: the widget's bound value
+/// resolved through the same script-backed host chain `runtime`'s `projectHud` installs
+/// (issue #248), which is what `render_ui` turns into glyphs. Borrowed for the call.
+fn shownBinding(gpa: Allocator, sim: *engine.Sim, controls: *const engine.ui.Screen, row: usize) ![]const u8 {
+    var host: engine.ui_host.ScriptHost = .init(gpa, &sim.script_runtime, engine.render_ui.worldHost(&sim.world));
+    defer host.deinit();
+    const value = engine.ui.boundValue(bindingLabel(controls, row), host.host());
+    try std.testing.expect(!host.oomed());
+    return gpa.dupe(u8, value.text);
+}
+
 /// Re-resolve the effective map the way `runtime`'s watcher does on a change to either
 /// file (ADR 0041 §3): re-parse the override that was just written and merge it over the
 /// package map. The caller owns the result (`engine.action_map.free`) and swaps
@@ -330,9 +348,14 @@ test "menu controls acceptance: capture -> validate -> record -> persist -> relo
     var writer: engine.input_override.OverrideWriter = .init(&sim.script_runtime);
     const Outcome = engine.input_override.Outcome;
 
-    // 1. BASELINE — the package default is live: W fires `fire` (input.zon's binding).
+    // 1. BASELINE — the package default is live: W fires `fire` (input.zon's binding),
+    // and the FIRE row displays that same W — its static text, since the player has
+    // overridden nothing yet and `bindings.fire` therefore resolves to nothing.
     try tapKey(&sim, .w);
     try std.testing.expectEqual(@as(i64, 1), firedCount(&sim, "fire"));
+    const shown_default = try shownBinding(gpa, &sim, &controls, 0);
+    defer gpa.free(shown_default);
+    try std.testing.expectEqualStrings("w", shown_default);
 
     // 2. ARM — focus the FIRE row and activate it: on_activate calls mana.capture_input.
     try tapKey(&sim, .down); // bootstraps focus onto the first row, "rebind_fire"
@@ -373,6 +396,20 @@ test "menu controls acceptance: capture -> validate -> record -> persist -> relo
     const recorded = (try recordedBinding(gpa, &sim, "fire")).?;
     defer gpa.free(recorded);
     try std.testing.expectEqualStrings("d", recorded); // the capture vocabulary, verbatim
+
+    // 5b. ECHO (issue #248) — the row now displays the REBOUND key, not the shipped
+    // default it showed at step 1. This is the assertion that goes red if the screen
+    // lies: before #248 the binding cell was static text and read "w" forever, while
+    // `fire` had moved to D. It reads the value through the same host chain the runner's
+    // `projectHud` installs, so what it asserts is what a window would draw.
+    const shown_rebound = try shownBinding(gpa, &sim, &controls, 0);
+    defer gpa.free(shown_rebound);
+    try std.testing.expectEqualStrings("d", shown_rebound);
+    // Only the rebound row moved: INTERACT is still on its default, so it still shows the
+    // static text — the echo is per-action, not a screen-wide swap.
+    const shown_untouched = try shownBinding(gpa, &sim, &controls, 1);
+    defer gpa.free(shown_untouched);
+    try std.testing.expectEqualStrings("a", shown_untouched);
 
     // 6. PERSIST — the driver reads those exact fields and writes the override file.
     try std.testing.expectEqual(Outcome{ .written = 1 }, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
@@ -470,6 +507,60 @@ test "menu controls acceptance: a captured PAD BUTTON persists and applies throu
     try std.testing.expectEqual(@as(i64, 1), firedCount(&sim, "pause"));
 }
 
+test "menu controls: rebinding an action to the key it ALREADY has does not change what the row reads" {
+    // The vocabulary-drift case, invisible to every other step: they all rebind to a
+    // DIFFERENT source, so a row's static default and its live binding are never asked to
+    // spell the same key. Here they are. `input.zon` binds interact to `.a` and capture
+    // reports that key as `@tagName(.a)` = "a", so the row's static default must be "a"
+    // too — it read "A" once, and this screen then displayed one key two ways depending
+    // on whether the player had "rebound" it to itself. rules.lua accepts this capture
+    // (rebinding an action to an input it already has is a no-op, not a duplicate), which
+    // is exactly what moves the row from its static text onto the bound value.
+    try requireLua();
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const input_src = try readFile(gpa, io, "games/menu/input.zon");
+    defer gpa.free(input_src);
+    const pkg_map = try engine.action_map.parse(gpa, input_src);
+    defer engine.action_map.free(gpa, pkg_map);
+
+    const controls_src = try readFile(gpa, io, "games/menu/screens/controls.zon");
+    defer gpa.free(controls_src);
+    const controls = try engine.ui.parse(gpa, controls_src);
+    defer engine.ui.free(gpa, controls);
+
+    const rules_src = try readFile(gpa, io, "games/menu/scripts/rules.lua");
+    defer gpa.free(rules_src);
+
+    var sim = engine.Sim.init(gpa, 1.0 / 60.0);
+    defer sim.deinit();
+    try controlsSim(&sim, rules_src, &controls, &pkg_map);
+
+    // The default the row shows before anything is rebound — its static text.
+    const before = try shownBinding(gpa, &sim, &controls, 1);
+    defer gpa.free(before);
+
+    // Focus the INTERACT row, arm it, and press the key it is already bound to.
+    for (0..2) |_| try tapKey(&sim, .down);
+    try std.testing.expectEqual(&controls.root.children[1], sim.ui_input.focus.current.?);
+    try tapKey(&sim, .enter);
+    try tapKey(&sim, .a);
+    try std.testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("accepted_bindings").?);
+
+    // The row is now driven by the live binding rather than its static text — and reads
+    // the SAME string, because the content spells the default in capture's vocabulary.
+    const after = try shownBinding(gpa, &sim, &controls, 1);
+    defer gpa.free(after);
+    try std.testing.expectEqualStrings(before, after);
+    // Pinned literally too, so a content edit that changed BOTH spellings in step still
+    // has to agree with `input.zon` — which is what the mirror test asserts `@tagName` of.
+    try std.testing.expectEqualStrings("a", after);
+    const recorded = (try recordedBinding(gpa, &sim, "interact")).?;
+    defer gpa.free(recorded);
+    try std.testing.expectEqualStrings(after, recorded); // what is displayed IS what is stored
+}
+
 test "menu controls acceptance: SESSION 2 keeps session 1's rebind, and validates against it (#247)" {
     // The cross-session leg — structurally invisible to every test above, which all live
     // inside one session. Two `Sim` lifetimes over ONE override file, with the second
@@ -547,6 +638,14 @@ test "menu controls acceptance: SESSION 2 keeps session 1's rebind, and validate
     const seeded_pad = (try recordedBinding(gpa, &sim, "pause")).?;
     defer gpa.free(seeded_pad);
     try std.testing.expectEqualStrings("pad_south", seeded_pad);
+    // And the rows echo the seeded override (issue #248): a session that starts with a
+    // rebind on disk shows it, in both vocabularies, instead of the shipped defaults.
+    const shown_key = try shownBinding(gpa, &sim, &controls, 0);
+    defer gpa.free(shown_key);
+    try std.testing.expectEqualStrings("d", shown_key);
+    const shown_pad = try shownBinding(gpa, &sim, &controls, 2);
+    defer gpa.free(shown_pad);
+    try std.testing.expectEqualStrings("pad_south", shown_pad);
 
     // 1. VALIDATION — try to bind `interact` to D as well. `rules.lua` mirrors the SHIPPED
     // default (`fire` = W), so only the seeded live binding can make this a duplicate.
