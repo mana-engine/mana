@@ -259,31 +259,50 @@ fn loadActionMap(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, manif
     }
     errdefer if (pkg_map) |m| engine.action_map.free(gpa, m);
 
+    // The override is best-effort (a bad one falls back to the package-only map,
+    // last-good spirit ADR 0041 §3) — but only for *benign* failures. A resource
+    // error like `OutOfMemory` is a real bug, not a malformed override, so it
+    // propagates rather than being masked as a "using package input only" log line —
+    // the same benign-case/`else => return err` split `watchDir` (:1011) uses.
     const override_path = try std.fs.path.join(gpa, &.{ pkg, action_override_rel });
     defer gpa.free(override_path);
-    const override_src = Io.Dir.cwd().readFileAllocOptions(io, override_path, gpa, .unlimited, .of(u8), 0) catch |err| {
-        if (err == error.FileNotFound) return pkg_map; // no override ⇒ package map only, silently
-        try out.print("mana: override '{s}' unreadable ({s}) — ignoring, using package input only\n", .{ override_path, @errorName(err) });
-        try out.flush();
-        return pkg_map;
+    const override_src = Io.Dir.cwd().readFileAllocOptions(io, override_path, gpa, .unlimited, .of(u8), 0) catch |err| switch (err) {
+        // No override file at all ⇒ package map only, silently (the common case).
+        error.FileNotFound => return pkg_map,
+        else => return err,
     };
     defer gpa.free(override_src);
 
-    const override_map = engine.action_map.parse(gpa, override_src) catch |err| {
-        try out.print("mana: override '{s}' failed to parse ({s}) — ignoring, using package input only\n", .{ override_path, @errorName(err) });
-        try out.flush();
-        return pkg_map;
+    const override_map = engine.action_map.parse(gpa, override_src) catch |err| switch (err) {
+        // A malformed/invalid override file: log and fall back to the package map.
+        error.ParseZon, error.Unbound, error.WrongTypedSource => {
+            try logOverrideFallback(out, override_path, "failed to parse", err);
+            return pkg_map;
+        },
+        error.OutOfMemory => return err,
     };
     defer engine.action_map.free(gpa, override_map);
 
     const base = pkg_map orelse engine.ActionMap{};
-    const effective = engine.action_map.merge(gpa, base, override_map) catch |err| {
-        try out.print("mana: override '{s}' rejected ({s}) — ignoring, using package input only\n", .{ override_path, @errorName(err) });
-        try out.flush();
-        return pkg_map;
+    const effective = engine.action_map.merge(gpa, base, override_map) catch |err| switch (err) {
+        // The override parses but doesn't apply cleanly over the package map: log and
+        // fall back (an unknown action, a `type` mismatch, or an analog-rule violation).
+        error.UnknownAction, error.TypeMismatch, error.Unbound, error.WrongTypedSource => {
+            try logOverrideFallback(out, override_path, "rejected", err);
+            return pkg_map;
+        },
+        error.OutOfMemory => return err,
     };
     if (pkg_map) |m| engine.action_map.free(gpa, m);
     return effective;
+}
+
+/// Log a benign user-override fallback (ADR 0041 §3): the override at `path` was
+/// `reason` (`err`), so the runner keeps the package-only map. Factored out so the
+/// two fallback sites in `loadActionMap` share one message shape.
+fn logOverrideFallback(out: *Io.Writer, path: []const u8, reason: []const u8, err: anyerror) !void {
+    try out.print("mana: override '{s}' {s} ({s}) — ignoring, using package input only\n", .{ path, reason, @errorName(err) });
+    try out.flush();
 }
 
 /// Refuse a package that needs a newer scripting API than this build provides.
@@ -1249,6 +1268,43 @@ test "load path: a malformed `save/input.zon` override logs and falls back to th
     const jump = action_map_opt.?.find("jump").?;
     try testing.expectEqualSlices(engine.platform.Key, &.{.space}, jump.keys); // package-only, override ignored
     try testing.expect(std.mem.indexOf(u8, out_w.buffered(), "rejected") != null); // logged, didn't crash
+}
+
+test "load path: a syntactically malformed `save/input.zon` override logs and falls back to the package-only map (ADR 0041 §3)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "input.zon",
+        .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.space} } } }
+        ,
+    });
+    try tmp.dir.createDirPath(io, "save");
+    // Broken ZON syntax (unterminated struct literal) — hits the separate `parse`
+    // fallback branch, distinct from the merge-rejection test above.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "save/input.zon",
+        .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.enter}
+        ,
+    });
+    const manifest: Manifest = .{ .name = "t", .version = "0", .entry_scene = "s.zon", .input = "input.zon" };
+
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+    const out = &out_w;
+
+    const action_map_opt = try loadActionMap(out, io, gpa, pkg, manifest);
+    defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
+    try testing.expect(action_map_opt != null);
+    const jump = action_map_opt.?.find("jump").?;
+    try testing.expectEqualSlices(engine.platform.Key, &.{.space}, jump.keys); // package-only, override ignored
+    try testing.expect(std.mem.indexOf(u8, out_w.buffered(), "failed to parse") != null); // logged, didn't crash
 }
 
 /// Count regular files ending in `ext` directly under `<pkg>/<subdir>` (test helper).
