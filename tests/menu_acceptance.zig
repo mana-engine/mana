@@ -240,8 +240,9 @@ fn reloadEffective(gpa: Allocator, io: Io, dir: Io.Dir, pkg_map: engine.ActionMa
 
 test "menu controls: rules.lua's mirrored default bindings agree with the package input.zon, in BOTH source vocabularies" {
     // The one drift risk the remap content carries: a script cannot read `input.zon`
-    // (ADR 0003 §7 removed io/os) and no engine seam hands it the loaded map, so
-    // `rules.lua` MIRRORS the defaults to validate duplicates against. The file is the
+    // (ADR 0003 §7 removed io/os), and the engine seeds it only with the user OVERRIDE
+    // (#247), never the package defaults — so `rules.lua` MIRRORS those defaults to
+    // validate duplicates for the actions the player never rebound. The file is the
     // source of truth; this test is what keeps the mirror honest.
     //
     // It asserts EVERY shipped source — key and pad button — because the duplicate check
@@ -467,6 +468,145 @@ test "menu controls acceptance: a captured PAD BUTTON persists and applies throu
     try tapKey(&sim, .s);
     try tapPad(&sim, .start);
     try std.testing.expectEqual(@as(i64, 1), firedCount(&sim, "pause"));
+}
+
+test "menu controls acceptance: SESSION 2 keeps session 1's rebind, and validates against it (#247)" {
+    // The cross-session leg — structurally invisible to every test above, which all live
+    // inside one session. Two `Sim` lifetimes over ONE override file, with the second
+    // seeded from that file exactly as `playLoop` seeds it after loading the script
+    // (`syncScriptBindings`). It pins BOTH halves of #247:
+    //   1. the whole-override write tells the truth (session 1's `fire` is not dropped);
+    //   2. `rules.lua`'s duplicate check sees session 1's LIVE bindings, not the shipped
+    //      defaults it mirrors — in BOTH source vocabularies (a bare key, a `pad_`-prefixed
+    //      button), since a seed spelled in the wrong one would silently stop matching.
+    try requireLua();
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const input_src = try readFile(gpa, io, "games/menu/input.zon");
+    defer gpa.free(input_src);
+    const pkg_map = try engine.action_map.parse(gpa, input_src);
+    defer engine.action_map.free(gpa, pkg_map);
+
+    const controls_src = try readFile(gpa, io, "games/menu/screens/controls.zon");
+    defer gpa.free(controls_src);
+    const controls = try engine.ui.parse(gpa, controls_src);
+    defer engine.ui.free(gpa, controls);
+
+    const rules_src = try readFile(gpa, io, "games/menu/scripts/rules.lua");
+    defer gpa.free(rules_src);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const Outcome = engine.input_override.Outcome;
+
+    // --- SESSION 1: rebind `fire` (default W) to D and `pause` (default pad START) to pad
+    // SOUTH — one of each vocabulary — then persist and quit. ---------------------------
+    {
+        var sim = engine.Sim.init(gpa, 1.0 / 60.0);
+        defer sim.deinit();
+        try controlsSim(&sim, rules_src, &controls, &pkg_map);
+        var writer: engine.input_override.OverrideWriter = .init(&sim.script_runtime);
+
+        try tapKey(&sim, .down); // focus "rebind_fire"
+        try tapKey(&sim, .enter); // arm
+        try tapKey(&sim, .d);
+        for (0..2) |_| try tapKey(&sim, .down); // focus "rebind_pause"
+        try tapKey(&sim, .enter);
+        try tapPad(&sim, .south);
+        try std.testing.expectEqual(@as(i64, 2), sim.script_runtime.handlerFieldInt("accepted_bindings").?);
+        try std.testing.expectEqual(Outcome{ .written = 2 }, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
+    }
+
+    // --- SESSION 2: a fresh Sim + interpreter, the same file. --------------------------
+    var owned_effective = try reloadEffective(gpa, io, tmp.dir, pkg_map); // the startup merge
+    defer engine.action_map.free(gpa, owned_effective);
+
+    var sim = engine.Sim.init(gpa, 1.0 / 60.0);
+    defer sim.deinit();
+    try controlsSim(&sim, rules_src, &controls, &owned_effective);
+
+    // THE SEAM: hand the fresh script the override that is on disk. Without this line
+    // `bindings` is empty and both assertions below fail — the bug #247 reports.
+    const override_src = try tmp.dir.readFileAllocOptions(io, "input.zon", gpa, .unlimited, .of(u8), 0);
+    defer gpa.free(override_src);
+    const override = try engine.action_map.parse(gpa, override_src);
+    defer engine.action_map.free(gpa, override);
+    const seed = try engine.input_override.seedBindings(gpa, &sim.script_runtime, override);
+    defer gpa.free(seed.skipped);
+    try std.testing.expectEqual(@as(usize, 0), seed.skipped.len); // every capture-written entry round-trips
+
+    var writer: engine.input_override.OverrideWriter = .init(&sim.script_runtime);
+    // The seed is not a proposal: a session that rebinds nothing rewrites nothing.
+    try std.testing.expectEqual(Outcome.unchanged, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
+    // Both of session 1's rebinds are back in the script, each in the vocabulary the
+    // script itself emits: a key bare, a pad button `pad_`-prefixed (ADR 0041 §1.1).
+    const seeded_key = (try recordedBinding(gpa, &sim, "fire")).?;
+    defer gpa.free(seeded_key);
+    try std.testing.expectEqualStrings("d", seeded_key);
+    const seeded_pad = (try recordedBinding(gpa, &sim, "pause")).?;
+    defer gpa.free(seeded_pad);
+    try std.testing.expectEqualStrings("pad_south", seeded_pad);
+
+    // 1. VALIDATION — try to bind `interact` to D as well. `rules.lua` mirrors the SHIPPED
+    // default (`fire` = W), so only the seeded live binding can make this a duplicate.
+    try tapKey(&sim, .down);
+    try tapKey(&sim, .down); // focus "rebind_interact" (the second row)
+    try std.testing.expectEqual(&controls.root.children[1], sim.ui_input.focus.current.?);
+    try tapKey(&sim, .enter);
+    try tapKey(&sim, .d);
+    try std.testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("rejected_bindings").?);
+    try std.testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("accepted_bindings").?);
+    try std.testing.expectEqual(Outcome.unchanged, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
+
+    // 2. VALIDATION, the PAD half — try to bind `interact` to pad SOUTH, which session 1
+    // gave to `pause`. Nothing in `rules.lua`'s shipped mirror knows SOUTH is taken; only
+    // the seeded live binding does, and only if it kept its `pad_` prefix across the trip.
+    // Seed it as bare `"south"` and this comparison silently stops matching — the exact
+    // half-a-vocabulary hole that shipped a broken duplicate check here once before.
+    try tapKey(&sim, .enter); // re-arm the still-focused interact row
+    try tapPad(&sim, .south);
+    try std.testing.expectEqual(@as(i64, 2), sim.script_runtime.handlerFieldInt("rejected_bindings").?);
+    try std.testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("accepted_bindings").?);
+
+    // 3. VALIDATION, the other way — bind `interact` to W. W is `fire`'s SHIPPED default,
+    // so the mirror alone says "taken"; only the seeded live binding (fire = D) frees it.
+    // This assertion fails in the opposite direction from the one above: un-seeded, the
+    // script would REJECT a key nothing is actually bound to.
+    try tapKey(&sim, .enter); // re-arm the still-focused interact row
+    try tapKey(&sim, .w);
+    try std.testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("accepted_bindings").?);
+    try std.testing.expectEqual(@as(i64, 2), sim.script_runtime.handlerFieldInt("rejected_bindings").?); // still just the two above
+
+    // 4. PERSISTENCE — the write is the WHOLE override, so this is the exact moment
+    // session 1's two rebinds would have been silently dropped.
+    try std.testing.expectEqual(Outcome{ .written = 3 }, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
+
+    // BOTH sessions' rebinds are in the file — and all APPLY: re-merge and swap, then
+    // drive each newly bound input. `fire` = D survived a session it was never rebound in.
+    engine.action_map.free(gpa, owned_effective);
+    owned_effective = try reloadEffective(gpa, io, tmp.dir, pkg_map);
+    sim.action_map = &owned_effective;
+
+    const before_fire = firedCount(&sim, "fire");
+    const before_interact = firedCount(&sim, "interact");
+    try tapKey(&sim, .d);
+    try std.testing.expectEqual(before_fire + 1, firedCount(&sim, "fire"));
+    try tapKey(&sim, .w);
+    try std.testing.expectEqual(before_interact + 1, firedCount(&sim, "interact"));
+    // W drives `interact` ONLY: per-action replace means it is no longer `fire`'s key
+    // either, one session after `fire` moved off it.
+    try std.testing.expectEqual(before_fire + 1, firedCount(&sim, "fire"));
+    // And `interact`'s own package default is dead: A fires nothing at all now.
+    try tapKey(&sim, .a);
+    try std.testing.expectEqual(before_interact + 1, firedCount(&sim, "interact"));
+    // The pad half survived the same round trip: SOUTH still fires `pause` a session
+    // later, and `pause`'s package button (START) still does not.
+    const before_pause = firedCount(&sim, "pause");
+    try tapPad(&sim, .south);
+    try std.testing.expectEqual(before_pause + 1, firedCount(&sim, "pause"));
+    try tapPad(&sim, .start);
+    try std.testing.expectEqual(before_pause + 1, firedCount(&sim, "pause"));
 }
 
 test "menu controls: a pointer click while capture is armed cancels it, so the next keypress binds nothing" {

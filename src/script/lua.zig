@@ -554,6 +554,38 @@ pub const State = struct {
         return try pairs.toOwnedSlice(gpa);
     }
 
+    /// Replace *table*-valued field `key` on the loaded handler table with a fresh table
+    /// holding exactly `pairs` — the **write** direction of `handlerFieldStrMap` (ADR
+    /// 0041 §4 amendment, issue #247), for an engine-side driver that must hand the
+    /// script the state it persisted on the script's behalf. Like its read twin this is
+    /// an engine→state write, not a script-callable: nothing is added to the `mana`
+    /// table, so ADR 0003 §5's version gate does not move.
+    ///
+    /// A no-op when no handler table is loaded (nothing to write into). Otherwise the
+    /// field is *replaced*, never merged: the caller's set is the whole truth, so a key
+    /// the script held but `pairs` omits is gone. `pairs` and every string in it are
+    /// **borrowed for the call only** — Lua copies each string into its own heap.
+    ///
+    /// `rawset` (not `setTable`): the field is plain data both sides read, and a
+    /// `__newindex` metamethod on a content table must not be able to intercept — or
+    /// error out of — an engine write that is not `pcall`-wrapped.
+    pub fn setHandlerFieldStrMap(self: *State, key: [:0]const u8, pairs: []const types.StrPair) void {
+        const l = self.lua;
+        const ref = self.handler_ref orelse return;
+        const base = l.getTop();
+        defer l.setTop(base);
+
+        _ = l.getIndexRaw(zlua.registry_index, ref); // push the handler table
+        _ = l.pushString(key); // its field name, pushed before the value `rawset` wants
+        l.createTable(0, @intCast(pairs.len)); // the replacement field table
+        for (pairs) |p| {
+            _ = l.pushString(p.key);
+            _ = l.pushString(p.value);
+            l.setTableRaw(-3); // field_table[p.key] = p.value
+        }
+        l.setTableRaw(-3); // handler_table[key] = field_table
+    }
+
     /// Free a `handlerFieldStrMap` result: every string in `pairs`, then `pairs`
     /// itself. `gpa` must be the allocator that produced it.
     pub fn freeStrMap(gpa: Allocator, pairs: []const types.StrPair) void {
@@ -1009,6 +1041,85 @@ test "handlerFieldStrMap: with no table loaded the answer is null, and the Lua s
     try std.testing.expect(try state.handlerFieldStrMap(gpa, "absent") == null);
     // Every path — null, empty, and populated — restores the stack it was called on.
     try std.testing.expectEqual(before, state.lua.getTop());
+}
+
+// --- setHandlerFieldStrMap (ADR 0041 §4 amendment, #247) ---------------------
+
+test "setHandlerFieldStrMap: written pairs read back through handlerFieldStrMap and are visible to the script" {
+    const gpa = std.testing.allocator;
+    var state = try State.init(gpa);
+    defer state.deinit();
+
+    // `sources_of` in miniature: the script reads the field the engine wrote, so the
+    // write must land on the very table the module's own `local t` closes over.
+    try state.loadHandlerTable(
+        \\local t = { bindings = {} }
+        \\t.on_action = function(ev) t.matched = (t.bindings[ev.action] == "d") and 1 or 0 end
+        \\return t
+    );
+
+    state.setHandlerFieldStrMap("bindings", &.{
+        .{ .key = "fire", .value = "d" },
+        .{ .key = "pause", .value = "pad_south" },
+    });
+
+    const pairs = (try state.handlerFieldStrMap(gpa, "bindings")).?;
+    defer State.freeStrMap(gpa, pairs);
+    try std.testing.expectEqual(@as(usize, 2), pairs.len);
+    try std.testing.expectEqualStrings("d", findPair(pairs, "fire").?);
+    try std.testing.expectEqualStrings("pad_south", findPair(pairs, "pause").?);
+
+    // The script's own lookup sees the engine's write — the whole point of the seam:
+    // `local t` and the registry-referenced handler table are the same Lua object.
+    try std.testing.expectEqual(State.DispatchOutcome.ok, state.dispatchAction("fire", true));
+    try std.testing.expectEqual(@as(i64, 1), state.handlerFieldInt("matched").?);
+    try std.testing.expect(state.handlerFieldInt("bindings_revision") == null); // a write never bumps it
+}
+
+test "setHandlerFieldStrMap: the write REPLACES the field (a stale entry the caller omits is gone), and the strings are Lua's own copies" {
+    const gpa = std.testing.allocator;
+    var state = try State.init(gpa);
+    defer state.deinit();
+
+    try state.loadHandlerTable("return { bindings = { stale = \"q\", fire = \"w\" } }");
+
+    var key_buf = [_]u8{ 'f', 'i', 'r', 'e' };
+    var val_buf = [_]u8{'d'};
+    state.setHandlerFieldStrMap("bindings", &.{.{ .key = &key_buf, .value = &val_buf }});
+    // The caller's buffers are borrowed for the call only: scribble over them, then
+    // force a GC, and what the script holds must still be the original bytes.
+    key_buf = .{ 'x', 'x', 'x', 'x' };
+    val_buf = .{'z'};
+    state.lua.gcCollect();
+
+    const pairs = (try state.handlerFieldStrMap(gpa, "bindings")).?;
+    defer State.freeStrMap(gpa, pairs);
+    try std.testing.expectEqual(@as(usize, 1), pairs.len); // `stale` did not survive
+    try std.testing.expectEqualStrings("d", findPair(pairs, "fire").?);
+}
+
+test "setHandlerFieldStrMap: an empty set clears the field, an undeclared field is created, and no table loaded is a no-op" {
+    const gpa = std.testing.allocator;
+    var state = try State.init(gpa);
+    defer state.deinit();
+
+    const before = state.lua.getTop();
+    state.setHandlerFieldStrMap("bindings", &.{.{ .key = "fire", .value = "d" }}); // no table yet
+    try std.testing.expectEqual(before, state.lua.getTop());
+
+    try state.loadHandlerTable("return { bindings = { fire = \"d\" } }");
+    state.setHandlerFieldStrMap("bindings", &.{}); // the override file went away
+    const cleared = (try state.handlerFieldStrMap(gpa, "bindings")).?;
+    defer State.freeStrMap(gpa, cleared);
+    try std.testing.expectEqual(@as(usize, 0), cleared.len);
+
+    // A package that never declared the field still gets it: it simply never reads it,
+    // and without the revision field the driver never writes anything back.
+    state.setHandlerFieldStrMap("undeclared", &.{.{ .key = "fire", .value = "d" }});
+    const created = (try state.handlerFieldStrMap(gpa, "undeclared")).?;
+    defer State.freeStrMap(gpa, created);
+    try std.testing.expectEqualStrings("d", findPair(created, "fire").?);
+    try std.testing.expectEqual(before, state.lua.getTop()); // every path stack-balanced
 }
 
 test "dispatch: a missing handler key is a silent no-op" {

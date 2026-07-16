@@ -116,9 +116,10 @@ deferred (see the last bullet below).
   not comptime. `NoopRuntime` mirrors `armedCapture`/`clearCapture`/
   `dispatchInputCaptured` as inert no-ops so `ui_dispatch.zig` stays backend-agnostic
   under a default (no-Lua) build.
-- **Reading handler-table state is NOT `mana` surface, and does not move the version
-  gate.** `State.handlerFieldInt` and its table-valued sibling
-  `State.handlerFieldStrMap` (ADR 0041 §4, issue #238) are *engine → state reads*, not
+- **Reading *and writing* handler-table state is NOT `mana` surface, and does not move the
+  version gate.** `State.handlerFieldInt`, its table-valued sibling
+  `State.handlerFieldStrMap`, and that one's write twin `State.setHandlerFieldStrMap`
+  (ADR 0041 §4 + its #247 amendment, issues #238/#247) are *engine → state accesses*, not
   script-callables: nothing is added to the `mana` table, so ADR 0003 §5's version stays
   1. This is the #135 persistence seam — content accumulates plain values in handler
   fields, an engine-side driver (`src/engine/input_override.zig`) reads them and owns the
@@ -130,6 +131,17 @@ deferred (see the last bullet below).
   would rewrite the key slot and corrupt `lua_next`'s traversal), and the stack is
   restored by absolute height (`getTop`/`setTop`) rather than counted pops, since the
   traversal leaves a variable number of values behind on an early error return.
+  The **write** direction exists because the read alone was a trap: the driver's field is
+  the WHOLE override, so a script that cannot read the file back (no `io`, ever) starts
+  each session claiming the player rebound nothing, and the next write makes that true
+  (#247). `setHandlerFieldStrMap` replaces the field wholesale with a fresh table, copies
+  every string into Lua's own heap (the caller's slice is borrowed for the call), and uses
+  `rawset` in both directions — a `__newindex` on a content table must not intercept, or
+  `error` out of, an engine write that is not `pcall`-wrapped. Its `NoopRuntime` mirror is
+  inert, like every other accessor's. **Careful with `freeStrMap`:** it is the *backend's*
+  free for a *read* result, and `NoopRuntime`'s version is a no-op (its read never
+  allocates) — so an engine-side producer of pairs must ship its own free
+  (`input_override.freeSources`), or a default build leaks.
 - **Plain-data leaf types shared with the engine live in `types.zig`**, not in `lua.zig`.
   The reason is the comptime flag, not an import cycle (`lua.zig` importing `script.zig`
   back builds fine — verified): without `-Denable-lua`, `script.zig` resolves `pub const
