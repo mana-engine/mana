@@ -720,6 +720,19 @@ const LuaRuntime = struct {
         return s.handlerFieldStrMap(gpa, key);
     }
 
+    /// Replace table-valued handler field `key` with exactly `pairs` — the write twin of
+    /// `handlerFieldStrMap` (ADR 0041 §4 amendment, issue #247), for a driver that must
+    /// tell the script what it persisted on the script's behalf (a script cannot read
+    /// the file itself, ADR 0003 §7). Still engine→state only: no `mana` member is
+    /// added, so ADR 0003 §5's version gate is untouched.
+    ///
+    /// A no-op when no script is loaded. The field is replaced wholesale, never merged.
+    /// `pairs` and its strings are borrowed for the call only (Lua copies them).
+    pub fn setHandlerFieldStrMap(self: *LuaRuntime, key: [:0]const u8, pairs: []const script.StrPair) void {
+        const s = if (self.state) |*st| st else return;
+        s.setHandlerFieldStrMap(key, pairs);
+    }
+
     /// Free a `handlerFieldStrMap` result (its strings and the slice). `gpa` must be
     /// the allocator that produced it.
     pub fn freeStrMap(gpa: Allocator, pairs: []const script.StrPair) void {
@@ -879,6 +892,13 @@ const NoopRuntime = struct {
     pub fn handlerFieldStrMap(self: *NoopRuntime, gpa: Allocator, key: [:0]const u8) Allocator.Error!?[]const script.StrPair {
         _ = .{ self, gpa, key };
         return null;
+    }
+
+    /// A no-op under the default (no-Lua) build: there is no handler table to write
+    /// into, so a driver seeding the script with the loaded override (ADR 0041 §4
+    /// amendment) simply has no one to tell — inert exactly like its read twin.
+    pub fn setHandlerFieldStrMap(self: *NoopRuntime, key: [:0]const u8, pairs: []const script.StrPair) void {
+        _ = .{ self, key, pairs };
     }
 
     /// A no-op: `handlerFieldStrMap` above never allocates, so there is nothing to free.

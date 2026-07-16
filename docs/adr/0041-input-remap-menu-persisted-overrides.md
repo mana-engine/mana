@@ -3,6 +3,16 @@
 - Status: accepted
 - Date: 2026-07-16
 
+> **Amended 2026-07-16: the override read-back seam (#247).** §4 step 1 assumed "the
+> script that loads the existing override into its handler table" — a capability ADR
+> 0003 §7 denies (no `io`/`os` in the sandbox) and no engine seam supplied, so
+> `bindings` started empty every session and the WHOLE-override write silently dropped
+> earlier sessions' rebinds. §4 gains a **step 0**: the engine *seeds* the script's
+> bindings field from the override on disk at script load and after each reload, via an
+> additive `script_runtime` accessor (`setHandlerFieldStrMap`) that is the write twin of
+> the read step 1 already uses. Still no `mana` member; `mana.version` stays 1. See the
+> new §4.0 below.
+
 ## Context
 
 ADR 0040 (accepted) made the binding table **data**: a per-package `input.zon`
@@ -283,6 +293,63 @@ last-good-wins model, generalised from the scene to the action map:
 Persistence is **engine-side**, because Lua cannot write files (ADR 0003 §7) and must
 not (invariant #1: the engine owns the file, the script proposes data). The driver
 generalises #135's settings driver:
+
+**Amendment (2026-07-16, #247): step 0 — the engine seeds the script with the override
+on disk.** §4 as written specified only the *write* direction — the script proposes, the
+engine reads the handler field and saves it — and never said how a script learns what is
+already saved. The driver built against it (`src/engine/input_override.zig`) filled that
+silence with an assumption it spelled out: "the script that *loads* the existing override
+into its handler table". **No such script can exist**: ADR 0003 §7's `_ENV` allowlist
+removed `io`/`os`/`package`. §4 was thus internally inconsistent with §7, and the
+consequence was silent user-data loss — the proposed set is the WHOLE override, so a
+script that starts it empty makes the first rebind of session 2 write a file listing only
+that rebind, dropping session 1's.
+It also made a content-side duplicate check compare against the *shipped* defaults rather
+than what is actually bound. This amendment adds the missing half:
+
+0. **At script load — and again after every successful reload (§3) — the engine parses
+   the override file and writes its bindings into the script's `bindings` handler field**
+   (`input_override.seedBindings`), in the same device-neutral `source` vocabulary §1.1
+   fixes for capture (bare key `@tagName`, `"pad_"`-prefixed button) — so what the script
+   holds is spelled exactly as what the script emits, and its own comparisons keep
+   working. The seed **never touches `revision_field`**: it reports what is already
+   persisted rather than proposing a write, which is also why re-seeding after a reload
+   cannot loop against the watcher that observed the driver's own write.
+
+- **It is an engine→state write, not a `mana` addition** — `Runtime.setHandlerFieldStrMap`,
+  the exact write twin of the `handlerFieldStrMap` read step 1 already uses. Nothing is
+  added to the `mana` table, no script-callable appears, so ADR 0003 §5's version gate
+  does not move: **`mana.version` stays 1** (§6 unchanged). The `bindings` field is now
+  explicitly a **two-way** channel, not a one-way proposal, which is the whole fix.
+- **The seed is the *override*, never the merged effective map.** What the script holds is
+  what the driver writes back, so seeding the merged map would freeze today's package
+  defaults into the player's override file, silently opting every action out of future
+  content updates. An absent or empty override seeds the empty set — "the player has
+  rebound nothing", exactly what the file says. This also keeps invariant #6 intact: the
+  engine still passes opaque strings both ways and learns no action name.
+- **`bindings` stays the WHOLE override, not a delta.** The rejected alternative was to
+  leave the script blind and have the driver merge each write over the file on disk. That
+  is a smaller change, but the script would keep validating against its shipped defaults
+  forever — the seam fixes the write *and* the validation with one mechanism, and keeps
+  "what the script holds" and "what the file says" the same sentence.
+- **Re-seeding on reload is part of the contract, not an optimisation.** After the driver's
+  own write it merely re-derives what the script already held; after a *hand edit* of the
+  override (which §2 explicitly keeps human-editable and §3 explicitly watches) it is what
+  stops the script's now-stale set from clobbering that edit on the next rebind. The file
+  stays the source of truth (invariant #1); the process never becomes it.
+- **Accepted limitation: the seed is lossy for override entries capture could not have
+  produced.** The script's field is one source per action, so only a `button` action bound
+  to exactly one digital source round-trips. A hand-written override entry outside that
+  domain (two keys on one action, an analog source) is not seeded and is therefore
+  **dropped by a later whole-override write**. v1 capture cannot produce such an entry
+  (§1.1 defers analog), so this only bites an override hand-edited into a shape the remap
+  UI itself cannot express; the honest fix is a richer `bindings` shape, which no shipped
+  content needs yet.
+- **Last-good-wins applies to the seed too** (§3): a malformed override leaves the
+  script's current set alone rather than telling it the player's rebinds are gone — which
+  would invite the next write to make that true.
+- **Determinism unaffected** (§5): the seed reads the same hash-excluded override file the
+  map load already reads and writes plain script state; nothing enters `World.stateHash`.
 
 1. On a rebind the content accepts (in `on_input_captured`, §1), the script records the
    new binding into **handler-table fields** — the plain-Lua-state channel #135 uses

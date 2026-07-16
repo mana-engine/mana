@@ -77,14 +77,16 @@ interpreter, no window:
   consulting capture — so pressing a bound key while "press a key…" is up ALSO fires its
   action. Harmless here (no gameplay); real for a game remapping mid-play.
   `tests/menu_acceptance.zig` pins the current behavior with a comment naming the ADR.
-- **A script cannot read back its own persisted override.** Lua has no filesystem (ADR
-  0003 §7) and no seam hands it the loaded map, so `rules.lua` starts every session with
-  an EMPTY `bindings` table and mirrors `input.zon`'s defaults by hand (the test asserts
-  the mirror to catch drift). Because `bindings` is the *whole* override the driver
-  writes (never a delta), a second session that rebinds one action writes a file listing
-  only that action — **silently reverting the previous session's other rebinds**. Nothing
-  in `games/menu` can fix this: it needs an engine seam (a `mana` binding poll, or the
-  runner seeding the handler field from the loaded override) and its own ADR.
+- ~~**A script cannot read back its own persisted override.**~~ **Closed by #247** (ADR
+  0041 §4 amendment). Lua still has no filesystem (ADR 0003 §7), but the engine now
+  *seeds* `bindings` from `save/input.zon` at script load and after each reload
+  (`input_override.seedBindings`, dispatched from `runtime/main.zig`'s
+  `syncScriptBindings`), so `rules.lua` starts each session holding what is really
+  persisted. That is what makes the whole-override write safe across sessions — it used
+  to drop the previous session's rebinds — and lets `bound_elsewhere` validate against
+  LIVE bindings. The `DEFAULT_KEYS`/`DEFAULT_PAD` mirrors remain, and still need the
+  drift test: the seed carries the *override*, never the package defaults (seeding the
+  merged map would freeze today's defaults into the player's file forever).
 - **No live echo of the current binding.** A row shows its shipped default as static
   text; showing the *accepted* one needs a **script-backed `ui.Host`**. Text-valued
   bindings are not the gap — they already work (`ui.Value` has a `.text` variant,

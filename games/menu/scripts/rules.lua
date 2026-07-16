@@ -28,11 +28,13 @@
 
 local VOLUME_MIN, VOLUME_MAX = 0, 10
 
--- MIRRORS ../input.zon, which is the source of truth: these restate its shipped
--- bindings (the same content-authored-defaults-kept-in-sync convention `volume` keeps
--- against save/settings.zon), because a script cannot read either file and no engine
--- seam hands it the loaded map. Both are exposed on the handler table so
--- tests/menu_acceptance.zig can assert the mirror against input.zon and catch drift.
+-- MIRRORS ../input.zon's SHIPPED defaults, which are the source of truth: these restate
+-- them (the same content-authored-defaults-kept-in-sync convention `volume` keeps against
+-- save/settings.zon) because a script cannot read that file (ADR 0003 §7 removed io/os).
+-- They cover the actions the player has NOT rebound; for the ones they have, `bindings`
+-- below is seeded by the engine from save/input.zon (ADR 0041 §4 amendment, #247) and
+-- wins — see sources_of. Both mirrors are exposed on the handler table so
+-- tests/menu_acceptance.zig can assert them against input.zon and catch drift.
 --
 -- EVERY shipped source must be mirrored, in BOTH vocabularies: an action there binds a
 -- key AND a gamepad button, and the duplicate check below is only as complete as this
@@ -61,10 +63,18 @@ local t = {
     clicks = 0,
     focuses = 0,
 
-    -- ADR 0041 §4's handler-table contract, read by the engine's persistence driver:
-    -- `bindings` is action -> captured source string, the WHOLE player override (only
-    -- the actions actually rebound; an absent action keeps its ../input.zon default),
-    -- and `bindings_revision` is the "commit this" counter the driver polls.
+    -- ADR 0041 §4's handler-table contract, TWO-WAY with the engine's persistence driver:
+    -- `bindings` is action -> captured source string, the WHOLE player override (only the
+    -- actions actually rebound; an absent action keeps its ../input.zon default), and
+    -- `bindings_revision` is the "commit this" counter the driver polls.
+    --
+    -- The engine SEEDS `bindings` from save/input.zon at load and after each reload (ADR
+    -- 0041 §4 amendment, #247), so it starts each session holding what is really
+    -- persisted: that is what makes the whole-override write above safe across sessions
+    -- (otherwise the first rebind of session 2 would drop session 1's), and what lets
+    -- bound_elsewhere validate against LIVE bindings instead of the shipped mirror.
+    -- Seeding never touches `bindings_revision` — only an accepted capture does, so
+    -- nothing is written until the player actually rebinds something.
     bindings = {},
     bindings_revision = 0,
 

@@ -446,6 +446,50 @@ fn persistBindings(
     try out.flush();
 }
 
+/// Hand the package script the user override that is actually on disk (ADR 0041 §4
+/// amendment, issue #247) — the read-back half of the persistence seam, called at script
+/// init and again after every successful reload so what the script holds never diverges
+/// from what the file says.
+///
+/// **Why the engine must do this.** The script cannot read the override itself (ADR 0003
+/// §7 leaves it no filesystem), yet its `bindings` field is the WHOLE override the driver
+/// writes back. Un-seeded, session 2's first rebind writes a file listing only that
+/// rebind and silently drops session 1's — and the script's own duplicate check validates
+/// against its shipped defaults instead of what is live.
+///
+/// **Re-seeding on reload is deliberate.** After a reload the file has changed: either
+/// the driver wrote it (the seed is then a no-op re-derivation of what the script already
+/// held) or a human hand-edited it, in which case the script's set is now stale and its
+/// next write would clobber the edit. Re-reading is what makes the file, not the process,
+/// the source of truth (invariant #1). It cannot feed back into the watcher: the seed
+/// never bumps `revision_field`, so it provokes no write.
+///
+/// Best-effort, exactly like the override half of `loadEffectiveActionMap`: an absent
+/// file seeds the empty set (the honest answer — the player has rebound nothing), and a
+/// malformed one leaves the script's current set alone (last-good-wins, ADR 0041 §3;
+/// `loadEffectiveActionMap` already logged why the map fell back). Errors:
+/// `error.OutOfMemory` only — every content-shaped failure is handled here.
+fn syncScriptBindings(io: Io, gpa: Allocator, path: []const u8, rt: *engine.script_runtime.Runtime) !void {
+    const src = Io.Dir.cwd().readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        // No override (the common case — only `games/menu` ships a `save/` at all), or
+        // an unreadable one: either way the script is told "nothing is overridden".
+        else => return engine.input_override.seedBindings(gpa, rt, .{}),
+    };
+    defer gpa.free(src);
+
+    const override = engine.action_map.parse(gpa, src) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        // Malformed: the effective map kept its last-good value, so the script's bindings
+        // must keep theirs too — seeding an empty set here would tell it the player's
+        // rebinds are gone and invite the next write to make that true.
+        error.ParseZon, error.Unbound, error.WrongTypedSource => return,
+    };
+    defer engine.action_map.free(gpa, override);
+
+    try engine.input_override.seedBindings(gpa, rt, override);
+}
+
 /// Log a benign user-override fallback (ADR 0041 §3): the override at `path` was
 /// `reason` (`err`), so the runner keeps the package-only map. Factored out so the
 /// two fallback sites in `loadEffectiveActionMap` share one message shape.
@@ -919,9 +963,13 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     if (parsed.tilemap) |*tm| sim.tilemap = tm;
     sim.action_map = action_map_state.borrow(); // #216: borrowed like tilemap (outlives sim)
     try loadPackageScript(io, gpa, pkg, manifest, &sim); // #51: package Lua handlers
-    // Rebinding persistence (ADR 0041 §4; issue #238), seeded AFTER the script is loaded
-    // so whatever bindings its handler table starts with count as already on disk — the
-    // script loaded them FROM there. A package that proposes none never writes.
+    // Hand the freshly loaded script the override that is on disk (ADR 0041 §4 amendment,
+    // #247) — it cannot read the file itself, and it owns the WHOLE override the driver
+    // writes back, so an un-seeded script silently drops earlier sessions' rebinds.
+    try syncScriptBindings(io, gpa, override_path, &sim.script_runtime);
+    // Rebinding persistence (ADR 0041 §4; issue #238), constructed AFTER the seed so the
+    // revision it reads is the one the on-disk file reflects (seeding never bumps it). A
+    // package that proposes no bindings never writes.
     var override_writer: engine.input_override.OverrideWriter = .init(&sim.script_runtime);
     sim.enterScene(parsed.name); // #54/ADR 0017: fire on_scene_enter on the first tick
     try sim.addSystem(engine.input.inputMoveSystem); // #30: held keys → velocity (before nav)
@@ -1074,6 +1122,12 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
                 defer z.end();
                 try action_map_state.reload(out, io, pkg, manifest);
                 sim.action_map = action_map_state.borrow();
+                // Re-seed the script from the file the reload just read (ADR 0041 §4
+                // amendment, #247): after OUR write it re-derives what the script already
+                // holds, but after a hand-edit it is what stops the script's now-stale
+                // set from clobbering that edit on the next rebind. It bumps no revision,
+                // so this cannot feed back into the persist branch above.
+                try syncScriptBindings(io, gpa, override_path, &sim.script_runtime);
             }
         }
 
@@ -1635,6 +1689,75 @@ test "load path: a present `save/input.zon` override merges over the package map
     try testing.expectEqualSlices(engine.platform.Key, &.{.enter}, jump.keys); // override-wins, replaced wholesale
     const pause = effective.find("pause").?;
     try testing.expectEqualSlices(engine.platform.Key, &.{.escape}, pause.keys); // unlisted ⇒ package default
+}
+
+test "play path: syncScriptBindings hands the script the override on disk, so a later whole-override write keeps it (#247)" {
+    // The `playLoop` seam, driven directly (that loop is comptime-gated behind
+    // -Denable-sdl3 -Denable-vulkan, so this is where its logic is provable headlessly).
+    if (engine.script_api_version == 0) return error.SkipZigTest; // no handler table to seed
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    try tmp.dir.createDirPath(io, "save");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "save/input.zon",
+        .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.enter} } } }
+        ,
+    });
+    const override_path = try std.fs.path.join(gpa, &.{ pkg, action_override_rel });
+    defer gpa.free(override_path);
+
+    var rt: engine.script_runtime.Runtime = .{};
+    defer rt.deinit(gpa);
+    try rt.loadHandlers(gpa, "return { bindings = {}, bindings_revision = 0 }");
+
+    try syncScriptBindings(io, gpa, override_path, &rt);
+    const pairs = (try rt.handlerFieldStrMap(gpa, "bindings")).?;
+    defer engine.script_runtime.Runtime.freeStrMap(gpa, pairs);
+    try testing.expectEqual(@as(usize, 1), pairs.len);
+    try testing.expectEqualStrings("jump", pairs[0].key);
+    try testing.expectEqualStrings("enter", pairs[0].value); // the capture vocabulary
+    // A seed is not a proposal: the driver still has nothing to write.
+    try testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("bindings_revision").?);
+}
+
+test "play path: syncScriptBindings seeds an EMPTY set when no override exists, and leaves the script's set alone when one is malformed" {
+    if (engine.script_api_version == 0) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+    const override_path = try std.fs.path.join(gpa, &.{ pkg, action_override_rel });
+    defer gpa.free(override_path);
+
+    var rt: engine.script_runtime.Runtime = .{};
+    defer rt.deinit(gpa);
+    try rt.loadHandlers(gpa, "return { bindings = { jump = \"enter\" } }");
+
+    // No `save/` at all — every package but `games/menu` today. "Nothing is overridden"
+    // is the honest seed, and it must not error.
+    try syncScriptBindings(io, gpa, override_path, &rt);
+    const cleared = (try rt.handlerFieldStrMap(gpa, "bindings")).?;
+    defer engine.script_runtime.Runtime.freeStrMap(gpa, cleared);
+    try testing.expectEqual(@as(usize, 0), cleared.len);
+
+    // A malformed override: last-good-wins (ADR 0041 §3) — the effective map kept its
+    // bindings, so the script keeps its set rather than being told they are gone.
+    try rt.loadHandlers(gpa, "return { bindings = { jump = \"enter\" } }");
+    try tmp.dir.createDirPath(io, "save");
+    try tmp.dir.writeFile(io, .{ .sub_path = "save/input.zon", .data = ".{ .actions = .{ .jump = " });
+    try syncScriptBindings(io, gpa, override_path, &rt);
+    const kept = (try rt.handlerFieldStrMap(gpa, "bindings")).?;
+    defer engine.script_runtime.Runtime.freeStrMap(gpa, kept);
+    try testing.expectEqual(@as(usize, 1), kept.len);
+    try testing.expectEqualStrings("enter", kept[0].value);
 }
 
 test "load path: a malformed `save/input.zon` override logs and falls back to the package-only map, not a crash (ADR 0041 §3)" {
