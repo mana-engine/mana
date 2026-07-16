@@ -46,14 +46,15 @@ pub const Keys1d = struct {
 /// when an action's `input.zon` entry omits `deadzone`.
 pub const default_deadzone: f32 = 0.15;
 
-/// One action's raw binding, exactly ADR 0040 §3's ZON shape: a `type` tag plus every
-/// possible source field, flat (not a Zig tagged union) because that is the literal
-/// on-disk shape the ADR pins. Only the fields matching `type` are meaningful —
-/// `validate` rejects a binding that sets a field belonging to a different type (e.g.
-/// `pad_stick` on a `button` action) or that binds nothing at all. `keys`/`pad_buttons`
-/// are used by `button` actions only; `axis1d`/`axis2d` actions use `keys_1d`/`keys_2d`
-/// instead (ADR 0040 §3's rejected-alternatives: a flat key list cannot express which
-/// direction each key drives).
+/// One action's raw binding, exactly ADR 0040 §3's ZON shape (§4 amended for
+/// `pad_dpad`, #230): a `type` tag plus every possible source field, flat (not a Zig
+/// tagged union) because that is the literal on-disk shape the ADR pins. Only the
+/// fields matching `type` are meaningful — `validate` rejects a binding that sets a
+/// field belonging to a different type (e.g. `pad_stick` on a `button` action) or that
+/// binds nothing at all. `keys`/`pad_buttons` are used by `button` actions only;
+/// `axis1d`/`axis2d` actions use `keys_1d`/`keys_2d`/`pad_dpad` instead (ADR 0040 §3's
+/// rejected-alternatives: a flat key list cannot express which direction each key
+/// drives).
 pub const RawAction = struct {
     type: ActionType,
     /// `button` only: any listed key held ⇒ the action is held (edges OR-combined).
@@ -68,6 +69,15 @@ pub const RawAction = struct {
     keys_2d: ?Keys2d = null,
     /// `axis1d` only: the synthesized-from-keys value source, if any.
     keys_1d: ?Keys1d = null,
+    /// `axis2d` only (ADR 0040 §4 amendment, #230): when `true`, synthesize a vector
+    /// from the four canonical d-pad buttons (`platform.GamepadButton.dpad_up/down/
+    /// left/right`), same sign convention as `keys_2d` (right +x, left -x, down +y,
+    /// up -y). A plain bool (not a `Keys2d`-style per-direction mapping) because the
+    /// d-pad's four directions are a fixed, canonical set — there is exactly one
+    /// d-pad, unlike the keyboard where content chooses which keys map to which
+    /// direction — so "use the d-pad as a directional composite" is the whole binding,
+    /// analogous to `pad_stick` naming a whole stick at once.
+    pad_dpad: bool = false,
     /// Radial dead-zone applied to a native analog source before it reaches script
     /// (ADR 0040 §4). Meaningless for `button` actions; `validate` does not police it
     /// there (a stray `deadzone` on a button action is harmless, not an error).
@@ -107,9 +117,9 @@ pub const ActionMap = struct {
 /// unknown/misspelled `platform.Key`/`GamepadButton`/`GamepadAxis`/`Stick` enum tag
 /// (an unrecognized source name never reaches `validate`; `std.zon.parse` rejects it
 /// first). `Unbound` is a `validate` failure: an action declares no source at all
-/// (empty `keys`/`pad_buttons` and no pad/keys_2d/keys_1d, depending on type).
-/// `WrongTypedSource` is a `validate` failure: a binding sets a source field that
-/// belongs to a different `type` (ADR 0040 §1's one-way analog rule — a `button`
-/// action can never carry `pad_stick`/`pad_axis`/`keys_2d`/`keys_1d`, and an analog
-/// action can never carry flat `keys`/`pad_buttons`).
+/// (empty `keys`/`pad_buttons` and no pad_stick/pad_axis/keys_2d/keys_1d/pad_dpad,
+/// depending on type). `WrongTypedSource` is a `validate` failure: a binding sets a
+/// source field that belongs to a different `type` (ADR 0040 §1's one-way analog rule
+/// — a `button` action can never carry `pad_stick`/`pad_axis`/`keys_2d`/`keys_1d`/
+/// `pad_dpad`, and an analog action can never carry flat `keys`/`pad_buttons`).
 pub const Error = error{ OutOfMemory, ParseZon, Unbound, WrongTypedSource };

@@ -3,6 +3,12 @@
 - Status: accepted
 - Date: 2026-07-15
 
+> **Amended 2026-07-16: d-pad→axis2d synthesis (#230).** §4 gains a third `axis2d`
+> candidate source, `pad_dpad`: a bool that synthesizes a vector from the four
+> canonical d-pad buttons, same sign convention as `keys_2d`, slotted into the fixed
+> candidate order after `keys_2d` (native stick → keys → d-pad), no dead-zone. See the
+> new §4 subsection below and the §3 example's `.move` binding.
+
 ## Context
 
 Today a script sees input as raw physical keys and nothing else: `on_key(ev = { key,
@@ -138,6 +144,7 @@ file**, never a runtime DI call (invariant #1: files are the source of truth). S
             .type = .axis2d,
             .pad_stick = .left, // left | right — the whole stick, x+y at once
             .keys_2d = .{ .up = .{.up}, .down = .{.down}, .left = .{.left}, .right = .{.right} },
+            .pad_dpad = true, // d-pad as a directional composite (§4 amendment, #230)
             .deadzone = 0.15, // radial; applied engine-side before the value reaches Lua
         },
 
@@ -174,6 +181,36 @@ of the snapshot** (so determinism §6 holds):
 - **Dead-zone** is a per-action data field (`deadzone`, engine default when omitted),
   applied **radially** engine-side to native analog sources before the value reaches
   script — so content never re-implements stick dead-zones and every game is consistent.
+
+**Amendment (2026-07-16, #230): `pad_dpad` — d-pad→axis2d synthesis.** An `axis2d`
+action may additionally set `pad_dpad = true` to read the gamepad's four canonical
+d-pad buttons (`platform.GamepadButton.dpad_up/down/left/right`) as a third composite
+source, alongside `pad_stick` and `keys_2d`:
+
+- **Same synthesis as `keys_2d`.** `x = dpad_right − dpad_left`, `y = dpad_down −
+  dpad_up` (identical sign convention: right = +x, left = −x, down = +y, up = −y),
+  held opposites cancel, and the raw vector is clamped to unit length via the same
+  `clampToUnit` `keys_2d` uses — symmetric treatment even though a digital d-pad can
+  never itself exceed magnitude 1 (at most one button per axis is held).
+- **A plain `bool`, not a `Keys2d`-shaped per-direction mapping.** The d-pad's four
+  directional buttons are a **canonical fixed set** — there is exactly one d-pad, and
+  its four directions are named enum values — unlike the keyboard, where content
+  chooses *which* keys drive each direction. `pad_dpad = true` ("use the d-pad as a
+  directional composite") is therefore the minimal correct shape, the same reasoning
+  that gives `pad_stick` a `Stick` value (name the whole stick) rather than a
+  per-axis key mapping.
+- **Slots into the fixed candidate order as a THIRD source, after `keys_2d`.**
+  `resolveAxis2d`'s binding order is now `pad_stick` → `keys_2d` → `pad_dpad`,
+  competing by the existing **greatest-magnitude** rule: a later candidate replaces
+  the current best only on a *strictly greater* magnitude, so an exact tie still
+  breaks toward the earlier-order source (deterministic, as §4 already required for
+  `pad_stick` vs. `keys_2d`).
+- **No dead-zone.** Like `keys_2d`, the d-pad composite is digital and already clean
+  — dead-zone is a native-analog-only concept (radial trim on a continuously-varying
+  stick/trigger reading), meaningless for a button-derived vector.
+- **Determinism unaffected.** `synthDpad` is a pure function of the already
+  hash-excluded `InputSnapshot.pad_buttons` (ADR 0040 §6) — nothing new enters
+  `World.stateHash`; the resolver stays a pure `(snapshot, binding) → value` map.
 
 ### 5. Gamepad enters the `platform` port
 

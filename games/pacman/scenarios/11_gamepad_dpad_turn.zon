@@ -1,0 +1,38 @@
+// Pac-Man staircase, step 11 (issue #230): the D-PAD device-agnostic proof, the slot
+// `12_stick_up_turn.zon` reserved for it. This is `08_straight_through.zon`'s open
+// up-turn driven by a GAMEPAD D-PAD instead of the keyboard "up" key or the stick — and
+// it asserts the *identical* pac trajectory, proving keyboard, stick, and d-pad all
+// drive the same `move` action to the same result (ADR 0040 §4 amendment; input.zon's
+// `move` axis2d now binds `pad_dpad = true` alongside `pad_stick`/`keys_2d`).
+//
+// The d-pad is injected via the scenario-harness `pad_buttons` field (already used by
+// button actions elsewhere): holding `"dpad_up"` synthesizes the vector (0, -1) — the
+// resolver's `pad_dpad` composite uses the SAME sign convention as `keys_2d`/the stick
+// (right +x, left -x, down +y, up -y) — bit-identical to a keyboard "up" (0, -1) and to
+// the stick's dead-zoned (0, -0.9). rules.lua's `poll_move_dir` then folds that vector to
+// the SAME discrete 4-way heading (dr = -1, up) the keyboard and stick trips yield (ADR
+// 0040 §8: the engine keeps the value analog/digital-composited, content cuts it to the
+// grid) — so pac's nav trajectory is bit-for-bit those trips'. Hence every checkpoint
+// below is copied verbatim from `08_straight_through.zon`/`12_stick_up_turn.zon`: an open
+// d-pad-up turn onto column 8 (tick 10: still x=-1, y past its start row) and the flush
+// stop at the row-6 wall (tick 40: x=-1, y=2.0). If the d-pad ever steered pac differently
+// from the key/stick, these would diverge — that is the whole test.
+.{
+    .steps = 40,
+    .input_trace = .{
+        .{ .ticks = 1 },
+        .{ .ticks = 39, .pad_buttons = .{"dpad_up"} },
+    },
+    .expect = .{
+        .{
+            .label = "d-pad (turn): an open d-pad-up press turns pac onto column 8 heading up — identical to keyboard 'up' and the left stick (still x=-1, y past its start row)",
+            .at_tick = 10,
+            .check = .{ .occupied = .{ .x = -1, .y = 3.6, .eps = 0.02 } },
+        },
+        .{
+            .label = "d-pad (stop): pac crosses the row-7 intersection and stops flush at the row-6 wall — bit-identical to the keyboard/stick trips (row-7 centre)",
+            .at_tick = 40,
+            .check = .{ .occupied = .{ .x = -1, .y = 2.0, .eps = 0.02 } },
+        },
+    },
+}

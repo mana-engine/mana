@@ -92,6 +92,26 @@ fn synthAxis1d(k: Keys1d, snap: platform.InputSnapshot) f32 {
     return groupBit(k.pos, snap) - groupBit(k.neg, snap);
 }
 
+/// 1 when `button` is held in `snap`, else 0 — the single-button analogue of `groupBit`,
+/// used by `synthDpad` against the four canonical d-pad buttons (there is exactly one
+/// button per direction, unlike a `keys_2d` group). PURE.
+fn dpadBit(button: platform.GamepadButton, snap: platform.InputSnapshot) f32 {
+    return if (snap.pad_buttons.contains(button)) 1 else 0;
+}
+
+/// Synthesize an `axis2d` vector from the four canonical d-pad buttons (ADR 0040 §4
+/// amendment, #230): held opposites cancel, the raw vector is clamped to unit length
+/// (symmetric with `synthAxis2d`, though a digital d-pad never exceeds magnitude 1 on
+/// its own). Same sign convention as `synthAxis2d`/`keys_2d`: right = +x, left = −x,
+/// down = +y, up = −y. No dead-zone — a synthesized vector is already clean. PURE.
+fn synthDpad(snap: platform.InputSnapshot) Vec2 {
+    const v: Vec2 = .{
+        .x = dpadBit(.dpad_right, snap) - dpadBit(.dpad_left, snap),
+        .y = dpadBit(.dpad_down, snap) - dpadBit(.dpad_up, snap),
+    };
+    return clampToUnit(v);
+}
+
 /// Whether `action`'s combined button state is held in `snap` — the logical **OR** of every
 /// bound source (keyboard keys and gamepad buttons), which is what makes the action
 /// device-agnostic (any bound input holds it). A non-`button` action, or one whose flat
@@ -114,19 +134,22 @@ pub fn resolveButtonEdge(action: RawAction, snap: platform.InputSnapshot, prev: 
     return if (cur) .pressed else .released;
 }
 
-/// Resolve an `axis2d` action to its `(x, y)` value (ADR 0040 §4). Candidate sources are
-/// evaluated in a fixed binding order — the native `pad_stick` first, then the `keys_2d`
-/// composite — and the source with the **greatest magnitude** this tick wins (a resting stick
-/// never overrides active keys, and vice-versa). An exact magnitude tie is broken toward the
-/// earlier source (the native stick), the deterministic §4 tie-break. The native stick has the
-/// per-action radial `deadzone` applied *before* comparison; both candidates are clamped to
-/// unit length (so a stick beyond magnitude 1 clamps to 1). A non-`axis2d` action, or one with
-/// no analog source, resolves to zero. PURE function of `(action, snap)`; `action` is borrowed.
+/// Resolve an `axis2d` action to its `(x, y)` value (ADR 0040 §4, amended #230 for
+/// `pad_dpad`). Candidate sources are evaluated in a fixed binding order — the native
+/// `pad_stick` first, then the `keys_2d` composite, then the `pad_dpad` composite — and
+/// the source with the **greatest magnitude** this tick wins (a resting stick never
+/// overrides active keys, and vice-versa). An exact magnitude tie is broken toward the
+/// earlier source, the deterministic §4 tie-break. The native stick has the per-action
+/// radial `deadzone` applied *before* comparison; every candidate is clamped to unit
+/// length (so a stick beyond magnitude 1 clamps to 1; a digital d-pad never needs it but
+/// stays symmetric with `keys_2d`). A non-`axis2d` action, or one with no analog source,
+/// resolves to zero. PURE function of `(action, snap)`; `action` is borrowed.
 pub fn resolveAxis2d(action: RawAction, snap: platform.InputSnapshot) Vec2 {
     var best: Vec2 = Vec2.zero;
     var best_mag: f32 = -1;
-    // Binding order: native stick first, then synthesized keys (tie → earlier candidate wins,
-    // since a later candidate only replaces on a *strictly* greater magnitude).
+    // Binding order: native stick, then synthesized keys, then the d-pad composite (tie →
+    // earlier candidate wins, since a later candidate only replaces on a *strictly* greater
+    // magnitude).
     if (action.pad_stick) |stick| {
         const v = clampToUnit(applyDeadzone(stickVec(stick, snap), action.deadzone));
         const m = magnitude(v);
@@ -137,6 +160,14 @@ pub fn resolveAxis2d(action: RawAction, snap: platform.InputSnapshot) Vec2 {
     }
     if (action.keys_2d) |k| {
         const v = synthAxis2d(k, snap);
+        const m = magnitude(v);
+        if (m > best_mag) {
+            best = v;
+            best_mag = m;
+        }
+    }
+    if (action.pad_dpad) {
+        const v = synthDpad(snap);
         const m = magnitude(v);
         if (m > best_mag) {
             best = v;
@@ -316,6 +347,56 @@ test "resolver button: no up-edge when one source releases while another stays h
     try testing.expectEqual(ButtonEdge.released, resolveButtonEdge(jump, .{}, prev));
     // a fresh press fires .pressed.
     try testing.expectEqual(ButtonEdge.pressed, resolveButtonEdge(jump, prev, .{}));
+}
+
+/// A snapshot with exactly `buttons` held gamepad buttons (connected) — the injected-pad
+/// fixture, mirroring `keySnap`.
+fn padSnap(buttons: []const platform.GamepadButton) platform.InputSnapshot {
+    var s: platform.InputSnapshot = .{ .pad_connected = true };
+    for (buttons) |b| s.pad_buttons.insert(b);
+    return s;
+}
+
+test "resolver axis2d: a single held d-pad direction is a unit vector (right=+x, up=-y)" {
+    const move: RawAction = .{ .type = .axis2d, .pad_dpad = true };
+    try testing.expectEqual(Vec2{ .x = 1, .y = 0 }, resolveAxis2d(move, padSnap(&.{.dpad_right})));
+    try testing.expectEqual(Vec2{ .x = -1, .y = 0 }, resolveAxis2d(move, padSnap(&.{.dpad_left})));
+    try testing.expectEqual(Vec2{ .x = 0, .y = -1 }, resolveAxis2d(move, padSnap(&.{.dpad_up})));
+    try testing.expectEqual(Vec2{ .x = 0, .y = 1 }, resolveAxis2d(move, padSnap(&.{.dpad_down})));
+}
+
+test "resolver axis2d: held d-pad opposites cancel to zero" {
+    const move: RawAction = .{ .type = .axis2d, .pad_dpad = true };
+    try testing.expectEqual(Vec2.zero, resolveAxis2d(move, padSnap(&.{ .dpad_up, .dpad_down })));
+    try testing.expectEqual(Vec2.zero, resolveAxis2d(move, padSnap(&.{ .dpad_left, .dpad_right })));
+    try testing.expectEqual(Vec2.zero, resolveAxis2d(move, padSnap(&.{ .dpad_up, .dpad_down, .dpad_left, .dpad_right })));
+}
+
+test "resolver axis2d: a d-pad diagonal clamps to unit magnitude (~0.707), not √2" {
+    const move: RawAction = .{ .type = .axis2d, .pad_dpad = true };
+    const v = resolveAxis2d(move, padSnap(&.{ .dpad_up, .dpad_right }));
+    try testing.expectApproxEqAbs(@as(f32, 1), magnitude(v), 1e-5);
+    try testing.expectApproxEqAbs(inv_sqrt2, v.x, 1e-5);
+    try testing.expectApproxEqAbs(-inv_sqrt2, v.y, 1e-5);
+}
+
+test "resolver axis2d: a resting/absent d-pad contributes zero" {
+    const move: RawAction = .{ .type = .axis2d, .pad_dpad = true };
+    try testing.expectEqual(Vec2.zero, resolveAxis2d(move, .{}));
+}
+
+test "resolver axis2d multi-source: an active stick beats a resting d-pad, and vice-versa" {
+    const move: RawAction = .{ .type = .axis2d, .pad_stick = .left, .pad_dpad = true };
+    // Active stick + resting d-pad → stick wins.
+    var s1: platform.InputSnapshot = .{ .pad_connected = true };
+    s1.pad_axes.set(.left_x, 0.9);
+    const v1 = resolveAxis2d(move, s1);
+    try testing.expectApproxEqAbs(@as(f32, 0.9), v1.x, 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0), v1.y, 1e-6);
+    // Resting stick + active d-pad → d-pad wins.
+    var s2: platform.InputSnapshot = .{ .pad_connected = true };
+    s2.pad_buttons.insert(.dpad_right);
+    try testing.expectEqual(Vec2{ .x = 1, .y = 0 }, resolveAxis2d(move, s2));
 }
 
 test "resolver analog multi-source: the greatest-magnitude source wins" {
