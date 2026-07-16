@@ -16,6 +16,11 @@
 //! the headless proof the content + dispatch + persistence primitives work
 //! end-to-end, including the settings-screen swap a real `--play` session does not
 //! yet drive automatically.
+//!
+//! Since #239 it also carries the **controls-screen remap staircase** (ADR 0041 §5) —
+//! `games/menu`'s `input.zon` + `screens/controls.zon` + `scripts/rules.lua` driven
+//! through a real `Sim`, proving capture → validate → record → persist → reload →
+//! live-swap end-to-end. See the section header below.
 
 const std = @import("std");
 const data = @import("data");
@@ -155,4 +160,329 @@ test "menu acceptance: navigate -> focus -> activate -> settings change -> persi
     try std.testing.expectEqual(@as(u8, 9), reloaded.volume);
     try std.testing.expectEqual(Difficulty.hard, reloaded.difficulty);
     try std.testing.expect(reloaded.volume != default_settings.volume);
+}
+
+// --- Controls screen: the in-game remap chain (ADR 0041 §5, issue #239) -------------
+//
+// The payoff of ADR 0041's five phases, driven against the REAL `games/menu` content
+// (`input.zon` + `screens/controls.zon` + `scripts/rules.lua`) through a REAL `Sim` —
+// the same object `--play` ticks, routing the same key/pad edges into the same
+// `ui_input` and the same action resolver. What a windowed session adds on top is a
+// window, a file watcher, and a `main` loop; every link below is the shipped one.
+
+const platform = engine.platform;
+const Key = platform.Key;
+const GamepadButton = platform.GamepadButton;
+
+/// The `Sim` a `--play` session of `games/menu` runs, minus the window: the package
+/// action map borrowed onto `action_map`, the controls screen active in `ui_input`, and
+/// `scripts/rules.lua` loaded as the handler table. `screen`/`map` are borrowed — the
+/// caller owns them and must outlive the `Sim` (exactly the runner's ownership).
+fn controlsSim(sim: *engine.Sim, rules_src: [:0]const u8, screen: *const engine.ui.Screen, map: *const engine.ActionMap) !void {
+    try sim.loadScript(rules_src);
+    sim.ui_input.setScreen(screen, .{ .x = 0, .y = 0, .w = 400, .h = 300 });
+    sim.action_map = map;
+}
+
+/// Tick one press edge of `key` and then its release, as a real session does: a key is
+/// held for a frame and let go. The press is the only qualifying capture edge (ADR 0041
+/// §1.1); the release falls through, exercising that it binds nothing.
+fn tapKey(sim: *engine.Sim, key: Key) !void {
+    var snap: platform.InputSnapshot = .{};
+    snap.keys.insert(key);
+    sim.setInput(snap);
+    try sim.tick();
+    sim.setInput(.{});
+    try sim.tick();
+}
+
+/// `tapKey`'s gamepad-button twin — the other digital edge stream capture qualifies.
+fn tapPad(sim: *engine.Sim, button: GamepadButton) !void {
+    var snap: platform.InputSnapshot = .{};
+    snap.pad_buttons.insert(button);
+    sim.setInput(snap);
+    try sim.tick();
+    sim.setInput(.{});
+    try sim.tick();
+}
+
+/// How many times `scripts/rules.lua`'s `on_action` has seen `action` fire — the
+/// package's only observable that an action fired at all, and so the proof that a
+/// rebound input really drives the action (and the old one no longer does).
+fn firedCount(sim: *engine.Sim, comptime action: []const u8) i64 {
+    return sim.script_runtime.handlerFieldInt("fired_" ++ action) orelse 0;
+}
+
+/// The player override `bindings` handler field as the persistence driver reads it: the
+/// source recorded for `action`, or null when the player never rebound it. The result is
+/// `gpa`-owned; free it.
+fn recordedBinding(gpa: Allocator, sim: *engine.Sim, action: []const u8) !?[]const u8 {
+    const pairs = try sim.script_runtime.handlerFieldStrMap(gpa, "bindings") orelse return null;
+    defer engine.script_runtime.Runtime.freeStrMap(gpa, pairs);
+    for (pairs) |p| {
+        if (std.mem.eql(u8, p.key, action)) return try gpa.dupe(u8, p.value);
+    }
+    return null;
+}
+
+/// Re-resolve the effective map the way `runtime`'s watcher does on a change to either
+/// file (ADR 0041 §3): re-parse the override that was just written and merge it over the
+/// package map. The caller owns the result (`engine.action_map.free`) and swaps
+/// `sim.action_map` to it — `ActionMapState.reload` is the runner's private owner of
+/// exactly this pair of steps.
+fn reloadEffective(gpa: Allocator, io: Io, dir: Io.Dir, pkg_map: engine.ActionMap) !engine.ActionMap {
+    const src = try dir.readFileAllocOptions(io, "input.zon", gpa, .unlimited, .of(u8), 0);
+    defer gpa.free(src);
+    const override = try engine.action_map.parse(gpa, src);
+    defer engine.action_map.free(gpa, override);
+    return engine.action_map.merge(gpa, pkg_map, override);
+}
+
+test "menu controls: rules.lua's mirrored default bindings agree with the package input.zon" {
+    // The one drift risk the remap content carries: a script cannot read `input.zon`
+    // (ADR 0003 §7 removed io/os) and no engine seam hands it the loaded map, so
+    // `rules.lua` MIRRORS the defaults to validate duplicates against. The file is the
+    // source of truth; this test is what keeps the mirror honest.
+    try requireLua();
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const input_src = try readFile(gpa, io, "games/menu/input.zon");
+    defer gpa.free(input_src);
+    const pkg_map = try engine.action_map.parse(gpa, input_src);
+    defer engine.action_map.free(gpa, pkg_map);
+
+    const rules_src = try readFile(gpa, io, "games/menu/scripts/rules.lua");
+    defer gpa.free(rules_src);
+    var rt: engine.script_runtime.Runtime = .{};
+    defer rt.deinit(gpa);
+    try rt.loadHandlers(gpa, rules_src);
+
+    const mirrored = try rt.handlerFieldStrMap(gpa, "default_bindings") orelse return error.TestUnexpectedResult;
+    defer engine.script_runtime.Runtime.freeStrMap(gpa, mirrored);
+    try std.testing.expectEqual(pkg_map.bindings.len, mirrored.len);
+    for (mirrored) |p| {
+        const action = pkg_map.find(p.key) orelse return error.TestUnexpectedResult;
+        // Every rebindable action is a digital `button` (v1 capture defers analog, ADR
+        // 0041 §1.1), and the mirror names its default KEY in the capture vocabulary.
+        try std.testing.expectEqual(engine.action_map.ActionType.button, action.type);
+        try std.testing.expectEqual(@as(usize, 1), action.keys.len);
+        try std.testing.expectEqualStrings(@tagName(action.keys[0]), p.value);
+    }
+}
+
+test "menu controls acceptance: capture -> validate -> record -> persist -> reload -> live-swap" {
+    try requireLua();
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    // The real content — human-editable ZON/Lua, the source of truth.
+    const input_src = try readFile(gpa, io, "games/menu/input.zon");
+    defer gpa.free(input_src);
+    const pkg_map = try engine.action_map.parse(gpa, input_src);
+    defer engine.action_map.free(gpa, pkg_map);
+
+    const controls_src = try readFile(gpa, io, "games/menu/screens/controls.zon");
+    defer gpa.free(controls_src);
+    const controls = try engine.ui.parse(gpa, controls_src);
+    defer engine.ui.free(gpa, controls);
+
+    const rules_src = try readFile(gpa, io, "games/menu/scripts/rules.lua");
+    defer gpa.free(rules_src);
+
+    // The override lands in a temp dir, never the shipped `games/menu/save/`: a test
+    // must not write into git-tracked content.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var owned_effective: ?engine.ActionMap = null;
+    defer if (owned_effective) |m| engine.action_map.free(gpa, m);
+
+    var sim = engine.Sim.init(gpa, 1.0 / 60.0);
+    defer sim.deinit();
+    try controlsSim(&sim, rules_src, &controls, &pkg_map);
+
+    // Seeded before any rebind, exactly as `runPlay` seeds it right after loading the
+    // script: whatever revision the script starts at counts as already persisted.
+    var writer: engine.input_override.OverrideWriter = .init(&sim.script_runtime);
+    const Outcome = engine.input_override.Outcome;
+
+    // 1. BASELINE — the package default is live: W fires `fire` (input.zon's binding).
+    try tapKey(&sim, .w);
+    try std.testing.expectEqual(@as(i64, 1), firedCount(&sim, "fire"));
+
+    // 2. ARM — focus the FIRE row and activate it: on_activate calls mana.capture_input.
+    try tapKey(&sim, .down); // bootstraps focus onto the first row, "rebind_fire"
+    try std.testing.expectEqual(&controls.root.children[0], sim.ui_input.focus.current.?);
+    try tapKey(&sim, .enter);
+    try std.testing.expectEqualStrings("fire", sim.script_runtime.armedCapture().?);
+
+    // 3. REJECT (reserved) — escape is the menu's own back/cancel key: captured, not
+    // recorded, and nothing is persisted because the revision never moves.
+    try tapKey(&sim, .escape);
+    try std.testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("rejected_bindings").?);
+    try std.testing.expect(sim.script_runtime.armedCapture() == null); // one-shot: delivery disarmed
+    try std.testing.expectEqual(Outcome.unchanged, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "input.zon", .{}));
+
+    // 4. REJECT (duplicate) — A already fires `interact`; binding it to `fire` too would
+    // make one press fire both.
+    try tapKey(&sim, .enter); // re-arm the still-focused FIRE row
+    try tapKey(&sim, .a);
+    try std.testing.expectEqual(@as(i64, 2), sim.script_runtime.handlerFieldInt("rejected_bindings").?);
+    try std.testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("accepted_bindings").?);
+    try std.testing.expectEqual(Outcome.unchanged, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
+    // KNOWN ENGINE GAP, pinned here deliberately (do not "correct" this expectation):
+    // ADR 0041 §1 says a captured edge "does not reach gameplay `on_action`/`on_key`",
+    // and `Sim.tick` honours that for `on_key` (it skips dispatch when `ui_input` claimed
+    // the edge, src/engine/sim.zig:322) but NOT for `on_action`: the action-edge loop
+    // (`:352`) diffs the raw snapshot unconditionally, never consulting capture. So
+    // pressing A while capture is armed fires `interact` at gameplay anyway. Harmless in
+    // this package (a menu with no gameplay), real for a game remapping mid-play.
+    // Closing it is engine work in `sim.zig`; content cannot, and must not, work around
+    // it. This assertion is the honest record — it goes red when the gap is closed.
+    try std.testing.expectEqual(@as(i64, 1), firedCount(&sim, "interact"));
+
+    // 5. ACCEPT + RECORD — D is free: the script records it and bumps the revision.
+    try tapKey(&sim, .enter);
+    try tapKey(&sim, .d);
+    try std.testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("accepted_bindings").?);
+    const recorded = (try recordedBinding(gpa, &sim, "fire")).?;
+    defer gpa.free(recorded);
+    try std.testing.expectEqualStrings("d", recorded); // the capture vocabulary, verbatim
+
+    // 6. PERSIST — the driver reads those exact fields and writes the override file.
+    try std.testing.expectEqual(Outcome{ .written = 1 }, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
+
+    // 7. RELOAD + LIVE-SWAP — re-parse the override, re-merge over the package map, and
+    // swap the borrow at a tick boundary (ADR 0041 §3). Nothing else about the session
+    // changes: same Sim, same script state, same screen.
+    owned_effective = try reloadEffective(gpa, io, tmp.dir, pkg_map);
+    sim.action_map = &owned_effective.?;
+
+    // 8. APPLIED — D now fires `fire`; W (the package default) no longer does, because
+    // an override REPLACES the action's whole binding (per-action replace, ADR 0041 §2).
+    try tapKey(&sim, .d);
+    try std.testing.expectEqual(@as(i64, 2), firedCount(&sim, "fire"));
+    try tapKey(&sim, .w);
+    try std.testing.expectEqual(@as(i64, 2), firedCount(&sim, "fire"));
+    // An action absent from the override still resolves to its package default: A fires
+    // `interact` across the swap (2 = this press, plus the one step 4's gap leaked).
+    try tapKey(&sim, .a);
+    try std.testing.expectEqual(@as(i64, 2), firedCount(&sim, "interact"));
+}
+
+test "menu controls acceptance: a captured PAD BUTTON persists and applies through the same chain" {
+    // The `source` vocabulary is asymmetric (ADR 0041 §1.1): keys arrive bare ("d"), pad
+    // buttons `pad_`-prefixed ("pad_south"). Content passes both through untouched and
+    // the driver routes them; this is the leg that proves the pad half of that contract
+    // end-to-end, from a real pad edge to a live rebound action.
+    try requireLua();
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const input_src = try readFile(gpa, io, "games/menu/input.zon");
+    defer gpa.free(input_src);
+    const pkg_map = try engine.action_map.parse(gpa, input_src);
+    defer engine.action_map.free(gpa, pkg_map);
+
+    const controls_src = try readFile(gpa, io, "games/menu/screens/controls.zon");
+    defer gpa.free(controls_src);
+    const controls = try engine.ui.parse(gpa, controls_src);
+    defer engine.ui.free(gpa, controls);
+
+    const rules_src = try readFile(gpa, io, "games/menu/scripts/rules.lua");
+    defer gpa.free(rules_src);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var owned_effective: ?engine.ActionMap = null;
+    defer if (owned_effective) |m| engine.action_map.free(gpa, m);
+
+    var sim = engine.Sim.init(gpa, 1.0 / 60.0);
+    defer sim.deinit();
+    try controlsSim(&sim, rules_src, &controls, &pkg_map);
+    var writer: engine.input_override.OverrideWriter = .init(&sim.script_runtime);
+
+    // Focus the PAUSE row (third) and arm it, then press a pad button — the pad edge
+    // stream `padButtonEdge` claims while capture is armed.
+    for (0..3) |_| try tapKey(&sim, .down);
+    try std.testing.expectEqual(&controls.root.children[2], sim.ui_input.focus.current.?);
+    try tapKey(&sim, .enter);
+    try tapPad(&sim, .south);
+
+    const recorded = (try recordedBinding(gpa, &sim, "pause")).?;
+    defer gpa.free(recorded);
+    try std.testing.expectEqualStrings("pad_south", recorded); // prefixed, un-translated
+
+    try std.testing.expectEqual(engine.input_override.Outcome{ .written = 1 }, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
+    owned_effective = try reloadEffective(gpa, io, tmp.dir, pkg_map);
+    sim.action_map = &owned_effective.?;
+
+    // The driver stripped `pad_` and routed it into `pad_buttons`: the SOUTH button now
+    // fires `pause`, and neither its package key (S) nor its package pad button (START)
+    // does — per-action replace again, across the device boundary.
+    try tapPad(&sim, .south);
+    try std.testing.expectEqual(@as(i64, 1), firedCount(&sim, "pause"));
+    try tapKey(&sim, .s);
+    try tapPad(&sim, .start);
+    try std.testing.expectEqual(@as(i64, 1), firedCount(&sim, "pause"));
+}
+
+test "menu controls: a pointer click while capture is armed cancels it, so the next keypress binds nothing" {
+    // The pointer is the one input capture does NOT claim (ADR 0041 §1 intercepts key
+    // and pad-button edges), so a click is the player's other way out of "press a key…"
+    // — and `mana.cancel_capture` is what makes it one. Driven through `UiInput` directly
+    // because `Sim.tick` has no pointer routing yet (issue #209's gap).
+    try requireLua();
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const controls_src = try readFile(gpa, io, "games/menu/screens/controls.zon");
+    defer gpa.free(controls_src);
+    const controls = try engine.ui.parse(gpa, controls_src);
+    defer engine.ui.free(gpa, controls);
+
+    const rules_src = try readFile(gpa, io, "games/menu/scripts/rules.lua");
+    defer gpa.free(rules_src);
+
+    var world = engine.World.init(gpa);
+    defer world.deinit();
+    var commands: engine.command.CommandBuffer = .{};
+    defer commands.deinit(gpa);
+    var timers: engine.Timers = .{};
+    defer timers.deinit(gpa);
+    var rng: core.Rng = core.Rng.init(0);
+    const dc: engine.script_runtime.DispatchCtx = .{
+        .world = &world,
+        .commands = &commands,
+        .gpa = gpa,
+        .now_seconds = 0,
+        .timers = &timers,
+        .rng = &rng,
+    };
+
+    var rt: engine.script_runtime.Runtime = .{};
+    defer rt.deinit(gpa);
+    try rt.loadHandlers(gpa, rules_src);
+
+    var input: engine.ui_dispatch.UiInput = .{};
+    input.setScreen(&controls, .{ .x = 0, .y = 0, .w = 400, .h = 300 });
+
+    // Arm capture on the FIRE row.
+    try std.testing.expect(try input.keyEdge(gpa, &rt, dc, .down, true));
+    try std.testing.expect(try input.keyEdge(gpa, &rt, dc, .enter, true));
+    try std.testing.expectEqualStrings("fire", rt.armedCapture().?);
+
+    // A click reaches on_click even while armed; rules.lua answers it with
+    // mana.cancel_capture.
+    try std.testing.expect(try input.pointerPress(gpa, &rt, dc, 60, 50));
+    try std.testing.expect(rt.armedCapture() == null);
+
+    // Disarmed for real: the next press drives focus nav again instead of binding, and
+    // nothing was recorded or proposed for persistence.
+    try std.testing.expect(try input.keyEdge(gpa, &rt, dc, .down, true));
+    try std.testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("accepted_bindings").?);
+    try std.testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("bindings_revision").?);
 }

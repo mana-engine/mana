@@ -1,0 +1,29 @@
+// games/menu/input.zon — the package action-binding table (ADR 0040 §3), i.e. the
+// remappable control set `screens/controls.zon` lists and lets the player rebind
+// (ADR 0041 §5, issue #239). CONTENT: the action namespace is entirely this file's,
+// and no name here is known to `src/` (invariant #6).
+//
+// This package has no gameplay, so nothing *moves* when an action fires; what these
+// actions exist for is the remap chain itself — capture the next input, persist it to
+// `save/input.zon`, reload, swap the live map — which is engine-generic and identical
+// for a package that does have gameplay. `scripts/rules.lua`'s `on_action` counts each
+// firing, which is how `tests/menu_acceptance.zig` observes that a rebind really
+// applied (the bound key now fires the action; the old one no longer does).
+//
+// **All three are `button` actions bound to digital sources only**, because v1 capture
+// qualifies key and gamepad-button press edges and defers analog-source capture (ADR
+// 0041 §1.1) — an `axis2d` row would list a binding the controls screen cannot rebind.
+//
+// **Defaults avoid the keys the menu's own UI claims** — arrows (focus nav), enter +
+// space (activate), escape (back/cancel) — see `src/ui/focus.zig`. `platform.Key` is a
+// small enum today (ADR 0009), so w/a/s/d are the whole bindable keyboard here;
+// `scripts/rules.lua` mirrors both this reserved set and these defaults, and rejects a
+// capture of a reserved key. `tests/menu_acceptance.zig` asserts the mirror matches
+// this file, which is the source of truth.
+.{
+    .actions = .{
+        .fire = .{ .type = .button, .keys = .{.w}, .pad_buttons = .{.west} },
+        .interact = .{ .type = .button, .keys = .{.a}, .pad_buttons = .{.north} },
+        .pause = .{ .type = .button, .keys = .{.s}, .pad_buttons = .{.start} },
+    },
+}

@@ -7,6 +7,10 @@
     .entry_scene = "scenes/empty.zon",
     .script = "scripts/rules.lua",
     .script_api = 1,
+    // The remappable action set `screens/controls.zon` lists (ADR 0040 §3, ADR 0041 §5).
+    // A user rebind is written to `save/input.zon` and merged OVER this file (ADR 0041
+    // §2), which stays pristine, shipped content.
+    .input = "input.zon",
     // The front screen doubles as the runner's `hud` (ADR 0039 §6: one active
     // screen) — `--play` renders it AND routes keyboard focus-nav/activate presses
     // into it (issue #209), so `mana run -- games/menu --play` is navigable in a
