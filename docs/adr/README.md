@@ -45,7 +45,7 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0031 | Sprite rendering: cosmetic sprite/animation component, dependency-free sheet asset, gpu texture path | accepted |
 | 0032 | Animated-sprite interchange: no existing format fits — evolve MSF, don't replace it | accepted |
 | 0033 | Directional + mirrored sprite animation: facing-selected clips replace wedge rotation | accepted |
-| 0034 | Data-driven game-UI subsystem: direction | accepted |
+| 0034 | Data-driven game-UI subsystem: direction | accepted (amended #248: §5 reserves `.` in a `bind` name — `field.key` resolves against script handler-table state, and hosts chain; §5 pinned the host signatures but left name resolution unstated, which a second installed host made a shared fact) |
 | 0035 | `mana.is_walkable`: a read-only tilemap-walkability query | accepted |
 | 0036 | Text rendering: an embedded bitmap font + layout through the sprite atlas/batcher | accepted |
 | 0037 | GPU: Y-down NDC clip-space convention | accepted |

@@ -671,6 +671,15 @@ fn runRenderPlayFrame(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, 
     if (parsed.tilemap) |*tm| sim.tilemap = tm; // see runOnce: parsed outlives sim (LIFO defers)
     if (action_map_opt) |*am| sim.action_map = am; // #216: borrowed like tilemap (outlives sim)
     try loadPackageScript(io, gpa, pkg, manifest, &sim);
+    // Seed the script with the override on disk, exactly as `playLoop` does (ADR 0041 §4
+    // amendment, #247). `loadActionMap` above already merged that override into the map
+    // this path RESOLVES through, so without this the two halves disagree: `fire` would
+    // really be on D while a `bindings.fire`-bound label resolved nothing and fell back to
+    // its shipped-default text — #248's lie, reappearing in the headless path (invariant
+    // #1) alone. Both render paths seed identically; only the loop around them differs.
+    const override_path = try std.fs.path.join(gpa, &.{ pkg, action_override_rel });
+    defer gpa.free(override_path);
+    try syncScriptBindings(out, io, gpa, override_path, &sim.script_runtime);
     sim.enterScene(parsed.name);
     try sim.addSystem(engine.input.inputMoveSystem); // #30: same load path as --play
     try registerStandardSystems(&sim);

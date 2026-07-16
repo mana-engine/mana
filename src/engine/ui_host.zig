@@ -12,7 +12,10 @@
 //!
 //! `ScriptHost` closes that, generically: a widget whose `bind` has the form
 //! **`field.key`** resolves to the string at `key` in the *table-valued handler field*
-//! `field` — engine-side glue that names no field, no key, and no screen (invariant
+//! `field`. That dot convention, and the chaining rule below, are pinned by **ADR 0034
+//! §5's #248 amendment** — `bind` is content-facing ZON, so a `.` is now reserved for
+//! every installed host, not just this one. It is engine-side glue that names no field,
+//! no key, and no screen (invariant
 //! #6: the vocabulary comes from the game's ZON `bind`, never from `src/`). Anything
 //! else — a bare name, an unknown field, a key the script's table does not hold —
 //! falls through to `next` (chain `render_ui.worldHost` in, so ONE installed host

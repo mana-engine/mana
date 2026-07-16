@@ -145,6 +145,35 @@ without standing up a full `Sim`, exactly as ADR 0015 notes a fake `Host` over a
 load-bearing boundary (ADR 0015's own justification: honoring the import DAG), not
 speculative flexibility.
 
+**Amendment (2026-07-16, #248): a `.` in a `bind` name is reserved — `field.key` names
+script handler-table state.** §5 fixes the host *signatures* (a later change to them is
+its own ADR) and deliberately leaves **name resolution** to whichever host `engine`
+installs. That silence was fine while there was one host — `render_ui.worldHost`, which
+reads a bound name as a numeric data component (ADR 0024) on the live `World`. #248 added
+a second, `ui_host.ScriptHost`, because a whole class of displayable state is owned by the
+*script* and only read back by the engine (ADR 0041 §4's `bindings` field: the player's
+live input binding, which the controls screen could not echo — it showed the shipped
+default as static text and so, after a rebind, lied). The two are **chained**, since a
+screen has one host and may bind both kinds, so resolution order is now a shared,
+content-visible fact and belongs here rather than in a doc comment:
+
+- A `bind` **containing a `.`** is a script handler-table path: `field.key` resolves to
+  the string at `key` of table-valued handler field `field` (read through
+  `Runtime.handlerFieldStrMap` — an engine→state read, adding no `mana` member, so ADR
+  0003 §5's version gate is untouched). An empty `field` or `key` is not a path.
+- Everything else — and any path the script does not resolve — falls through to the next
+  host in the chain, and if none resolves it, `ui.boundValue` falls back to the widget's
+  static `text`. An unrebound action therefore keeps displaying the default its ZON
+  authored, which *is* its effective binding.
+- **A future host must respect this**: `.` is reserved in the `bind` vocabulary for
+  namespaced state, so a host may not read a dotted name as a flat key of its own. A
+  binding source that needs a different namespace takes a new prefix, not a re-reading of
+  the dot. The `Host.VTable.value(ctx, name) ?Value` signature is unchanged by this
+  amendment; only the name vocabulary is pinned.
+
+Content stays the only place a key is named (invariant #6): `src/` supplies the grammar,
+never a field, key, or screen. Both fills remain read-only and hash-excluded (§4).
+
 ### 6. Prerequisite: text/font rendering does not exist yet
 
 No glyph atlas, font loader, or text-layout path exists anywhere under `gpu` or

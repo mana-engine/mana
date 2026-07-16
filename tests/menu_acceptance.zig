@@ -355,7 +355,7 @@ test "menu controls acceptance: capture -> validate -> record -> persist -> relo
     try std.testing.expectEqual(@as(i64, 1), firedCount(&sim, "fire"));
     const shown_default = try shownBinding(gpa, &sim, &controls, 0);
     defer gpa.free(shown_default);
-    try std.testing.expectEqualStrings("W", shown_default);
+    try std.testing.expectEqualStrings("w", shown_default);
 
     // 2. ARM — focus the FIRE row and activate it: on_activate calls mana.capture_input.
     try tapKey(&sim, .down); // bootstraps focus onto the first row, "rebind_fire"
@@ -399,7 +399,7 @@ test "menu controls acceptance: capture -> validate -> record -> persist -> relo
 
     // 5b. ECHO (issue #248) — the row now displays the REBOUND key, not the shipped
     // default it showed at step 1. This is the assertion that goes red if the screen
-    // lies: before #248 the binding cell was static text and read "W" forever, while
+    // lies: before #248 the binding cell was static text and read "w" forever, while
     // `fire` had moved to D. It reads the value through the same host chain the runner's
     // `projectHud` installs, so what it asserts is what a window would draw.
     const shown_rebound = try shownBinding(gpa, &sim, &controls, 0);
@@ -409,7 +409,7 @@ test "menu controls acceptance: capture -> validate -> record -> persist -> relo
     // static text — the echo is per-action, not a screen-wide swap.
     const shown_untouched = try shownBinding(gpa, &sim, &controls, 1);
     defer gpa.free(shown_untouched);
-    try std.testing.expectEqualStrings("A", shown_untouched);
+    try std.testing.expectEqualStrings("a", shown_untouched);
 
     // 6. PERSIST — the driver reads those exact fields and writes the override file.
     try std.testing.expectEqual(Outcome{ .written = 1 }, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
@@ -505,6 +505,60 @@ test "menu controls acceptance: a captured PAD BUTTON persists and applies throu
     try tapKey(&sim, .s);
     try tapPad(&sim, .start);
     try std.testing.expectEqual(@as(i64, 1), firedCount(&sim, "pause"));
+}
+
+test "menu controls: rebinding an action to the key it ALREADY has does not change what the row reads" {
+    // The vocabulary-drift case, invisible to every other step: they all rebind to a
+    // DIFFERENT source, so a row's static default and its live binding are never asked to
+    // spell the same key. Here they are. `input.zon` binds interact to `.a` and capture
+    // reports that key as `@tagName(.a)` = "a", so the row's static default must be "a"
+    // too — it read "A" once, and this screen then displayed one key two ways depending
+    // on whether the player had "rebound" it to itself. rules.lua accepts this capture
+    // (rebinding an action to an input it already has is a no-op, not a duplicate), which
+    // is exactly what moves the row from its static text onto the bound value.
+    try requireLua();
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const input_src = try readFile(gpa, io, "games/menu/input.zon");
+    defer gpa.free(input_src);
+    const pkg_map = try engine.action_map.parse(gpa, input_src);
+    defer engine.action_map.free(gpa, pkg_map);
+
+    const controls_src = try readFile(gpa, io, "games/menu/screens/controls.zon");
+    defer gpa.free(controls_src);
+    const controls = try engine.ui.parse(gpa, controls_src);
+    defer engine.ui.free(gpa, controls);
+
+    const rules_src = try readFile(gpa, io, "games/menu/scripts/rules.lua");
+    defer gpa.free(rules_src);
+
+    var sim = engine.Sim.init(gpa, 1.0 / 60.0);
+    defer sim.deinit();
+    try controlsSim(&sim, rules_src, &controls, &pkg_map);
+
+    // The default the row shows before anything is rebound — its static text.
+    const before = try shownBinding(gpa, &sim, &controls, 1);
+    defer gpa.free(before);
+
+    // Focus the INTERACT row, arm it, and press the key it is already bound to.
+    for (0..2) |_| try tapKey(&sim, .down);
+    try std.testing.expectEqual(&controls.root.children[1], sim.ui_input.focus.current.?);
+    try tapKey(&sim, .enter);
+    try tapKey(&sim, .a);
+    try std.testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("accepted_bindings").?);
+
+    // The row is now driven by the live binding rather than its static text — and reads
+    // the SAME string, because the content spells the default in capture's vocabulary.
+    const after = try shownBinding(gpa, &sim, &controls, 1);
+    defer gpa.free(after);
+    try std.testing.expectEqualStrings(before, after);
+    // Pinned literally too, so a content edit that changed BOTH spellings in step still
+    // has to agree with `input.zon` — which is what the mirror test asserts `@tagName` of.
+    try std.testing.expectEqualStrings("a", after);
+    const recorded = (try recordedBinding(gpa, &sim, "interact")).?;
+    defer gpa.free(recorded);
+    try std.testing.expectEqualStrings(after, recorded); // what is displayed IS what is stored
 }
 
 test "menu controls acceptance: SESSION 2 keeps session 1's rebind, and validates against it (#247)" {
