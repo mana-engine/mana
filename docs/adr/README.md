@@ -52,3 +52,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0038 | Game package layout: modular, grouped (by-kind baseline + optional feature folders) content over monolithic blobs | accepted |
 | 0039 | UI input events: `on_click`/`on_focus`/`on_activate` | accepted |
 | 0040 | Data-driven action-map: typed (device-agnostic) actions + gamepad | accepted |
+| 0041 | In-game action-map remapping: capture-next-input, a persisted user override, live swap | accepted |
