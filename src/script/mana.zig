@@ -7,7 +7,8 @@
 //! `pushManaTable`, with each member's behavior test beside it. Splitting the table
 //! across files would scatter the single versioned API and its shape test for no
 //! gain; it grows only when an ADR adds a member (ADR 0021 §5 added `key_down`; ADR
-//! 0040 §2 added `action_down`/`action_axis`/`action_vector`).
+//! 0040 §2 added `action_down`/`action_axis`/`action_vector`; ADR 0041 §1 added
+//! `capture_input`/`cancel_capture`).
 //!
 //! Members that need no live Sim — `version`, `log` — are implemented directly.
 //! The live-Sim members reach the world/clock/command-buffer/RNG through the ADR
@@ -33,7 +34,17 @@
 //! this table is the ADR 0003 §2 `mana` v1 surface as amended by ADR 0035 and ADR 0040.
 //! The action *polls* live here; the matching `on_action` edge *event* is dispatched by
 //! `lua.zig`'s `dispatchAction` (driven by the engine's per-tick action diff, ADR 0040
-//! §2). The surface stays additive, so `mana.version` remains `1` (ADR 0003 §5).
+//! §2).
+//!
+//! `capture_input`/`cancel_capture` (ADR 0041 §1, issue #235) arm/disarm the
+//! "press a key to bind it" primitive: the armed-action flag lives on
+//! `script_runtime.zig`'s `LuaRuntime` (reached here through the same host seam as
+//! every other mutation), and `src/engine/ui_dispatch.zig`'s `UiInput.keyEdge`/
+//! `padButtonEdge` peek/clear it on the next qualifying physical press edge,
+//! dispatching `on_input_captured` (`lua.zig`'s `dispatchInputCaptured`) — mirroring
+//! how the `on_action` edge event above is dispatched outside this table. Digital
+//! sources only in v1 (a key or gamepad-button press; analog is deferred, §1.1).
+//! The surface stays additive, so `mana.version` remains `1` (ADR 0003 §5).
 
 const std = @import("std");
 const zlua = @import("zlua");
@@ -150,6 +161,14 @@ pub fn pushManaTable(l: *Lua, entities: *const Registry, host: *const ?Host) voi
     l.pushLightUserdata(@ptrCast(host));
     l.pushClosure(zlua.wrap(manaActionVector), 1);
     l.setField(-2, "action_vector");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaCaptureInput), 1);
+    l.setField(-2, "capture_input");
+
+    l.pushLightUserdata(@ptrCast(host));
+    l.pushClosure(zlua.wrap(manaCancelCapture), 1);
+    l.setField(-2, "cancel_capture");
 }
 
 /// Read a `*const ?Host` back from closure upvalue `idx` (a light-userdata pointer
@@ -478,6 +497,31 @@ fn manaActionVector(l: *Lua) !i32 {
     return 2;
 }
 
+/// `mana.capture_input(action)` (ADR 0041 §1): arm capture for the named `action` —
+/// an opaque content string (an `input.zon` action name to the engine, invariant
+/// #6). While armed, the engine's UI-input layer (`ui_dispatch.UiInput`) intercepts
+/// the next qualifying physical **press** edge (a key or gamepad-button press;
+/// analog sources are v1-deferred, ADR 0041 §1.1) ahead of focus-nav/activate/
+/// gameplay routing, delivers it via `on_input_captured({action, source})`, and
+/// disarms (one-shot). Idempotent: calling this again before an edge arrives
+/// replaces the pending target — the previous one is simply never delivered.
+/// Touches no filesystem (ADR 0003 §7): the engine only copies `action` into its
+/// own buffer; persisting an accepted binding is a later, engine-side driver (ADR
+/// 0041 §4). A no-op with no Sim dispatching (nothing to arm against).
+fn manaCaptureInput(l: *Lua) !i32 {
+    const action = l.checkString(1);
+    if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.captureInput(action);
+    return 0;
+}
+
+/// `mana.cancel_capture()` (ADR 0041 §1): disarm capture without binding — the
+/// player backed out (Escape/Back, navigated away) before a physical edge
+/// qualified. A no-op if nothing is armed, or with no Sim dispatching.
+fn manaCancelCapture(l: *Lua) !i32 {
+    if (hostSlot(l, Lua.upvalueIndex(1)).*) |h| h.cancelCapture();
+    return 0;
+}
+
 const testing = std.testing;
 
 test "mana: table shape exposes exactly the wired members (version..despawn); version == 1" {
@@ -498,12 +542,12 @@ test "mana: table shape exposes exactly the wired members (version..despawn); ve
         key_count += 1;
         l.pop(1); // drop value; keep key on the stack to advance `next`
     }
-    try testing.expectEqual(@as(usize, 21), key_count);
+    try testing.expectEqual(@as(usize, 23), key_count);
 
     try testing.expectEqual(zlua.LuaType.number, l.getField(t, "version"));
     try testing.expectEqual(@as(i64, 1), try l.toInteger(-1));
     l.pop(1);
-    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "set_position", "despawn", "spawn", "every", "after", "cancel", "random", "random_int", "get", "set", "is_walkable", "key_down", "action_down", "action_axis", "action_vector" }) |name| {
+    inline for ([_][:0]const u8{ "log", "is_valid", "position", "now", "set_velocity", "set_position", "despawn", "spawn", "every", "after", "cancel", "random", "random_int", "get", "set", "is_walkable", "key_down", "action_down", "action_axis", "action_vector", "capture_input", "cancel_capture" }) |name| {
         try testing.expectEqual(zlua.LuaType.function, l.getField(t, name));
         l.pop(1);
     }
@@ -712,6 +756,14 @@ const FakeGridHost = struct {
         _ = .{ ctx, name };
         unreachable;
     }
+    fn captureInput(ctx: *anyopaque, name: []const u8) void {
+        _ = .{ ctx, name };
+        unreachable;
+    }
+    fn cancelCapture(ctx: *anyopaque) void {
+        _ = ctx;
+        unreachable;
+    }
     const vtable: Host.VTable = .{
         .is_valid = isValid,
         .position = position,
@@ -732,6 +784,8 @@ const FakeGridHost = struct {
         .action_down = actionDown,
         .action_axis = actionAxis,
         .action_vector = actionVector,
+        .capture_input = captureInput,
+        .cancel_capture = cancelCapture,
     };
 };
 
@@ -793,6 +847,20 @@ test "mana.action_down/axis/vector: no Sim dispatching degrades to false / 0 / 0
     try testing.expectEqual(@as(f64, 0), try l.toNumber(-2)); // action_vector x → 0
     try testing.expectEqual(@as(f64, 0), try l.toNumber(-1)); // action_vector y → 0
     l.pop(4);
+}
+
+test "mana.capture_input/cancel_capture: no Sim dispatching are no-ops, never raise" {
+    var l = try Lua.init(testing.allocator);
+    defer l.deinit();
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+    var host: ?Host = null;
+
+    pushManaTable(l, &registry, &host);
+    l.setGlobal("mana");
+
+    try l.doString("mana.capture_input('jump')");
+    try l.doString("mana.cancel_capture()");
 }
 
 test "mana.key_down: no Sim dispatching returns false, never raises" {
@@ -895,6 +963,14 @@ const FakeKeyHost = struct {
         _ = .{ ctx, name };
         unreachable;
     }
+    fn captureInput(ctx: *anyopaque, name: []const u8) void {
+        _ = .{ ctx, name };
+        unreachable;
+    }
+    fn cancelCapture(ctx: *anyopaque) void {
+        _ = ctx;
+        unreachable;
+    }
     const vtable: Host.VTable = .{
         .is_valid = isValid,
         .position = position,
@@ -915,6 +991,8 @@ const FakeKeyHost = struct {
         .action_down = actionDown,
         .action_axis = actionAxis,
         .action_vector = actionVector,
+        .capture_input = captureInput,
+        .cancel_capture = cancelCapture,
     };
 };
 

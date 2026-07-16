@@ -325,6 +325,23 @@ pub const Sim = struct {
                     }
                 }
             }
+            // Gamepad-button edges (ADR 0040 §5, ADR 0041 §1.1): the pad-button
+            // counterpart of the key loop above — for each button whose held-state
+            // changed since last tick, in GamepadButton-enum order (deterministic),
+            // the active UI screen's capture mode gets first refusal via
+            // `ui_input.padButtonEdge` (a press while capture is armed fires
+            // `on_input_captured` with a `pad_`-prefixed source, ADR 0041 §1). Unlike
+            // keys there is **no** gameplay fall-through: raw pad buttons have no
+            // `on_key`-analogue event (a bound button *action* is diffed separately
+            // below, ADR 0040 §2), so an unconsumed pad-button edge simply does
+            // nothing. Runs off `prev_input` (still last tick's snapshot here), so it
+            // must precede the reset below, exactly like the key loop.
+            inline for (comptime std.enums.values(platform.GamepadButton)) |b| {
+                const now_held = self.input.pad_buttons.contains(b);
+                if (now_held != self.prev_input.pad_buttons.contains(b)) {
+                    _ = try self.ui_input.padButtonEdge(&self.script_runtime, dc, b, now_held);
+                }
+            }
             // Action edges (ADR 0040 §2): with a borrowed action map, diff each `button`
             // action's OR-combined held-state between last tick and this one — the exact
             // snapshot diff the key loop above does, but device-agnostic — and dispatch
@@ -1182,4 +1199,41 @@ test "sim: a UI-claimed key press does not also dispatch on_key, but an unclaime
     sim.setInput(.{ .keys = w });
     try sim.tick();
     try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("key_presses").?);
+}
+
+test "sim: a gamepad-button press, while capture is armed, fires on_input_captured through the tick's pad-button diff (requires -Denable-lua)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    // Proves the pad-button capture path is *wired into `Sim.tick`* — not just
+    // reachable by calling `ui_input.padButtonEdge` directly. Arm capture from
+    // `on_scene_enter`, then inject a gamepad-button press into the snapshot and
+    // tick: the tick's per-button diff (ADR 0040 §5 / ADR 0041 §1.1) must see the
+    // south-button press edge and drive `padButtonEdge`, delivering
+    // `on_input_captured` with the `pad_`-prefixed source string.
+    var sim = Sim.init(testing.allocator, 1.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = { captures = 0, action_ok = 0, source_ok = 0 }
+        \\function t.on_scene_enter(ev) mana.capture_input("jump") end
+        \\function t.on_input_captured(ev)
+        \\  t.captures = t.captures + 1
+        \\  if ev.action == "jump" then t.action_ok = 1 end
+        \\  if ev.source == "pad_south" then t.source_ok = 1 end
+        \\end
+        \\return t
+    );
+    sim.enterScene("main");
+
+    var pad = platform.GamepadButtonSet.initEmpty();
+    pad.insert(.south);
+    sim.setInput(.{ .pad_buttons = pad });
+    try sim.tick(); // on_scene_enter arms "jump"; the south press edge is captured
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("captures").?);
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("action_ok").?);
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("source_ok").?);
+
+    // One-shot: the button held into the next tick is not a fresh press edge, and
+    // capture already disarmed — no second delivery.
+    try sim.tick();
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("captures").?);
 }

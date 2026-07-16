@@ -71,6 +71,10 @@ const HandlerKey = enum {
     /// Device-agnostic action edges (ADR 0040 §2), diffed and dispatched exactly like
     /// `on_key` but keyed by content action name; its own circuit-breaker slot (§9).
     on_action,
+    /// Capture-mode delivery (ADR 0041 §1): fires once per armed capture, on the
+    /// first qualifying physical press edge (a key or gamepad-button press);
+    /// its own circuit-breaker slot (§9).
+    on_input_captured,
     /// UI input events (ADR 0039): each is a distinct circuit-breaker slot (§9), so a
     /// broken `on_click` never disables `on_focus`/`on_activate` and vice versa.
     on_click,
@@ -124,6 +128,16 @@ const LuaRuntime = struct {
     /// runtime tears down.
     lua_timers: std.ArrayList(*LuaTimerRecord) = .empty,
 
+    /// The action name currently armed for capture (ADR 0041 §1), gpa-owned (a
+    /// dupe of whatever `mana.capture_input` was called with), or null when
+    /// disarmed. Set via `armCapture` (reached through the host seam); peeked and
+    /// cleared by `ui_dispatch.UiInput.keyEdge`/`padButtonEdge` on the next
+    /// qualifying physical press edge, or cleared without binding by
+    /// `mana.cancel_capture` (`clearCapture`). UI-layer state, hash-excluded (ADR
+    /// 0041 §5) — never part of `World.stateHash`, exactly like the focus/hit-test
+    /// state `ui_dispatch` already carries.
+    capture_armed: ?[]const u8 = null,
+
     /// One scheduled Lua timer: the callback reference plus the wheel handle it maps
     /// to (for `mana.cancel`) and whether it repeats (a one-shot retires itself when
     /// it fires). The wheel closure's `context` is a `*LuaTimerRecord`.
@@ -143,7 +157,34 @@ const LuaRuntime = struct {
         for (self.lua_timers.items) |rec| gpa.destroy(rec);
         self.lua_timers.deinit(gpa);
         if (self.state) |*s| s.deinit();
+        self.clearCapture(gpa);
         self.* = .{};
+    }
+
+    /// Arm capture for `action` (ADR 0041 §1 `mana.capture_input`, reached through
+    /// `HostCtx.captureInput`): dupe it into engine-owned memory so it outlives this
+    /// call across ticks. Idempotent — the dupe happens *before* any previously
+    /// armed target is freed, so an allocation failure leaves the previous arm
+    /// intact rather than silently disarming.
+    pub fn armCapture(self: *LuaRuntime, gpa: Allocator, action: []const u8) Allocator.Error!void {
+        const dup = try gpa.dupe(u8, action);
+        self.clearCapture(gpa);
+        self.capture_armed = dup;
+    }
+
+    /// Disarm capture (ADR 0041 §1): free the armed buffer, if any, and clear it.
+    /// Used both by `mana.cancel_capture` (disarm without binding) and by
+    /// `ui_dispatch` right after a qualifying edge delivers `on_input_captured`
+    /// (the one-shot consume). A no-op when nothing is armed.
+    pub fn clearCapture(self: *LuaRuntime, gpa: Allocator) void {
+        if (self.capture_armed) |a| gpa.free(a);
+        self.capture_armed = null;
+    }
+
+    /// The action currently armed for capture, or null when disarmed (ADR 0041
+    /// §1) — `ui_dispatch` peeks this on every qualifying physical press edge.
+    pub fn armedCapture(self: *const LuaRuntime) ?[]const u8 {
+        return self.capture_armed;
     }
 
     /// Release a timer record's reference, unlink it, and free it (ADR 0019). Called
@@ -199,11 +240,15 @@ const LuaRuntime = struct {
     /// runtime. Errors propagate from `State.init`/`loadHandlerTable` (bad Lua, a
     /// non-table return, or allocation failure). A successful (re)load resets
     /// every handler key's circuit-breaker state (§9): the old script's failures
-    /// never carry over to the newly loaded one, hot-reloaded or not.
+    /// never carry over to the newly loaded one, hot-reloaded or not. Also disarms
+    /// any pending capture (ADR 0041 §1): a fresh handler table may not even define
+    /// `on_input_captured` the same way, so an arm from the *previous* script must
+    /// not silently deliver into the new one.
     pub fn loadHandlers(self: *LuaRuntime, gpa: Allocator, source: [:0]const u8) !void {
         if (self.state == null) self.state = try script.lua.State.init(gpa);
         try self.state.?.loadHandlerTable(source);
         self.breakers = .initFill(.{});
+        self.clearCapture(gpa);
     }
 
     /// Engine-side backing for the host seam (ADR 0015): the concrete vtable the
@@ -406,6 +451,20 @@ const LuaRuntime = struct {
             const map = hc.action_map orelse return core.Vec2.zero;
             return action_map.axis2d(map.*, hc.input, name);
         }
+        /// `mana.capture_input` (ADR 0041 §1): arm `hc.runtime`'s capture state.
+        /// An allocation failure (duping `name`) records `oom`, aborting the tick —
+        /// never surfaced to the script (OOM is never a content bug).
+        fn captureInput(ctx: *anyopaque, name: []const u8) void {
+            const hc = cast(ctx);
+            hc.runtime.armCapture(hc.gpa, name) catch {
+                hc.oom = true;
+            };
+        }
+        /// `mana.cancel_capture` (ADR 0041 §1): disarm without binding.
+        fn cancelCapture(ctx: *anyopaque) void {
+            const hc = cast(ctx);
+            hc.runtime.clearCapture(hc.gpa);
+        }
         const vtable: script.lua.Host.VTable = .{
             .is_valid = isValid,
             .position = position,
@@ -426,6 +485,8 @@ const LuaRuntime = struct {
             .action_down = actionDown,
             .action_axis = actionAxis,
             .action_vector = actionVector,
+            .capture_input = captureInput,
+            .cancel_capture = cancelCapture,
         };
     };
 
@@ -542,6 +603,31 @@ const LuaRuntime = struct {
         if (outcome == .errored) try dc.commands.rollback(dc.world, mark);
         if (host_ctx.oom) return error.OutOfMemory;
         self.report(.on_action, s, outcome);
+    }
+
+    /// Dispatch a capture delivery `on_input_captured(ev = { action, source })`
+    /// (ADR 0041 §1) host-live: `action_name` is the action capture was armed for,
+    /// `source_name` the device-neutral binding-descriptor string naming the
+    /// physical input that qualified (see `ui_dispatch.zig` for how the two source
+    /// vocabularies — bare key names, `"pad_"`-prefixed button names — are built).
+    /// Mirrors `dispatchAction` exactly — same host-install, §9 command-buffer
+    /// transaction, and circuit-breaker discipline. A no-op if no script is loaded,
+    /// the handler is absent, or its breaker tripped.
+    pub fn dispatchInputCaptured(self: *LuaRuntime, action_name: []const u8, source_name: []const u8, dc: DispatchCtx) Allocator.Error!void {
+        const s = if (self.state) |*st| st else return;
+        if (self.isDisabled(.on_input_captured)) return;
+
+        const z = tracy.zone(@src(), "script.on_input_captured");
+        defer z.end();
+        var host_ctx: HostCtx = .init(dc, self);
+        s.setHost(.{ .ctx = &host_ctx, .vtable = &HostCtx.vtable });
+        defer s.setHost(null);
+
+        const mark = dc.commands.mark();
+        const outcome = s.dispatchInputCaptured(action_name, source_name);
+        if (outcome == .errored) try dc.commands.rollback(dc.world, mark);
+        if (host_ctx.oom) return error.OutOfMemory;
+        self.report(.on_input_captured, s, outcome);
     }
 
     /// Dispatch a UI pointer click `on_click(ev = { widget, id, x, y })` (ADR 0039 §1)
@@ -722,6 +808,23 @@ const NoopRuntime = struct {
 
     pub fn dispatchAction(self: *NoopRuntime, action_name: []const u8, pressed: bool, dc: DispatchCtx) Allocator.Error!void {
         _ = .{ self, action_name, pressed, dc };
+    }
+
+    /// Always disarmed under the default (no-Lua) build: there is no `mana` surface
+    /// to arm capture from, so `ui_dispatch` always sees "nothing armed" and never
+    /// claims an edge for capture — every existing (no-Lua) build behaves exactly
+    /// as before ADR 0041 existed.
+    pub fn armedCapture(self: *const NoopRuntime) ?[]const u8 {
+        _ = self;
+        return null;
+    }
+
+    pub fn clearCapture(self: *NoopRuntime, gpa: Allocator) void {
+        _ = .{ self, gpa };
+    }
+
+    pub fn dispatchInputCaptured(self: *NoopRuntime, action_name: []const u8, source_name: []const u8, dc: DispatchCtx) Allocator.Error!void {
+        _ = .{ self, action_name, source_name, dc };
     }
 
     pub fn dispatchClick(self: *NoopRuntime, index: u32, generation: u32, id: []const u8, x: f32, y: f32, dc: DispatchCtx) Allocator.Error!void {
