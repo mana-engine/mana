@@ -34,6 +34,11 @@ const watch_poll_ms: i64 = 100;
 /// Pixel dimensions for `--render-svg`/`--filmstrip` (ADR 0029) — matches `runRender`'s
 /// PNG size so an SVG and a PNG render of the same scene are directly comparable.
 const svg_view_size: u32 = 512;
+/// Package-relative path to the v1 user action-binding override (ADR 0041 §2.1
+/// accepted Option B: package-local `save/`, mirroring #135's `save/settings.zon`;
+/// zero new path code — a package-relative join like every other content path. Moving
+/// this to an OS config dir is the deferred, isolated follow-up #240.
+const action_override_rel = "save/input.zon";
 /// Default tick count for `--filmstrip` when `--ticks` is not given.
 const filmstrip_default_ticks: u32 = 60;
 
@@ -219,21 +224,85 @@ fn loadPackageScript(io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest
     try sim.loadScript(src);
 }
 
-/// Load a package's action-binding table (ADR 0040 §3; issue #216) if the manifest
-/// declares an `input` path, reading `<pkg>/<input>` (package layout, ADR 0038) and
-/// parsing it via `engine.action_map.parse`. Returns an owned `ActionMap` the caller
-/// borrows onto `Sim.action_map` (mirroring how the scene's `tilemap` is borrowed), or
-/// null when the manifest declares no `input` (the package binds no actions). The
-/// caller owns the result and must `engine.action_map.free` it *after* the `Sim` that
-/// borrows it is torn down. Errors: file-read failures, plus `engine.action_map.parse`'s
-/// `ParseZon`/`Unbound`/`WrongTypedSource`/`OutOfMemory`.
-fn loadActionMap(io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest) !?engine.ActionMap {
-    const rel = manifest.input orelse return null;
-    const path = try std.fs.path.join(gpa, &.{ pkg, rel });
-    defer gpa.free(path);
-    const src = try Io.Dir.cwd().readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0);
-    defer gpa.free(src);
-    return try engine.action_map.parse(gpa, src);
+/// Load a package's *effective* action-binding table: the package `input.zon` (ADR
+/// 0040 §3, issue #216) if the manifest declares an `input` path, with a v1 user
+/// override (ADR 0041 §2, issue #236) merged OVER it when one exists at the
+/// package-local `action_override_rel` path (ADR 0041 §2.1's accepted Option B).
+/// Returns the owned, effective `ActionMap` the caller borrows onto `Sim.action_map`
+/// (mirroring how the scene's `tilemap` is borrowed), or null when the package has
+/// neither a declared `input` nor a usable override.
+///
+/// **The package map is load-bearing; the override is best-effort.** A declared
+/// `.input` that fails to read or parse still fails this load (unchanged from before
+/// #236) — that is shipped content, expected to be well-formed. The *override*,
+/// by contrast, is player-editable/engine-written state: if `action_override_rel` is
+/// absent, behavior is exactly as before #236 (package map only, no log — "absent" is
+/// not an error). If it is present but unreadable, fails to parse, or fails to
+/// `engine.action_map.merge` (an unknown action, a `type` mismatch, or an analog-rule
+/// violation), the failure is logged to `out` and this returns the package-only map
+/// unchanged — never crashing startup on a bad override (ADR 0041 §3's last-good-wins
+/// spirit; the full watch/reload retry loop is phase 3, #237, this is only the
+/// startup half).
+///
+/// The caller owns the result and must `engine.action_map.free` it *after* the `Sim`
+/// that borrows it is torn down. Errors: file-read failures for the *package* map,
+/// plus `engine.action_map.parse`'s `ParseZon`/`Unbound`/`WrongTypedSource`/
+/// `OutOfMemory` — again, for the package map only.
+fn loadActionMap(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, manifest: Manifest) !?engine.ActionMap {
+    var pkg_map: ?engine.ActionMap = null;
+    if (manifest.input) |rel| {
+        const path = try std.fs.path.join(gpa, &.{ pkg, rel });
+        defer gpa.free(path);
+        const src = try Io.Dir.cwd().readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0);
+        defer gpa.free(src);
+        pkg_map = try engine.action_map.parse(gpa, src);
+    }
+    errdefer if (pkg_map) |m| engine.action_map.free(gpa, m);
+
+    // The override is best-effort (a bad one falls back to the package-only map,
+    // last-good spirit ADR 0041 §3) — but only for *benign* failures. A resource
+    // error like `OutOfMemory` is a real bug, not a malformed override, so it
+    // propagates rather than being masked as a "using package input only" log line —
+    // the same benign-case/`else => return err` split `watchDir` (:1011) uses.
+    const override_path = try std.fs.path.join(gpa, &.{ pkg, action_override_rel });
+    defer gpa.free(override_path);
+    const override_src = Io.Dir.cwd().readFileAllocOptions(io, override_path, gpa, .unlimited, .of(u8), 0) catch |err| switch (err) {
+        // No override file at all ⇒ package map only, silently (the common case).
+        error.FileNotFound => return pkg_map,
+        else => return err,
+    };
+    defer gpa.free(override_src);
+
+    const override_map = engine.action_map.parse(gpa, override_src) catch |err| switch (err) {
+        // A malformed/invalid override file: log and fall back to the package map.
+        error.ParseZon, error.Unbound, error.WrongTypedSource => {
+            try logOverrideFallback(out, override_path, "failed to parse", err);
+            return pkg_map;
+        },
+        error.OutOfMemory => return err,
+    };
+    defer engine.action_map.free(gpa, override_map);
+
+    const base = pkg_map orelse engine.ActionMap{};
+    const effective = engine.action_map.merge(gpa, base, override_map) catch |err| switch (err) {
+        // The override parses but doesn't apply cleanly over the package map: log and
+        // fall back (an unknown action, a `type` mismatch, or an analog-rule violation).
+        error.UnknownAction, error.TypeMismatch, error.Unbound, error.WrongTypedSource => {
+            try logOverrideFallback(out, override_path, "rejected", err);
+            return pkg_map;
+        },
+        error.OutOfMemory => return err,
+    };
+    if (pkg_map) |m| engine.action_map.free(gpa, m);
+    return effective;
+}
+
+/// Log a benign user-override fallback (ADR 0041 §3): the override at `path` was
+/// `reason` (`err`), so the runner keeps the package-only map. Factored out so the
+/// two fallback sites in `loadActionMap` share one message shape.
+fn logOverrideFallback(out: *Io.Writer, path: []const u8, reason: []const u8, err: anyerror) !void {
+    try out.print("mana: override '{s}' {s} ({s}) — ignoring, using package input only\n", .{ path, reason, @errorName(err) });
+    try out.flush();
 }
 
 /// Refuse a package that needs a newer scripting API than this build provides.
@@ -362,7 +431,7 @@ fn runRenderPlayFrame(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, 
     // Action-binding table (ADR 0040 §3; issue #216): parsed before the Sim and freed
     // after it (LIFO defers), so the `sim.action_map` borrow below never dangles —
     // exactly how the scene's `tilemap` is scoped. Null when the manifest has no `input`.
-    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+    const action_map_opt = try loadActionMap(out, io, gpa, pkg, manifest);
     defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
 
     var sim = engine.Sim.init(gpa, core.time.default_dt);
@@ -484,7 +553,7 @@ fn runFilmstrip(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, dir: [
     // Action-binding table (ADR 0040 §3; issue #216): parsed before the Sim and freed
     // after it (LIFO defers), so the `sim.action_map` borrow below never dangles —
     // exactly how the scene's `tilemap` is scoped. Null when the manifest has no `input`.
-    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+    const action_map_opt = try loadActionMap(out, io, gpa, pkg, manifest);
     defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
 
     var sim = engine.Sim.init(gpa, core.time.default_dt);
@@ -580,7 +649,7 @@ fn runScenario(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8, scenari
     // Action-binding table (ADR 0040 §3; issue #216): parsed before the Sim and freed
     // after it (LIFO defers), so the `sim.action_map` borrow below never dangles —
     // exactly how the scene's `tilemap` is scoped. Null when the manifest has no `input`.
-    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+    const action_map_opt = try loadActionMap(out, io, gpa, pkg, manifest);
     defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
 
     var sim = engine.Sim.init(gpa, core.time.default_dt);
@@ -671,7 +740,7 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     // Action-binding table (ADR 0040 §3; issue #216): parsed before the Sim and freed
     // after it (LIFO defers), so the `sim.action_map` borrow below never dangles —
     // exactly how the scene's `tilemap` is scoped. Null when the manifest has no `input`.
-    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+    const action_map_opt = try loadActionMap(out, io, gpa, pkg, manifest);
     defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
 
     var sim = engine.Sim.init(gpa, core.time.default_dt);
@@ -904,7 +973,7 @@ fn runOnce(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     // Action-binding table (ADR 0040 §3; issue #216): parsed before the Sim and freed
     // after it (LIFO defers), so the `sim.action_map` borrow below never dangles —
     // exactly how the scene's `tilemap` is scoped. Null when the manifest has no `input`.
-    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+    const action_map_opt = try loadActionMap(out, io, gpa, pkg, manifest);
     defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
 
     var sim = engine.Sim.init(gpa, core.time.default_dt);
@@ -1083,8 +1152,12 @@ test "load path: a manifest with `.input` loads and borrows a populated Sim.acti
     });
     const manifest: Manifest = .{ .name = "t", .version = "0", .entry_scene = "s.zon", .input = "input.zon" };
 
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+    const out = &out_w;
+
     // The same load helper the five run paths call, then the same borrow onto a Sim.
-    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+    const action_map_opt = try loadActionMap(out, io, gpa, pkg, manifest);
     defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
     try testing.expect(action_map_opt != null);
 
@@ -1107,9 +1180,131 @@ test "load path: a manifest with no `.input` leaves Sim.action_map null (#216)" 
     defer gpa.free(pkg);
 
     const manifest: Manifest = .{ .name = "t", .version = "0", .entry_scene = "s.zon" };
-    const action_map_opt = try loadActionMap(io, gpa, pkg, manifest);
+
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+    const out = &out_w;
+
+    const action_map_opt = try loadActionMap(out, io, gpa, pkg, manifest);
     defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
     try testing.expect(action_map_opt == null); // no `.input` ⇒ nothing loaded, Sim.action_map stays default null
+}
+
+test "load path: a present `save/input.zon` override merges over the package map (ADR 0041 §2, #236)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "input.zon",
+        .data =
+        \\.{
+        \\    .actions = .{
+        \\        .jump = .{ .type = .button, .keys = .{.space} },
+        \\        .pause = .{ .type = .button, .keys = .{.escape} },
+        \\    },
+        \\}
+        ,
+    });
+    try tmp.dir.createDirPath(io, "save");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "save/input.zon",
+        .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.enter} } } }
+        ,
+    });
+    const manifest: Manifest = .{ .name = "t", .version = "0", .entry_scene = "s.zon", .input = "input.zon" };
+
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+    const out = &out_w;
+
+    const action_map_opt = try loadActionMap(out, io, gpa, pkg, manifest);
+    defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
+    try testing.expect(action_map_opt != null);
+    const effective = action_map_opt.?;
+
+    const jump = effective.find("jump").?;
+    try testing.expectEqualSlices(engine.platform.Key, &.{.enter}, jump.keys); // override-wins, replaced wholesale
+    const pause = effective.find("pause").?;
+    try testing.expectEqualSlices(engine.platform.Key, &.{.escape}, pause.keys); // unlisted ⇒ package default
+}
+
+test "load path: a malformed `save/input.zon` override logs and falls back to the package-only map, not a crash (ADR 0041 §3)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "input.zon",
+        .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.space} } } }
+        ,
+    });
+    try tmp.dir.createDirPath(io, "save");
+    // An override naming an action the package never declares — a `merge` load error,
+    // not a parse error, exercising the `error.UnknownAction` fallback branch.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "save/input.zon",
+        .data =
+        \\.{ .actions = .{ .crouch = .{ .type = .button, .keys = .{.a} } } }
+        ,
+    });
+    const manifest: Manifest = .{ .name = "t", .version = "0", .entry_scene = "s.zon", .input = "input.zon" };
+
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+    const out = &out_w;
+
+    const action_map_opt = try loadActionMap(out, io, gpa, pkg, manifest);
+    defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
+    try testing.expect(action_map_opt != null);
+    const jump = action_map_opt.?.find("jump").?;
+    try testing.expectEqualSlices(engine.platform.Key, &.{.space}, jump.keys); // package-only, override ignored
+    try testing.expect(std.mem.indexOf(u8, out_w.buffered(), "rejected") != null); // logged, didn't crash
+}
+
+test "load path: a syntactically malformed `save/input.zon` override logs and falls back to the package-only map (ADR 0041 §3)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "input.zon",
+        .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.space} } } }
+        ,
+    });
+    try tmp.dir.createDirPath(io, "save");
+    // Broken ZON syntax (unterminated struct literal) — hits the separate `parse`
+    // fallback branch, distinct from the merge-rejection test above.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "save/input.zon",
+        .data =
+        \\.{ .actions = .{ .jump = .{ .type = .button, .keys = .{.enter}
+        ,
+    });
+    const manifest: Manifest = .{ .name = "t", .version = "0", .entry_scene = "s.zon", .input = "input.zon" };
+
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+    const out = &out_w;
+
+    const action_map_opt = try loadActionMap(out, io, gpa, pkg, manifest);
+    defer if (action_map_opt) |am| engine.action_map.free(gpa, am);
+    try testing.expect(action_map_opt != null);
+    const jump = action_map_opt.?.find("jump").?;
+    try testing.expectEqualSlices(engine.platform.Key, &.{.space}, jump.keys); // package-only, override ignored
+    try testing.expect(std.mem.indexOf(u8, out_w.buffered(), "failed to parse") != null); // logged, didn't crash
 }
 
 /// Count regular files ending in `ext` directly under `<pkg>/<subdir>` (test helper).

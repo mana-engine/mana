@@ -99,9 +99,11 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) Error!ActionMap {
 }
 
 /// Deep-copy a `RawAction`'s owned slices from `a` into freshly `gpa`-allocated ones
-/// (`a` itself may be arena-backed and about to be torn down). Plain-value fields
-/// (`type`, `pad_stick`, `pad_axis`, `pad_dpad`, `deadzone`) are copied by value.
-fn dupeAction(gpa: Allocator, a: RawAction) Allocator.Error!RawAction {
+/// (`a` itself may be arena-backed and about to be torn down, or borrowed from another
+/// `ActionMap` this one must not alias). Plain-value fields (`type`, `pad_stick`,
+/// `pad_axis`, `pad_dpad`, `deadzone`) are copied by value. `pub` so `action_map.zig`'s
+/// override-merge (ADR 0041 §2, #236) can reuse it to build a fresh owned merged map.
+pub fn dupeAction(gpa: Allocator, a: RawAction) Allocator.Error!RawAction {
     // Start from safe (default-empty/null) owned fields, so `data.free` on the
     // `errdefer` below is always valid no matter how far this got — it only ever
     // frees a field this function itself already allocated.
@@ -163,8 +165,10 @@ fn findField(zoir: Zoir, node: Zoir.Node.Index, field_name: []const u8) ?Zoir.No
 /// Reject a `RawAction` that binds a source belonging to another `type`
 /// (`error.WrongTypedSource`) or binds no source at all (`error.Unbound`). See
 /// `Error`'s doc comment for the exact rules. `pad_dpad` is `axis2d`-only (ADR 0040 §4
-/// amendment, #230), mirroring `pad_stick`/`keys_2d`.
-fn validate(a: RawAction) Error!void {
+/// amendment, #230), mirroring `pad_stick`/`keys_2d`. `pub` so `action_map.zig`'s
+/// override-merge (ADR 0041 §2, #236) can re-run the same one-way-analog-rule check
+/// on an override binding, rather than duplicating it.
+pub fn validate(a: RawAction) Error!void {
     const has_flat = a.keys.len != 0 or a.pad_buttons.len != 0;
     switch (a.type) {
         .button => {
