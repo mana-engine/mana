@@ -109,6 +109,7 @@ fn dupeAction(gpa: Allocator, a: RawAction) Allocator.Error!RawAction {
         .type = a.type,
         .pad_stick = a.pad_stick,
         .pad_axis = a.pad_axis,
+        .pad_dpad = a.pad_dpad,
         .deadzone = a.deadzone,
     };
     errdefer data.free(gpa, out);
@@ -161,22 +162,23 @@ fn findField(zoir: Zoir, node: Zoir.Node.Index, field_name: []const u8) ?Zoir.No
 
 /// Reject a `RawAction` that binds a source belonging to another `type`
 /// (`error.WrongTypedSource`) or binds no source at all (`error.Unbound`). See
-/// `Error`'s doc comment for the exact rules.
+/// `Error`'s doc comment for the exact rules. `pad_dpad` is `axis2d`-only (ADR 0040 §4
+/// amendment, #230), mirroring `pad_stick`/`keys_2d`.
 fn validate(a: RawAction) Error!void {
     const has_flat = a.keys.len != 0 or a.pad_buttons.len != 0;
     switch (a.type) {
         .button => {
-            if (a.pad_stick != null or a.pad_axis != null or a.keys_2d != null or a.keys_1d != null)
+            if (a.pad_stick != null or a.pad_axis != null or a.keys_2d != null or a.keys_1d != null or a.pad_dpad)
                 return error.WrongTypedSource;
             if (!has_flat) return error.Unbound;
         },
         .axis2d => {
             if (has_flat or a.pad_axis != null or a.keys_1d != null)
                 return error.WrongTypedSource;
-            if (a.pad_stick == null and a.keys_2d == null) return error.Unbound;
+            if (a.pad_stick == null and a.keys_2d == null and !a.pad_dpad) return error.Unbound;
         },
         .axis1d => {
-            if (has_flat or a.pad_stick != null or a.keys_2d != null)
+            if (has_flat or a.pad_stick != null or a.keys_2d != null or a.pad_dpad)
                 return error.WrongTypedSource;
             if (a.pad_axis == null and a.keys_1d == null) return error.Unbound;
         },
@@ -259,6 +261,34 @@ test "action_map: an analog source on a button action is WrongTypedSource" {
         \\}
     ;
     try testing.expectError(error.WrongTypedSource, parse(testing.allocator, src));
+}
+
+test "action_map: pad_dpad on a button action is WrongTypedSource" {
+    const src: [:0]const u8 =
+        \\.{
+        \\    .actions = .{
+        \\        .jump = .{ .type = .button, .keys = .{.space}, .pad_dpad = true },
+        \\    },
+        \\}
+    ;
+    try testing.expectError(error.WrongTypedSource, parse(testing.allocator, src));
+}
+
+test "action_map: an axis2d action bound to only pad_dpad is OK (not Unbound)" {
+    const src: [:0]const u8 =
+        \\.{
+        \\    .actions = .{
+        \\        .move = .{ .type = .axis2d, .pad_dpad = true },
+        \\    },
+        \\}
+    ;
+    const gpa = testing.allocator;
+    const map = try parse(gpa, src);
+    defer free(gpa, map);
+
+    const move = map.find("move").?;
+    try testing.expectEqual(ActionType.axis2d, move.type);
+    try testing.expect(move.pad_dpad);
 }
 
 test "action_map: a flat key list on an axis2d action is WrongTypedSource" {

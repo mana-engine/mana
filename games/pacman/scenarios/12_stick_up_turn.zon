@@ -16,12 +16,12 @@
 // its start row) and the flush stop at the row-6 wall (tick 40: x=-1, y=2.0). If the stick
 // ever steered pac differently from the key, these would diverge — that is the whole test.
 //
-// (The d-pad staircase step the issue also sketched — `11_gamepad_dpad_turn.zon` — is
-// deliberately NOT authored here: d-pad buttons are not bound to the `move` axis2d action
-// yet (the resolver has no d-pad→axis2d path; input.zon binds only the stick + keys), so an
-// injected d-pad trace would be ignored by `move` and its turn assertion would fail. That
-// step is deferred to the d-pad engine issue + ADR 0040 §4 amendment; slot 11 is reserved
-// for it. The left stick IS bound today, so it is what this device-agnostic proof exercises.)
+// (The d-pad staircase step the issue also sketched is now authored at
+// `11_gamepad_dpad_turn.zon` — issue #230 + the ADR 0040 §4 amendment landed the
+// resolver's `pad_dpad` composite and `input.zon`'s `.pad_dpad = true` binding, so slot 11
+// is filled. It asserts this same open-up-turn trajectory, driven by the d-pad instead of
+// the stick — the third device-agnostic proof alongside this file's stick trip and
+// `08_straight_through.zon`'s keyboard trip.)
 .{
     .steps = 40,
     .input_trace = .{
