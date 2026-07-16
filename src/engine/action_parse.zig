@@ -100,7 +100,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) Error!ActionMap {
 
 /// Deep-copy a `RawAction`'s owned slices from `a` into freshly `gpa`-allocated ones
 /// (`a` itself may be arena-backed and about to be torn down). Plain-value fields
-/// (`type`, `pad_stick`, `pad_axis`, `deadzone`) are copied by value.
+/// (`type`, `pad_stick`, `pad_axis`, `pad_dpad`, `deadzone`) are copied by value.
 fn dupeAction(gpa: Allocator, a: RawAction) Allocator.Error!RawAction {
     // Start from safe (default-empty/null) owned fields, so `data.free` on the
     // `errdefer` below is always valid no matter how far this got — it only ever
