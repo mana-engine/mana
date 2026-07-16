@@ -125,6 +125,19 @@ pub const Host = struct {
         /// #3). Zero vector for an unknown or wrong-typed action name, or when no Sim is
         /// dispatching. `name` is borrowed for the call only.
         action_vector: *const fn (ctx: *anyopaque, name: []const u8) core.Vec2,
+        /// Arm capture for `name` (`mana.capture_input`, ADR 0041 §1): the next
+        /// qualifying physical **press** edge (a key or gamepad-button press; analog
+        /// sources are v1-deferred, §1.1) is intercepted by the UI-input layer,
+        /// reported via `on_input_captured`, and consumed — it does not reach
+        /// gameplay `on_key`/`on_action` nor drive focus nav. Idempotent: arming
+        /// again before an edge arrives replaces the pending target. `name` is an
+        /// opaque content string (the action name, invariant #6) the engine copies;
+        /// borrowed for the call only. Touches no filesystem (ADR 0003 §7).
+        capture_input: *const fn (ctx: *anyopaque, name: []const u8) void,
+        /// Disarm capture without binding (`mana.cancel_capture`, ADR 0041 §1) — the
+        /// player backed out (Escape/Back, navigated away) before an edge qualified.
+        /// A no-op if nothing is armed.
+        cancel_capture: *const fn (ctx: *anyopaque) void,
     };
 
     /// Thin forwarders so callers read `host.position(h)` rather than threading
@@ -186,6 +199,12 @@ pub const Host = struct {
     pub fn actionVector(self: Host, name: []const u8) core.Vec2 {
         return self.vtable.action_vector(self.ctx, name);
     }
+    pub fn captureInput(self: Host, name: []const u8) void {
+        self.vtable.capture_input(self.ctx, name);
+    }
+    pub fn cancelCapture(self: Host) void {
+        self.vtable.cancel_capture(self.ctx);
+    }
 };
 
 const testing = @import("std").testing;
@@ -223,6 +242,9 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
         last_action_axis_name: []const u8 = "",
         vector_value: core.Vec2 = .{ .x = 0, .y = 0 },
         last_action_vector_name: []const u8 = "",
+        last_capture_name: []const u8 = "",
+        capture_calls: u32 = 0,
+        cancel_calls: u32 = 0,
 
         fn isValid(ctx: *anyopaque, handle: u64) bool {
             _ = handle;
@@ -314,6 +336,14 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
             self.last_action_vector_name = name;
             return self.vector_value;
         }
+        fn captureInput(ctx: *anyopaque, name: []const u8) void {
+            const self = fromOpaque(ctx);
+            self.last_capture_name = name;
+            self.capture_calls += 1;
+        }
+        fn cancelCapture(ctx: *anyopaque) void {
+            fromOpaque(ctx).cancel_calls += 1;
+        }
         fn fromOpaque(ctx: *anyopaque) *@This() {
             return @ptrCast(@alignCast(ctx));
         }
@@ -337,6 +367,8 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
             .action_down = actionDown,
             .action_axis = actionAxis,
             .action_vector = actionVector,
+            .capture_input = captureInput,
+            .cancel_capture = cancelCapture,
         };
     };
 
@@ -389,4 +421,10 @@ test "host: forwarders dispatch through the vtable to a fake ctx" {
     fake.vector_value = .{ .x = 0.5, .y = -0.25 };
     try testing.expect(host.actionVector("move").approxEql(.{ .x = 0.5, .y = -0.25 }, 1e-6));
     try testing.expectEqualStrings("move", fake.last_action_vector_name);
+
+    host.captureInput("jump");
+    try testing.expectEqualStrings("jump", fake.last_capture_name);
+    try testing.expectEqual(@as(u32, 1), fake.capture_calls);
+    host.cancelCapture();
+    try testing.expectEqual(@as(u32, 1), fake.cancel_calls);
 }

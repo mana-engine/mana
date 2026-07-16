@@ -99,3 +99,20 @@ deferred (see the last bullet below).
   (`src/engine/data_components.zig`, a registered dense-column store, Option B),
   never in `script`; `get`/`set` reach it through the host seam like every other
   live-Sim accessor.
+- **`capture_input`/`cancel_capture` (ADR 0041 §1, issue #235)** arm/disarm the
+  "press a key to bind it" primitive over the same host seam — `HostCtx.captureInput`
+  (`src/engine/script_runtime.zig`) dupes the action name into `LuaRuntime.
+  capture_armed` (gpa-owned, freed on disarm/`deinit`/a script hot-reload). The
+  *interception* is not a `mana`/`Host` member: `src/engine/ui_dispatch.zig`'s
+  `UiInput.keyEdge`/`padButtonEdge` peek `Runtime.armedCapture()` ahead of even
+  nav/activate, and on the first qualifying **press** edge (a key or gamepad-button
+  press — analog is v1-deferred) dispatch `on_input_captured({action, source})` via
+  `LuaRuntime.dispatchInputCaptured`/`lua.zig`'s `State.dispatchInputCaptured` (mirrors
+  `dispatchAction`'s two-string, no-`self` shape exactly) and clear the arm
+  (`Runtime.clearCapture`, one-shot). `source` is device-neutral: a bare key
+  `@tagName` (`"space"`, `"w"` — the same string `on_key` already uses), or
+  `"pad_" ++` a `platform.GamepadButton` `@tagName` (`"pad_south"`, `"pad_start"`,
+  `"pad_dpad_up"`) built at the call site since `GamepadButton` values are runtime,
+  not comptime. `NoopRuntime` mirrors `armedCapture`/`clearCapture`/
+  `dispatchInputCaptured` as inert no-ops so `ui_dispatch.zig` stays backend-agnostic
+  under a default (no-Lua) build.

@@ -16,6 +16,25 @@
 //! only whatever a handler *body* queues on the command buffer is gameplay state. Under
 //! a default (no-Lua) build `Runtime` is the inert `NoopRuntime`, so the focus math
 //! still runs (and stays testable) while every dispatch is a comptime no-op.
+//!
+//! **Capture mode (ADR 0041 §1, issue #235):** `keyEdge`/`padButtonEdge` also check
+//! whether `rt` has an action armed for capture (`mana.capture_input`) — one more
+//! "UI claims this edge first" rule, ahead of even nav/activate. When armed, the
+//! first qualifying **press** edge (a key or gamepad-button press; analog sources are
+//! v1-deferred, §1.1) fires `on_input_captured({action, source})` and disarms
+//! (one-shot), never reaching focus-nav/activate/gameplay. The armed-action flag lives
+//! on `Runtime` itself (`script_runtime.zig`'s `LuaRuntime.capture_armed`) rather than
+//! on `UiInput`: `mana.capture_input`/`cancel_capture` reach it through the existing
+//! host seam (`HostCtx.captureInput`/`cancelCapture`), and `keyEdge`/`padButtonEdge`
+//! already carry `rt` as a parameter to dispatch through — so no new plumbing crosses
+//! `ui_dispatch.zig` ↔ `script_runtime.zig` beyond the `Runtime` handle both already
+//! share. Hash-excluded exactly like focus/hit-test state (ADR 0041 §5).
+//!
+//! Past the ~500-line soft limit (CLAUDE.md) by a modest margin, same reasoning as
+//! `mana.zig`: this is `UiInput`'s complete dispatch surface plus a behavior test
+//! beside each entry point (CLAUDE.md's own testing bar), not accumulated cruft —
+//! splitting the capture tests into a separate file would scatter one small,
+//! cohesive dispatch-consumption contract across two places for no gain.
 
 const std = @import("std");
 const ui = @import("ui");
@@ -86,14 +105,25 @@ pub const UiInput = struct {
     }
 
     /// Route a keyboard **edge** (`key`, `pressed`) against the active screen (ADR 0039
-    /// §3). Only *press* edges are ever claimed; a release always returns `false`. While
-    /// a screen with a focusable widget is active: a `navDirection` key drives
-    /// `Focus.move` (firing `on_focus` on a change) and is consumed; an `isActivateKey`
-    /// fires `on_activate` on the focused widget and is consumed, but only when something
-    /// is focused (else it falls through). Every other key returns `false` and reaches
-    /// gameplay's `on_key` (ADR 0021) unchanged. Errors as `pointerPress`.
+    /// §3, ADR 0041 §1). Only *press* edges are ever claimed; a release always returns
+    /// `false`. **Capture takes priority over everything else**: while `rt` has an
+    /// action armed (ADR 0041 §1, `mana.capture_input`), this press edge — whatever key
+    /// it is, including one a screen would otherwise treat as nav/activate — is the
+    /// qualifying edge: it fires `on_input_captured` with the bare `@tagName` of `key`
+    /// as `source`, disarms (one-shot), and is consumed (never reaches `on_focus`/
+    /// `on_activate`/gameplay `on_key`). Otherwise, while a screen with a focusable
+    /// widget is active: a `navDirection` key drives `Focus.move` (firing `on_focus` on
+    /// a change) and is consumed; an `isActivateKey` fires `on_activate` on the focused
+    /// widget and is consumed, but only when something is focused (else it falls
+    /// through). Every other key returns `false` and reaches gameplay's `on_key` (ADR
+    /// 0021) unchanged. Errors as `pointerPress`.
     pub fn keyEdge(self: *UiInput, gpa: Allocator, rt: *Runtime, dc: DispatchCtx, key: platform.Key, pressed: bool) Allocator.Error!bool {
-        if (!pressed) return false; // §3: nav/activate ride the press edge only
+        if (!pressed) return false; // §3/ADR 0041 §1.1: nav/activate/capture ride the press edge only
+        if (rt.armedCapture()) |action| {
+            try rt.dispatchInputCaptured(action, @tagName(key), dc);
+            rt.clearCapture(gpa); // one-shot: the first qualifying edge disarms it
+            return true; // consumed ahead of nav/activate/gameplay (ADR 0041 §1)
+        }
         const screen = self.screen orelse return false;
         const placed = try ui.layout(gpa, screen, self.viewport);
         defer gpa.free(placed);
@@ -113,6 +143,31 @@ pub const UiInput = struct {
             return true;
         }
         return false; // an unclaimed key falls through to gameplay `on_key`
+    }
+
+    /// Route a gamepad-**button** press edge (`button`, `pressed`) against capture
+    /// (ADR 0041 §1, §1.1) — the pad-button-source symmetric counterpart of
+    /// `keyEdge`'s capture branch. Only a *press* edge is ever claimed; a release
+    /// always returns `false`. While `rt` has an action armed, this press is the
+    /// qualifying edge: it fires `on_input_captured` with `source` set to
+    /// `"pad_" ++ @tagName(button)` (e.g. `"pad_south"`, `"pad_start"`,
+    /// `"pad_dpad_up"` — the same vocabulary `input.zon`'s `pad_buttons` lists round-
+    /// trip against `platform.GamepadButton`), disarms (one-shot), and is consumed.
+    /// When disarmed this always returns `false`: a raw gamepad-button edge has no
+    /// nav/activate/gameplay meaning at this dispatch layer today (button *actions*
+    /// are diffed and dispatched separately via `on_action`, ADR 0040 §2) — the same
+    /// "nothing to claim ⇒ falls through as a no-op" shape `pointerPress` already has
+    /// for an unhit point. Errors as `keyEdge` (an OOM from the dispatched handler's
+    /// queued mutations).
+    pub fn padButtonEdge(self: *UiInput, gpa: Allocator, rt: *Runtime, dc: DispatchCtx, button: platform.GamepadButton, pressed: bool) Allocator.Error!bool {
+        _ = self; // capture is orthogonal to the active screen/focus state
+        if (!pressed) return false;
+        const action = rt.armedCapture() orelse return false;
+        var buf: [24]u8 = undefined;
+        const source = std.fmt.bufPrint(&buf, "pad_{s}", .{@tagName(button)}) catch unreachable; // fits: longest tag "right_shoulder" + "pad_" < 24
+        try rt.dispatchInputCaptured(action, source, dc);
+        rt.clearCapture(gpa);
+        return true;
     }
 
     /// Fire `on_focus` for the newly focused widget iff focus changed from `before`
@@ -208,6 +263,12 @@ test "ui_dispatch: focus navigation and the §3 consumption rule (no handlers, a
     // A press off any widget consumes nothing.
     input.clearScreen();
     try testing.expect(!try input.pointerPress(testing.allocator, &rt, dc, 10, 10));
+
+    // ADR 0041 §1 regression: with nothing armed for capture (the default, and the
+    // only reachable state with no `mana` surface to arm from), a gamepad-button
+    // edge — press or release — is always a no-op, any build.
+    try testing.expect(!try input.padButtonEdge(testing.allocator, &rt, dc, .south, true));
+    try testing.expect(!try input.padButtonEdge(testing.allocator, &rt, dc, .south, false));
 }
 
 test "ui_dispatch: input edges fire on_click/on_focus/on_activate with the right handle" {
@@ -262,4 +323,208 @@ test "ui_dispatch: input edges fire on_click/on_focus/on_activate with the right
     // Enter activates the focused widget: on_activate fires once.
     try testing.expect(try input.keyEdge(testing.allocator, &rt, dc, .enter, true));
     try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("activates").?);
+}
+
+// --- Capture mode (ADR 0041 §1, issue #235) ---------------------------------------
+
+/// Mirrors `Sim.tick`'s key-edge orchestration (ADR 0039 §3 / ADR 0021): route the
+/// edge through `UiInput` first; only when it consumes nothing does gameplay's
+/// `on_key` see it. Test-only glue so a capture test can honestly prove "a
+/// consumed edge never reaches on_key" rather than merely asserting `keyEdge`'s
+/// return value. Returns whether the UI consumed the edge (same as `keyEdge`).
+fn routeKey(input: *UiInput, gpa: Allocator, rt: *Runtime, dc: DispatchCtx, key: platform.Key, pressed: bool) !bool {
+    const consumed = try input.keyEdge(gpa, rt, dc, key, pressed);
+    if (!consumed) try rt.dispatchKey(@tagName(key), pressed, dc);
+    return consumed;
+}
+
+test "ui_dispatch: capture — armed via mana.capture_input, a key press edge fires on_input_captured and is consumed ahead of nav/activate/gameplay on_key" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    var commands: command.CommandBuffer = .{};
+    defer commands.deinit(testing.allocator);
+    var timers: timer.Timers = .{};
+    defer timers.deinit(testing.allocator);
+    var rng: core.Rng = core.Rng.init(0);
+    const dc: DispatchCtx = .{
+        .world = &world,
+        .commands = &commands,
+        .gpa = testing.allocator,
+        .now_seconds = 0,
+        .timers = &timers,
+        .rng = &rng,
+    };
+
+    var rt: Runtime = .{};
+    defer rt.deinit(testing.allocator);
+    try rt.loadHandlers(testing.allocator,
+        \\local t = { clicks = 0, captures = 0, action_ok = 0, source_ok = 0, key_presses = 0 }
+        \\function t.on_click(ev) t.clicks = t.clicks + 1; mana.capture_input("jump") end
+        \\function t.on_input_captured(ev)
+        \\  t.captures = t.captures + 1
+        \\  if ev.action == "jump" then t.action_ok = 1 end
+        \\  if ev.source == "w" then t.source_ok = 1 end
+        \\end
+        \\function t.on_key(ev) if ev.pressed then t.key_presses = t.key_presses + 1 end end
+        \\return t
+    );
+
+    var input: UiInput = .{};
+    input.setScreen(&two_button_row, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+
+    // A click on "a" arms capture for "jump" from inside its on_click handler — the
+    // real controls-screen shape (a "rebind" widget's click arms capture).
+    try testing.expect(try input.pointerPress(testing.allocator, &rt, dc, 10, 10));
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("clicks").?);
+
+    // A release edge never qualifies (ADR 0041 §1.1) — capture stays armed, nothing
+    // dispatches, and (since armed capture claims every press ahead of nav/activate/
+    // gameplay) a release is simply never claimed by anything at this layer either.
+    try testing.expect(!try routeKey(&input, testing.allocator, &rt, dc, .w, false));
+    try testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("captures").?);
+
+    // The next press edge — "w", which has no nav/activate meaning for this screen
+    // anyway — is the qualifying edge: on_input_captured fires with the right
+    // {action, source}, and on_key never sees it (consumed).
+    try testing.expect(try routeKey(&input, testing.allocator, &rt, dc, .w, true));
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("captures").?);
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("action_ok").?);
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("source_ok").?);
+    try testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("key_presses").?);
+
+    // Capture is one-shot: now disarmed, a further press falls through to gameplay
+    // on_key exactly as before capture existed.
+    try testing.expect(!try routeKey(&input, testing.allocator, &rt, dc, .a, true));
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("captures").?); // unchanged
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("key_presses").?);
+
+    // Capture also wins over a screen's own activate key: re-arm, then press Enter
+    // (normally isActivateKey) — it must be captured, not fire on_activate.
+    try testing.expect(try input.pointerPress(testing.allocator, &rt, dc, 10, 10)); // re-arm "jump"
+    try testing.expect(try routeKey(&input, testing.allocator, &rt, dc, .enter, true));
+    try testing.expectEqual(@as(i64, 2), rt.handlerFieldInt("captures").?);
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("key_presses").?); // unchanged: still consumed
+}
+
+test "ui_dispatch: capture — re-arming replaces the pending action, and mana.cancel_capture disarms without binding" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    var commands: command.CommandBuffer = .{};
+    defer commands.deinit(testing.allocator);
+    var timers: timer.Timers = .{};
+    defer timers.deinit(testing.allocator);
+    var rng: core.Rng = core.Rng.init(0);
+    const dc: DispatchCtx = .{
+        .world = &world,
+        .commands = &commands,
+        .gpa = testing.allocator,
+        .now_seconds = 0,
+        .timers = &timers,
+        .rng = &rng,
+    };
+
+    var rt: Runtime = .{};
+    defer rt.deinit(testing.allocator);
+    try rt.loadHandlers(testing.allocator,
+        \\local t = { captures = 0, saw_jump = 0, saw_walk = 0, key_presses = 0 }
+        \\function t.on_click(ev)
+        \\  if ev.id == "a" then mana.capture_input("jump") end
+        \\  if ev.id == "b" then mana.capture_input("walk") end
+        \\end
+        \\function t.on_input_captured(ev)
+        \\  t.captures = t.captures + 1
+        \\  if ev.action == "jump" then t.saw_jump = 1 end
+        \\  if ev.action == "walk" then t.saw_walk = 1 end
+        \\end
+        \\function t.on_key(ev) if ev.pressed then t.key_presses = t.key_presses + 1 end end
+        \\return t
+    );
+
+    var input: UiInput = .{};
+    input.setScreen(&two_button_row, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+
+    // Arm "jump" (click "a"), then re-arm "walk" (click "b") before any edge
+    // arrives: re-arming replaces the pending target, it does not queue both.
+    try testing.expect(try input.pointerPress(testing.allocator, &rt, dc, 10, 10)); // "a" ⇒ jump
+    try testing.expect(try input.pointerPress(testing.allocator, &rt, dc, 60, 10)); // "b" ⇒ walk
+    try testing.expect(try routeKey(&input, testing.allocator, &rt, dc, .d, true));
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("captures").?);
+    try testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("saw_jump").?);
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("saw_walk").?);
+
+    // Now exercise mana.cancel_capture: arm "jump" again, then load a script path
+    // that cancels instead of a key arriving — a subsequent press must fall
+    // straight through to gameplay on_key, never firing on_input_captured.
+    try rt.loadHandlers(testing.allocator,
+        \\local t = { captures = 0, key_presses = 0 }
+        \\function t.on_click(ev)
+        \\  if ev.id == "a" then mana.capture_input("jump") end
+        \\  if ev.id == "b" then mana.cancel_capture() end
+        \\end
+        \\function t.on_input_captured(ev) t.captures = t.captures + 1 end
+        \\function t.on_key(ev) if ev.pressed then t.key_presses = t.key_presses + 1 end end
+        \\return t
+    );
+    try testing.expect(try input.pointerPress(testing.allocator, &rt, dc, 10, 10)); // "a" ⇒ arm "jump"
+    try testing.expect(try input.pointerPress(testing.allocator, &rt, dc, 60, 10)); // "b" ⇒ cancel
+    try testing.expect(!try routeKey(&input, testing.allocator, &rt, dc, .s, true)); // falls through
+    try testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("captures").?);
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("key_presses").?);
+}
+
+test "ui_dispatch: capture — a gamepad-button press edge fires on_input_captured with a pad_-prefixed source" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    var commands: command.CommandBuffer = .{};
+    defer commands.deinit(testing.allocator);
+    var timers: timer.Timers = .{};
+    defer timers.deinit(testing.allocator);
+    var rng: core.Rng = core.Rng.init(0);
+    const dc: DispatchCtx = .{
+        .world = &world,
+        .commands = &commands,
+        .gpa = testing.allocator,
+        .now_seconds = 0,
+        .timers = &timers,
+        .rng = &rng,
+    };
+
+    var rt: Runtime = .{};
+    defer rt.deinit(testing.allocator);
+    try rt.loadHandlers(testing.allocator,
+        \\local t = { captures = 0, action_ok = 0, source_ok = 0 }
+        \\function t.on_click(ev) mana.capture_input("jump") end
+        \\function t.on_input_captured(ev)
+        \\  t.captures = t.captures + 1
+        \\  if ev.action == "jump" then t.action_ok = 1 end
+        \\  if ev.source == "pad_south" then t.source_ok = 1 end
+        \\end
+        \\return t
+    );
+
+    var input: UiInput = .{};
+    input.setScreen(&two_button_row, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try testing.expect(try input.pointerPress(testing.allocator, &rt, dc, 10, 10)); // arm "jump"
+
+    // A release edge never triggers capture.
+    try testing.expect(!try input.padButtonEdge(testing.allocator, &rt, dc, .south, false));
+    try testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("captures").?);
+
+    // The qualifying press edge fires on_input_captured with a pad_-prefixed source.
+    try testing.expect(try input.padButtonEdge(testing.allocator, &rt, dc, .south, true));
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("captures").?);
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("action_ok").?);
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("source_ok").?);
+
+    // Disarmed now: a further pad-button press claims nothing at this layer (raw
+    // pad-button edges have no nav/gameplay meaning here; named button *actions*
+    // are diffed and dispatched separately via on_action, ADR 0040 §2).
+    try testing.expect(!try input.padButtonEdge(testing.allocator, &rt, dc, .start, true));
+    try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("captures").?);
 }

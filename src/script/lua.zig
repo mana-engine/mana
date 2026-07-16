@@ -383,6 +383,26 @@ pub const State = struct {
         return self.invokeHandler(1);
     }
 
+    /// Dispatch a capture delivery `on_input_captured(ev)` (ADR 0041 §1) where
+    /// `ev = { action, source }`. `action` is the content action name capture was
+    /// armed for (`mana.capture_input`); `source` is the device-neutral binding-
+    /// descriptor string naming the physical input that qualified — a bare key
+    /// `@tagName` (`"space"`, `"w"`) or `"pad_" ++` a `GamepadButton` `@tagName`
+    /// (`"pad_south"`, `"pad_start"`), the same vocabulary `input.zon` binding lists
+    /// use (ADR 0041 §1.1). No `self` (input is global, like `on_key`/`on_action`).
+    /// A missing handler is a no-op; a handler error is caught and reported (§9).
+    /// Both strings are borrowed for the call.
+    pub fn dispatchInputCaptured(self: *State, action_name: []const u8, source_name: []const u8) DispatchOutcome {
+        if (!self.pushHandler("on_input_captured")) return .no_handler;
+        const l = self.lua;
+        l.newTable(); // arg 1: ev (no self — global input, like on_key/on_action)
+        _ = l.pushString(action_name);
+        l.setField(-2, "action");
+        _ = l.pushString(source_name);
+        l.setField(-2, "source");
+        return self.invokeHandler(1);
+    }
+
     /// Dispatch a UI pointer click `on_click(ev = { widget, id, x, y })` (ADR 0039 §1)
     /// where `widget` is the opaque widget handle (§2), `id` the hit widget's authored
     /// name (`""` when anonymous), and `x`/`y` the press point in screen pixels. No
