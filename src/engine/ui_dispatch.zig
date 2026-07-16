@@ -121,7 +121,12 @@ pub const UiInput = struct {
         if (!pressed) return false; // §3/ADR 0041 §1.1: nav/activate/capture ride the press edge only
         if (rt.armedCapture()) |action| {
             try rt.dispatchInputCaptured(action, @tagName(key), dc);
-            rt.clearCapture(gpa); // one-shot: the first qualifying edge disarms it
+            // One-shot: the first qualifying edge disarms it. Free with `dc.gpa` (the
+            // durable sim allocator `mana.capture_input`/`armCapture` duped into), NOT
+            // `gpa` — that parameter is the per-tick scratch arena used only for screen
+            // layout below; freeing gpa-owned memory through it would be a mismatched
+            // free (a crash under the debug allocator).
+            rt.clearCapture(dc.gpa);
             return true; // consumed ahead of nav/activate/gameplay (ADR 0041 §1)
         }
         const screen = self.screen orelse return false;
@@ -158,15 +163,27 @@ pub const UiInput = struct {
     /// are diffed and dispatched separately via `on_action`, ADR 0040 §2) — the same
     /// "nothing to claim ⇒ falls through as a no-op" shape `pointerPress` already has
     /// for an unhit point. Errors as `keyEdge` (an OOM from the dispatched handler's
-    /// queued mutations).
-    pub fn padButtonEdge(self: *UiInput, gpa: Allocator, rt: *Runtime, dc: DispatchCtx, button: platform.GamepadButton, pressed: bool) Allocator.Error!bool {
+    /// queued mutations). Unlike `keyEdge`/`pointerPress` this takes no scratch
+    /// allocator: capture lays out no screen, so there is nothing to allocate — the
+    /// armed-action buffer is freed with the durable `dc.gpa` it was duped into.
+    pub fn padButtonEdge(self: *UiInput, rt: *Runtime, dc: DispatchCtx, button: platform.GamepadButton, pressed: bool) Allocator.Error!bool {
         _ = self; // capture is orthogonal to the active screen/focus state
         if (!pressed) return false;
         const action = rt.armedCapture() orelse return false;
+        // The `pad_` prefix encodes the source *kind*: keys and pad buttons share one
+        // flat `source` string namespace, so a bare `@tagName` ("south") would collide
+        // with a key name and lose which device it came from. Keys stay bare (no
+        // translation — they already match `input.zon`'s `keys` enum literals); pad
+        // buttons get `pad_` so `"pad_south"` is unambiguously a button. NOTE for the
+        // phase-4 persistence driver (#238): it must **strip** this `pad_` prefix before
+        // writing the override `input.zon`, whose `pad_buttons` list holds bare enum
+        // literals (`.south`, not `"pad_south"`); keys need no such stripping.
         var buf: [24]u8 = undefined;
         const source = std.fmt.bufPrint(&buf, "pad_{s}", .{@tagName(button)}) catch unreachable; // fits: longest tag "right_shoulder" + "pad_" < 24
         try rt.dispatchInputCaptured(action, source, dc);
-        rt.clearCapture(gpa);
+        // One-shot: free with `dc.gpa` (the durable allocator `armCapture` duped into),
+        // never a scratch arena — see `keyEdge`'s clear for the same reasoning.
+        rt.clearCapture(dc.gpa);
         return true;
     }
 
@@ -267,8 +284,8 @@ test "ui_dispatch: focus navigation and the §3 consumption rule (no handlers, a
     // ADR 0041 §1 regression: with nothing armed for capture (the default, and the
     // only reachable state with no `mana` surface to arm from), a gamepad-button
     // edge — press or release — is always a no-op, any build.
-    try testing.expect(!try input.padButtonEdge(testing.allocator, &rt, dc, .south, true));
-    try testing.expect(!try input.padButtonEdge(testing.allocator, &rt, dc, .south, false));
+    try testing.expect(!try input.padButtonEdge(&rt, dc, .south, true));
+    try testing.expect(!try input.padButtonEdge(&rt, dc, .south, false));
 }
 
 test "ui_dispatch: input edges fire on_click/on_focus/on_activate with the right handle" {
@@ -513,11 +530,11 @@ test "ui_dispatch: capture — a gamepad-button press edge fires on_input_captur
     try testing.expect(try input.pointerPress(testing.allocator, &rt, dc, 10, 10)); // arm "jump"
 
     // A release edge never triggers capture.
-    try testing.expect(!try input.padButtonEdge(testing.allocator, &rt, dc, .south, false));
+    try testing.expect(!try input.padButtonEdge(&rt, dc, .south, false));
     try testing.expectEqual(@as(i64, 0), rt.handlerFieldInt("captures").?);
 
     // The qualifying press edge fires on_input_captured with a pad_-prefixed source.
-    try testing.expect(try input.padButtonEdge(testing.allocator, &rt, dc, .south, true));
+    try testing.expect(try input.padButtonEdge(&rt, dc, .south, true));
     try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("captures").?);
     try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("action_ok").?);
     try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("source_ok").?);
@@ -525,6 +542,6 @@ test "ui_dispatch: capture — a gamepad-button press edge fires on_input_captur
     // Disarmed now: a further pad-button press claims nothing at this layer (raw
     // pad-button edges have no nav/gameplay meaning here; named button *actions*
     // are diffed and dispatched separately via on_action, ADR 0040 §2).
-    try testing.expect(!try input.padButtonEdge(testing.allocator, &rt, dc, .start, true));
+    try testing.expect(!try input.padButtonEdge(&rt, dc, .start, true));
     try testing.expectEqual(@as(i64, 1), rt.handlerFieldInt("captures").?);
 }
