@@ -12,6 +12,11 @@ const build_options = @import("build_options");
 /// Placeholder marker verifying the module is wired into the build graph.
 pub const ready = core.ready;
 
+/// Backend-independent plain-data leaf types (see `types.zig`) — re-exported so a
+/// caller names `script.StrPair` whether or not `-Denable-lua` is set.
+pub const types = @import("types.zig");
+pub const StrPair = types.StrPair;
+
 /// True when the Lua 5.4 backend was compiled in (`-Denable-lua`).
 pub const lua_enabled = build_options.enable_lua;
 

@@ -44,6 +44,10 @@ pub const tilemap = @import("tilemap.zig");
 /// into an `ActionMap` a `Sim` borrows (`Sim.action_map`), mirroring `Tilemap`. Parsing
 /// and validation only — no resolver (issue #217), no `mana.*` script surface (#218).
 pub const action_map = @import("action_map.zig");
+/// The engine-side rebinding persistence driver (ADR 0041 §4; issue #238): reads the
+/// bindings a script accepted off its handler table and writes the user-override
+/// `input.zon` that `action_map.merge` layers over the package map.
+pub const input_override = @import("input_override.zig");
 pub const prototype = @import("prototype.zig");
 pub const render = @import("render.zig");
 pub const render_sprite = @import("render_sprite.zig");
@@ -108,6 +112,7 @@ test {
     _ = scene;
     _ = tilemap;
     _ = action_map;
+    _ = input_override;
     _ = render;
     _ = render_sprite;
     _ = render_svg;
