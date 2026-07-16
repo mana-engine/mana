@@ -336,15 +336,26 @@ than what is actually bound. This amendment adds the missing half:
   own write it merely re-derives what the script already held; after a *hand edit* of the
   override (which §2 explicitly keeps human-editable and §3 explicitly watches) it is what
   stops the script's now-stale set from clobbering that edit on the next rebind. The file
-  stays the source of truth (invariant #1); the process never becomes it.
+  stays the source of truth (invariant #1); the process never becomes it. **That protection
+  extends exactly as far as the seed does:** a hand edit outside the representable domain
+  (below) cannot be seeded, so re-seeding does not — and cannot — save it from the next
+  write. The mechanism is scoped to representable entries; the rest are reported.
 - **Accepted limitation: the seed is lossy for override entries capture could not have
-  produced.** The script's field is one source per action, so only a `button` action bound
-  to exactly one digital source round-trips. A hand-written override entry outside that
-  domain (two keys on one action, an analog source) is not seeded and is therefore
-  **dropped by a later whole-override write**. v1 capture cannot produce such an entry
-  (§1.1 defers analog), so this only bites an override hand-edited into a shape the remap
-  UI itself cannot express; the honest fix is a richer `bindings` shape, which no shipped
-  content needs yet.
+  produced — but it is never silent.** The script's field is one source per action, so only
+  a `button` action bound to exactly one digital source round-trips. A hand-written override
+  entry outside that domain (two keys on one action, an analog source) is not seeded and is
+  therefore **dropped by a later whole-override write** (it still *applies* — the merge is
+  not lossy — it just does not survive the next rebind). v1 capture cannot produce such an
+  entry (§1.1 defers analog), so this only bites an override hand-edited into a shape the
+  remap UI cannot express — but §2 keeps that file human-editable *by design* and §3 watches
+  it, so hand-editing is a sanctioned workflow, not a never-happens. **Every such entry is
+  therefore logged, naming the action and the consequence** (`seedBindings` reports them;
+  the runner prints them, the same benign-diagnostic treatment §3's rejected-override
+  fallback gets). This whole amendment exists because a loss was silent; a narrower silent
+  loss would repeat that in miniature. Note this limitation **strictly shrinks** the bug it
+  is carved out of: before the seam the whole-override write dropped *every* entry the
+  script did not hold — which was all of them, every session — so the residual is a proper
+  subset. The honest fix is a richer `bindings` shape, which no shipped content needs yet.
 - **Last-good-wins applies to the seed too** (§3): a malformed override leaves the
   script's current set alone rather than telling it the player's rebinds are gone — which
   would invite the next write to make that true.

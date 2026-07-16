@@ -258,6 +258,9 @@ fn buildAction(gpa: Allocator, source: []const u8) BuildError!RawAction {
 /// **Never bumps `revision_field`.** A seed is the engine telling the script what is
 /// already persisted, not a proposal to persist — so it provokes no write, and re-seeding
 /// after a reload cannot loop against the watcher that observed the driver's own write.
+/// That also makes re-seeding safe to do on every reload, which is what keeps a *hand
+/// edit* of the override from being clobbered by the script's otherwise-stale set — for
+/// the entries this can represent; see the lossiness note below for the ones it cannot.
 ///
 /// `override` is the *override* map (`save/input.zon` parsed), **not** the effective
 /// merged map: what the script holds is what the driver writes back, and writing the
@@ -266,19 +269,56 @@ fn buildAction(gpa: Allocator, source: []const u8) BuildError!RawAction {
 /// therefore seeds an empty set — "the player has rebound nothing", which is exactly what
 /// the file says.
 ///
-/// **Lossy in one direction, by construction.** Only entries `buildOverrideMap` could
-/// have produced round-trip: a `button` action bound to exactly one digital source (see
-/// `overrideSources`). A hand-written override entry outside that domain (two keys on one
-/// action, an analog source) is not representable in the script's one-source-per-action
-/// contract, so it is **not seeded — and a later rebind's whole-override write drops it**.
-/// v1 capture cannot produce such an entry (ADR 0041 §1.1 defers analog), so this only
-/// bites an override hand-edited into a shape the remap UI itself cannot express.
+/// **Lossy in one direction, by construction — and it says so.** Only entries
+/// `buildOverrideMap` could have produced round-trip: a `button` action bound to exactly
+/// one digital source (see `overrideSources`). A hand-written override entry outside that
+/// domain (two keys on one action, an analog source) is not representable in the script's
+/// one-source-per-action contract, so it is **not seeded — and a later rebind's
+/// whole-override write drops it**. v1 capture cannot produce such an entry (ADR 0041
+/// §1.1 defers analog), so this only bites an override hand-edited into a shape the remap
+/// UI itself cannot express — but the override file is human-editable *by design* (ADR
+/// 0041 §2) and watched (§3), so hand-editing is a sanctioned workflow, not a
+/// never-happens. Every skip is therefore REPORTED (`Seed.skipped`) rather than swallowed:
+/// this whole issue (#247) exists because the loss was silent, and a narrower silent loss
+/// would just repeat that in miniature.
 ///
-/// `rt` and `override` are borrowed for the call. Errors: `OutOfMemory` only.
-pub fn seedBindings(gpa: Allocator, rt: *script_runtime.Runtime, override: ActionMap) Allocator.Error!void {
+/// `rt` and `override` are borrowed for the call — except `Seed.skipped`'s names, which
+/// borrow `override` and are valid only as long as it is. Errors: `OutOfMemory` only.
+pub fn seedBindings(gpa: Allocator, rt: *script_runtime.Runtime, override: ActionMap) Allocator.Error!Seed {
     const pairs = try overrideSources(gpa, override);
     defer freeSources(gpa, pairs);
     rt.setHandlerFieldStrMap(bindings_field, pairs);
+    return .{ .seeded = pairs.len, .skipped = try unseedableActions(gpa, override) };
+}
+
+/// What one `seedBindings` did — reported, not logged, so the caller owns the message
+/// (the `Reject` precedent above: a leaf that reports is the testable one, and the Zig
+/// test runner fails any test that emits an `.err` log).
+pub const Seed = struct {
+    /// How many of `override`'s entries reached the script's `bindings_field`.
+    seeded: usize,
+    /// The action names of the entries that did **not** — see `seedBindings`'s lossiness
+    /// note; a later whole-override write will drop these. Empty in every case v1 capture
+    /// can produce. The names **borrow the `override` map** passed to `seedBindings` (they
+    /// are not copies); the slice itself is `gpa`-owned — free it with `gpa.free`, and
+    /// never free the names.
+    skipped: []const []const u8 = &.{},
+};
+
+/// The action names in `map` that `overrideSources` cannot represent, in `map` order —
+/// the complement of what it returns, sharing `sourceOf` as the single definition of
+/// "representable" so the two can never disagree.
+///
+/// Names borrow `map`; the slice is `gpa`-owned (free with `gpa.free`). Errors:
+/// `OutOfMemory` only.
+pub fn unseedableActions(gpa: Allocator, map: ActionMap) Allocator.Error![]const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer names.deinit(gpa);
+    var buf: [64]u8 = undefined;
+    for (map.bindings) |b| {
+        if (sourceOf(&buf, b.action) == null) try names.append(gpa, b.name);
+    }
+    return names.toOwnedSlice(gpa);
 }
 
 /// `buildOverrideMap`'s inverse: an override `ActionMap` → the `action name → source
@@ -649,6 +689,30 @@ test "input override: overrideSources skips an entry no captured source could ha
     try testing.expectEqualStrings("d", back[0].value);
 }
 
+test "input override: a skipped entry is REPORTED, not silently dropped — the caller can name it" {
+    // #247 was a SILENT loss; a narrower silent loss would be the same bug in miniature.
+    // `seedBindings` reports every entry it could not hand the script, so the runner can
+    // tell the player which hand-edited binding a rebind is about to drop.
+    if (!script.lua_enabled) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const map = try action_map.parse(gpa,
+        \\.{ .actions = .{
+        \\    .fire = .{ .type = .button, .keys = .{.d} },
+        \\    .two_keys = .{ .type = .button, .keys = .{ .a, .s } },
+        \\} }
+    );
+    defer action_map.free(gpa, map);
+
+    const fx = try CaptureFixture.init(gpa, accepting_handlers);
+    defer fx.deinit(gpa);
+
+    const seed = try seedBindings(gpa, &fx.rt, map);
+    defer gpa.free(seed.skipped);
+    try testing.expectEqual(@as(usize, 1), seed.seeded);
+    try testing.expectEqual(@as(usize, 1), seed.skipped.len);
+    try testing.expectEqualStrings("two_keys", seed.skipped[0]); // named, not just counted
+}
+
 test "input override: an empty override seeds an empty set, not a missing one" {
     const gpa = testing.allocator;
     const back = try overrideSources(gpa, .{});
@@ -682,7 +746,7 @@ test "input override: SESSION 2 keeps session 1's rebind — seedBindings makes 
     defer gpa.free(src);
     const loaded = try action_map.parse(gpa, src);
     defer action_map.free(gpa, loaded);
-    try seedBindings(gpa, &fx.rt, loaded);
+    _ = try seedBindings(gpa, &fx.rt, loaded);
 
     // Seeding is not a proposal: the revision never moved, so a session that rebinds
     // nothing still writes nothing.
@@ -712,13 +776,15 @@ test "input override: seeding a package with no script, and a script that declar
     // No script at all (the default of every package that ships no Lua).
     var bare: script_runtime.Runtime = .{};
     defer bare.deinit(gpa);
-    try seedBindings(gpa, &bare, map);
+    const bare_seed = try seedBindings(gpa, &bare, map);
+    defer gpa.free(bare_seed.skipped);
 
     // A script with a handler table but no part in the bindings contract: it never reads
     // the seeded field and, with no revision field, never provokes a write.
     const fx = try CaptureFixture.init(gpa, "return { on_spawn = function() end }");
     defer fx.deinit(gpa);
-    try seedBindings(gpa, &fx.rt, map);
+    const seed = try seedBindings(gpa, &fx.rt, map);
+    defer gpa.free(seed.skipped);
     var writer: OverrideWriter = .init(&fx.rt);
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

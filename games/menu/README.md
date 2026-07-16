@@ -86,7 +86,10 @@ interpreter, no window:
   to drop the previous session's rebinds — and lets `bound_elsewhere` validate against
   LIVE bindings. The `DEFAULT_KEYS`/`DEFAULT_PAD` mirrors remain, and still need the
   drift test: the seed carries the *override*, never the package defaults (seeding the
-  merged map would freeze today's defaults into the player's file forever).
+  merged map would freeze today's defaults into the player's file forever). One residue,
+  logged rather than silent: a *hand-edited* override entry binding several sources to one
+  action can't fit the script's one-source-per-action field, so it applies but won't
+  survive the next rebind — the remap UI cannot produce such an entry.
 - **No live echo of the current binding.** A row shows its shipped default as static
   text; showing the *accepted* one needs a **script-backed `ui.Host`**. Text-valued
   bindings are not the gap — they already work (`ui.Value` has a `.text` variant,

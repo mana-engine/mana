@@ -532,7 +532,9 @@ test "menu controls acceptance: SESSION 2 keeps session 1's rebind, and validate
     defer gpa.free(override_src);
     const override = try engine.action_map.parse(gpa, override_src);
     defer engine.action_map.free(gpa, override);
-    try engine.input_override.seedBindings(gpa, &sim.script_runtime, override);
+    const seed = try engine.input_override.seedBindings(gpa, &sim.script_runtime, override);
+    defer gpa.free(seed.skipped);
+    try std.testing.expectEqual(@as(usize, 0), seed.skipped.len); // every capture-written entry round-trips
 
     var writer: engine.input_override.OverrideWriter = .init(&sim.script_runtime);
     // The seed is not a proposal: a session that rebinds nothing rewrites nothing.

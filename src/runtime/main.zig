@@ -462,19 +462,29 @@ fn persistBindings(
 /// held) or a human hand-edited it, in which case the script's set is now stale and its
 /// next write would clobber the edit. Re-reading is what makes the file, not the process,
 /// the source of truth (invariant #1). It cannot feed back into the watcher: the seed
-/// never bumps `revision_field`, so it provokes no write.
+/// never bumps `revision_field`, so it provokes no write. **Scope of that promise:** it
+/// holds for the entries the script's field can represent. A hand edit *outside* that
+/// domain cannot be seeded at all, so re-seeding does not — and cannot — protect it from
+/// the next write; it is reported instead (below), never silently dropped.
 ///
 /// Best-effort, exactly like the override half of `loadEffectiveActionMap`: an absent
 /// file seeds the empty set (the honest answer — the player has rebound nothing), and a
 /// malformed one leaves the script's current set alone (last-good-wins, ADR 0041 §3;
-/// `loadEffectiveActionMap` already logged why the map fell back). Errors:
+/// `loadEffectiveActionMap` already logged why the map fell back). An entry the script's
+/// one-source-per-action field cannot hold is logged to `out` (`logUnseedable`) — the
+/// same benign-diagnostic treatment `logOverrideFallback` gives a rejected override, and
+/// the point of #247: a loss the player cannot see is the bug. Errors:
 /// `error.OutOfMemory` only — every content-shaped failure is handled here.
-fn syncScriptBindings(io: Io, gpa: Allocator, path: []const u8, rt: *engine.script_runtime.Runtime) !void {
+fn syncScriptBindings(out: *Io.Writer, io: Io, gpa: Allocator, path: []const u8, rt: *engine.script_runtime.Runtime) !void {
     const src = Io.Dir.cwd().readFileAllocOptions(io, path, gpa, .unlimited, .of(u8), 0) catch |err| switch (err) {
         error.OutOfMemory => return err,
         // No override (the common case — only `games/menu` ships a `save/` at all), or
-        // an unreadable one: either way the script is told "nothing is overridden".
-        else => return engine.input_override.seedBindings(gpa, rt, .{}),
+        // an unreadable one: either way the script is told "nothing is overridden". An
+        // empty map has nothing to skip, so there is nothing to report.
+        else => {
+            _ = try engine.input_override.seedBindings(gpa, rt, .{});
+            return;
+        },
     };
     defer gpa.free(src);
 
@@ -487,7 +497,21 @@ fn syncScriptBindings(io: Io, gpa: Allocator, path: []const u8, rt: *engine.scri
     };
     defer engine.action_map.free(gpa, override);
 
-    try engine.input_override.seedBindings(gpa, rt, override);
+    const seed = try engine.input_override.seedBindings(gpa, rt, override);
+    defer gpa.free(seed.skipped); // the names borrow `override`; only the slice is ours
+    for (seed.skipped) |action| try logUnseedable(out, path, action);
+}
+
+/// Log a binding the script's `bindings` field cannot represent (ADR 0041 §4 amendment):
+/// it is live in the effective map — the merge is not lossy — but the script never sees
+/// it, so the next rebind's whole-override write will drop it. Named for the player, who
+/// hand-edited it and is the only one who can rewrite it in a shape that survives.
+fn logUnseedable(out: *Io.Writer, path: []const u8, action: []const u8) !void {
+    try out.print(
+        "mana: override '{s}': '{s}' binds more than one source (or an analog one), which the remap UI cannot express — it applies now, but the next rebind will drop it\n",
+        .{ path, action },
+    );
+    try out.flush();
 }
 
 /// Log a benign user-override fallback (ADR 0041 §3): the override at `path` was
@@ -966,7 +990,7 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
     // Hand the freshly loaded script the override that is on disk (ADR 0041 §4 amendment,
     // #247) — it cannot read the file itself, and it owns the WHOLE override the driver
     // writes back, so an un-seeded script silently drops earlier sessions' rebinds.
-    try syncScriptBindings(io, gpa, override_path, &sim.script_runtime);
+    try syncScriptBindings(out, io, gpa, override_path, &sim.script_runtime);
     // Rebinding persistence (ADR 0041 §4; issue #238), constructed AFTER the seed so the
     // revision it reads is the one the on-disk file reflects (seeding never bumps it). A
     // package that proposes no bindings never writes.
@@ -1124,10 +1148,13 @@ fn playLoop(out: *Io.Writer, io: Io, gpa: Allocator, pkg: []const u8) !void {
                 sim.action_map = action_map_state.borrow();
                 // Re-seed the script from the file the reload just read (ADR 0041 §4
                 // amendment, #247): after OUR write it re-derives what the script already
-                // holds, but after a hand-edit it is what stops the script's now-stale
-                // set from clobbering that edit on the next rebind. It bumps no revision,
-                // so this cannot feed back into the persist branch above.
-                try syncScriptBindings(io, gpa, override_path, &sim.script_runtime);
+                // holds, but after a hand-edit it is what stops the script's now-stale set
+                // from clobbering that edit on the next rebind — for the entries the
+                // script's field can represent; one it cannot is logged, not protected.
+                // It bumps no revision, so this cannot feed back into the persist branch
+                // above, which deliberately runs FIRST: the file is then always at least
+                // as new as the script's set when this re-seed reads it.
+                try syncScriptBindings(out, io, gpa, override_path, &sim.script_runtime);
             }
         }
 
@@ -1716,7 +1743,10 @@ test "play path: syncScriptBindings hands the script the override on disk, so a 
     defer rt.deinit(gpa);
     try rt.loadHandlers(gpa, "return { bindings = {}, bindings_revision = 0 }");
 
-    try syncScriptBindings(io, gpa, override_path, &rt);
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+    try syncScriptBindings(&out_w, io, gpa, override_path, &rt);
+    try testing.expectEqualStrings("", out_w.buffered()); // a clean seed says nothing
     const pairs = (try rt.handlerFieldStrMap(gpa, "bindings")).?;
     defer engine.script_runtime.Runtime.freeStrMap(gpa, pairs);
     try testing.expectEqual(@as(usize, 1), pairs.len);
@@ -1741,9 +1771,12 @@ test "play path: syncScriptBindings seeds an EMPTY set when no override exists, 
     defer rt.deinit(gpa);
     try rt.loadHandlers(gpa, "return { bindings = { jump = \"enter\" } }");
 
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+
     // No `save/` at all — every package but `games/menu` today. "Nothing is overridden"
     // is the honest seed, and it must not error.
-    try syncScriptBindings(io, gpa, override_path, &rt);
+    try syncScriptBindings(&out_w, io, gpa, override_path, &rt);
     const cleared = (try rt.handlerFieldStrMap(gpa, "bindings")).?;
     defer engine.script_runtime.Runtime.freeStrMap(gpa, cleared);
     try testing.expectEqual(@as(usize, 0), cleared.len);
@@ -1753,11 +1786,57 @@ test "play path: syncScriptBindings seeds an EMPTY set when no override exists, 
     try rt.loadHandlers(gpa, "return { bindings = { jump = \"enter\" } }");
     try tmp.dir.createDirPath(io, "save");
     try tmp.dir.writeFile(io, .{ .sub_path = "save/input.zon", .data = ".{ .actions = .{ .jump = " });
-    try syncScriptBindings(io, gpa, override_path, &rt);
+    try syncScriptBindings(&out_w, io, gpa, override_path, &rt);
     const kept = (try rt.handlerFieldStrMap(gpa, "bindings")).?;
     defer engine.script_runtime.Runtime.freeStrMap(gpa, kept);
     try testing.expectEqual(@as(usize, 1), kept.len);
     try testing.expectEqualStrings("enter", kept[0].value);
+}
+
+test "play path: an override entry the script's field cannot hold is LOGGED, not silently dropped (#247)" {
+    // The loss #247 is about was silent. This one is narrower — a hand-edited multi-source
+    // binding, which the remap UI cannot produce — but silence is what made the original a
+    // bug, so the runner names it. It still APPLIES (the merge is not lossy); what it will
+    // not survive is the next rebind's whole-override write.
+    if (engine.script_api_version == 0) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const pkg = try tmpPkgPath(gpa, &tmp);
+    defer gpa.free(pkg);
+
+    try tmp.dir.createDirPath(io, "save");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "save/input.zon",
+        .data =
+        \\.{ .actions = .{
+        \\    .jump = .{ .type = .button, .keys = .{.enter} },
+        \\    .fire = .{ .type = .button, .keys = .{ .a, .s } },
+        \\} }
+        ,
+    });
+    const override_path = try std.fs.path.join(gpa, &.{ pkg, action_override_rel });
+    defer gpa.free(override_path);
+
+    var rt: engine.script_runtime.Runtime = .{};
+    defer rt.deinit(gpa);
+    try rt.loadHandlers(gpa, "return { bindings = {}, bindings_revision = 0 }");
+
+    var out_buf: [512]u8 = undefined;
+    var out_w = Io.Writer.fixed(&out_buf);
+    try syncScriptBindings(&out_w, io, gpa, override_path, &rt);
+
+    const logged = out_w.buffered();
+    try testing.expect(std.mem.indexOf(u8, logged, "fire") != null); // the action is NAMED
+    try testing.expect(std.mem.indexOf(u8, logged, "drop") != null); // and the consequence
+    try testing.expect(std.mem.indexOf(u8, logged, "jump") == null); // the seedable one is quiet
+
+    // The representable entry still reached the script; only the other was skipped.
+    const pairs = (try rt.handlerFieldStrMap(gpa, "bindings")).?;
+    defer engine.script_runtime.Runtime.freeStrMap(gpa, pairs);
+    try testing.expectEqual(@as(usize, 1), pairs.len);
+    try testing.expectEqualStrings("jump", pairs[0].key);
 }
 
 test "load path: a malformed `save/input.zon` override logs and falls back to the package-only map, not a crash (ADR 0041 §3)" {
