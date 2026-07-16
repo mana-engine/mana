@@ -28,15 +28,18 @@
 
 local VOLUME_MIN, VOLUME_MAX = 0, 10
 
--- MIRRORS ../input.zon, which is the source of truth: `default_bindings` restates its
--- shipped binding per action (the same content-authored-defaults-kept-in-sync
--- convention `volume` keeps against save/settings.zon), because a script cannot read
--- either file and no engine seam hands it the loaded map. Exposed on the handler table
--- so tests/menu_acceptance.zig can assert the mirror against input.zon and catch drift.
--- Only ONE source per action here: capture yields one source, and an accepted rebind
--- REPLACES the action's whole binding (per-action replace, ADR 0041 §2), so a rebound
--- action loses its pad default — see games/menu/README.md.
-local DEFAULT_BINDINGS = { fire = "w", interact = "a", pause = "s" }
+-- MIRRORS ../input.zon, which is the source of truth: these restate its shipped
+-- bindings (the same content-authored-defaults-kept-in-sync convention `volume` keeps
+-- against save/settings.zon), because a script cannot read either file and no engine
+-- seam hands it the loaded map. Both are exposed on the handler table so
+-- tests/menu_acceptance.zig can assert the mirror against input.zon and catch drift.
+--
+-- EVERY shipped source must be mirrored, in BOTH vocabularies: an action there binds a
+-- key AND a gamepad button, and the duplicate check below is only as complete as this
+-- mirror. Mirroring keys alone silently accepts rebinding one action to another's pad
+-- button — one press would then fire both actions.
+local DEFAULT_KEYS = { fire = "w", interact = "a", pause = "s" }
+local DEFAULT_PAD = { fire = "pad_west", interact = "pad_north", pause = "pad_start" }
 
 -- The keys this menu's own UI layer claims (src/ui/focus.zig: arrows nav, enter/space
 -- activate) plus escape as back/cancel. Binding an action to one would leave the
@@ -65,27 +68,43 @@ local t = {
     bindings = {},
     bindings_revision = 0,
 
-    default_bindings = DEFAULT_BINDINGS, -- the mirror above, for the drift assertion
-    capture_action = "",                 -- "" = idle; else the action awaiting a press
-    accepted_bindings = 0,               -- accepted captures (UI echo / test observable)
-    rejected_bindings = 0,               -- reserved-or-duplicate captures, not recorded
+    -- The mirrors above, exposed for the drift assertion (both, or it cannot catch a
+    -- pad default drifting out of sync — the exact hole that shipped a broken
+    -- duplicate check the first time).
+    default_bindings = DEFAULT_KEYS,
+    default_pad_bindings = DEFAULT_PAD,
+
+    capture_action = "",   -- "" = idle; else the action awaiting a press
+    accepted_bindings = 0, -- accepted captures (UI echo / test observable)
+    rejected_bindings = 0, -- reserved-or-duplicate captures, not recorded
 }
 
 local function clampi(v, lo, hi)
     if v < lo then return lo elseif v > hi then return hi else return v end
 end
 
--- The binding `action` currently resolves to: the player's rebind if there is one, else
--- the ../input.zon default this file mirrors.
-local function binding_of(action)
-    return t.bindings[action] or DEFAULT_BINDINGS[action]
+-- Every source `action` currently fires on. A rebind REPLACES the action's whole
+-- binding (per-action replace, ADR 0041 §2), collapsing it to that one captured source;
+-- an action the player never rebound still fires on BOTH ../input.zon defaults — its
+-- key and its gamepad button.
+local function sources_of(action)
+    local rebound = t.bindings[action]
+    if rebound then return { rebound } end
+    return { DEFAULT_KEYS[action], DEFAULT_PAD[action] }
 end
 
--- Whether `source` is already bound to some action OTHER than `action` — rebinding an
--- action to the input it already has is a no-op, not a conflict.
+-- Whether `source` already fires some action OTHER than `action` — in which case
+-- accepting it would make one press fire both. Rebinding an action to an input it
+-- already has is a no-op, not a conflict. Checks every source of every other action, so
+-- a key capture is tested against keys and a pad capture against pad buttons (the two
+-- vocabularies never collide: only pad sources carry the "pad_" prefix).
 local function bound_elsewhere(action, source)
-    for other, _ in pairs(DEFAULT_BINDINGS) do
-        if other ~= action and binding_of(other) == source then return true end
+    for other, _ in pairs(DEFAULT_KEYS) do
+        if other ~= action then
+            for _, s in ipairs(sources_of(other)) do
+                if s == source then return true end
+            end
+        end
     end
     return false
 end

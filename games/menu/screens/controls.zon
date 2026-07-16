@@ -6,9 +6,11 @@
 //
 // Each row is a flex ROW of two labels: the action's caption and its binding. The
 // binding label shows the SHIPPED DEFAULT from ../input.zon as static text — a live
-// echo of the *current* binding would need a text-valued `bind` (ADR 0034 §4), and the
-// engine's host resolves a bound name to a numeric data component on the live world
-// only (`render_ui.worldHost`), which a string source like "pad_south" is not. The
+// echo of the *current* binding would need a script-backed `ui.Host`. Text-valued
+// bindings already work (`ui.Value` has a `.text` variant); what is missing is a host
+// exposing the script's handler table, since the only one installed
+// (`render_ui.worldHost`) resolves a bound name to a numeric data component on the live
+// world, which a string source like "pad_south" is not. The
 // accepted binding IS tracked, in scripts/rules.lua's `bindings` handler field (the
 // engine driver reads exactly that field to persist it, ADR 0041 §4) — see
 // games/menu/README.md's "Known gaps" for the missing display half.

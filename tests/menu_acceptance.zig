@@ -238,11 +238,18 @@ fn reloadEffective(gpa: Allocator, io: Io, dir: Io.Dir, pkg_map: engine.ActionMa
     return engine.action_map.merge(gpa, pkg_map, override);
 }
 
-test "menu controls: rules.lua's mirrored default bindings agree with the package input.zon" {
+test "menu controls: rules.lua's mirrored default bindings agree with the package input.zon, in BOTH source vocabularies" {
     // The one drift risk the remap content carries: a script cannot read `input.zon`
     // (ADR 0003 §7 removed io/os) and no engine seam hands it the loaded map, so
     // `rules.lua` MIRRORS the defaults to validate duplicates against. The file is the
     // source of truth; this test is what keeps the mirror honest.
+    //
+    // It asserts EVERY shipped source — key and pad button — because the duplicate check
+    // is only as complete as the mirror, and a mirror hole is invisible from the remap
+    // flow itself: an unmirrored source is simply never recognised as taken, so the
+    // rebind is accepted and the collision only surfaces later, in-game, as one press
+    // firing two actions. An earlier revision of this test checked `keys` alone and
+    // shipped exactly that bug.
     try requireLua();
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -258,16 +265,31 @@ test "menu controls: rules.lua's mirrored default bindings agree with the packag
     defer rt.deinit(gpa);
     try rt.loadHandlers(gpa, rules_src);
 
-    const mirrored = try rt.handlerFieldStrMap(gpa, "default_bindings") orelse return error.TestUnexpectedResult;
-    defer engine.script_runtime.Runtime.freeStrMap(gpa, mirrored);
-    try std.testing.expectEqual(pkg_map.bindings.len, mirrored.len);
-    for (mirrored) |p| {
+    const mirrored_keys = try rt.handlerFieldStrMap(gpa, "default_bindings") orelse return error.TestUnexpectedResult;
+    defer engine.script_runtime.Runtime.freeStrMap(gpa, mirrored_keys);
+    try std.testing.expectEqual(pkg_map.bindings.len, mirrored_keys.len);
+    for (mirrored_keys) |p| {
         const action = pkg_map.find(p.key) orelse return error.TestUnexpectedResult;
         // Every rebindable action is a digital `button` (v1 capture defers analog, ADR
-        // 0041 §1.1), and the mirror names its default KEY in the capture vocabulary.
+        // 0041 §1.1), and the mirror names its default KEY in the capture vocabulary:
+        // a bare `@tagName`, no prefix.
         try std.testing.expectEqual(engine.action_map.ActionType.button, action.type);
         try std.testing.expectEqual(@as(usize, 1), action.keys.len);
         try std.testing.expectEqualStrings(@tagName(action.keys[0]), p.value);
+    }
+
+    // The pad half of the same mirror: capture reports a button `pad_`-prefixed (ADR
+    // 0041 §1.1), so that is how `rules.lua` must hold it — and `input.zon` holds the
+    // bare enum literal. This asserts the prefixed round trip of every shipped button.
+    const mirrored_pads = try rt.handlerFieldStrMap(gpa, "default_pad_bindings") orelse return error.TestUnexpectedResult;
+    defer engine.script_runtime.Runtime.freeStrMap(gpa, mirrored_pads);
+    try std.testing.expectEqual(pkg_map.bindings.len, mirrored_pads.len);
+    for (mirrored_pads) |p| {
+        const action = pkg_map.find(p.key) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(usize, 1), action.pad_buttons.len);
+        var buf: [32]u8 = undefined;
+        const prefixed = try std.fmt.bufPrint(&buf, "pad_{s}", .{@tagName(action.pad_buttons[0])});
+        try std.testing.expectEqualStrings(prefixed, p.value);
     }
 }
 
@@ -404,19 +426,36 @@ test "menu controls acceptance: a captured PAD BUTTON persists and applies throu
     defer sim.deinit();
     try controlsSim(&sim, rules_src, &controls, &pkg_map);
     var writer: engine.input_override.OverrideWriter = .init(&sim.script_runtime);
+    const Outcome = engine.input_override.Outcome;
 
     // Focus the PAUSE row (third) and arm it, then press a pad button — the pad edge
     // stream `padButtonEdge` claims while capture is armed.
     for (0..3) |_| try tapKey(&sim, .down);
     try std.testing.expectEqual(&controls.root.children[2], sim.ui_input.focus.current.?);
     try tapKey(&sim, .enter);
+
+    // REJECT (pad duplicate) — NORTH is `interact`'s shipped pad button. The duplicate
+    // rule is per-source, not per-device: accepting this would make one press fire both
+    // `pause` and `interact` after the swap, which is exactly what a duplicate check is
+    // for. This case shipped broken once (the mirror listed key defaults only, so no pad
+    // source was ever seen as taken) — hence a behavioral assertion, not just the mirror
+    // one above.
+    try tapPad(&sim, .north);
+    try std.testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("rejected_bindings").?);
+    try std.testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("accepted_bindings").?);
+    try std.testing.expectEqual(Outcome.unchanged, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "input.zon", .{}));
+
+    // ACCEPT — SOUTH is bound to nothing, so it is a legitimate rebind.
+    try tapKey(&sim, .enter); // re-arm the still-focused PAUSE row
     try tapPad(&sim, .south);
+    try std.testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("accepted_bindings").?);
 
     const recorded = (try recordedBinding(gpa, &sim, "pause")).?;
     defer gpa.free(recorded);
     try std.testing.expectEqualStrings("pad_south", recorded); // prefixed, un-translated
 
-    try std.testing.expectEqual(engine.input_override.Outcome{ .written = 1 }, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
+    try std.testing.expectEqual(Outcome{ .written = 1 }, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
     owned_effective = try reloadEffective(gpa, io, tmp.dir, pkg_map);
     sim.action_map = &owned_effective.?;
 

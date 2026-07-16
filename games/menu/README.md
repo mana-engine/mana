@@ -86,10 +86,13 @@ interpreter, no window:
   in `games/menu` can fix this: it needs an engine seam (a `mana` binding poll, or the
   runner seeding the handler field from the loaded override) and its own ADR.
 - **No live echo of the current binding.** A row shows its shipped default as static
-  text; showing the *accepted* one needs a text-valued `bind` (ADR 0034 §4), and the
-  engine host resolves a bound name only to a numeric data component on the live world
-  (`render_ui.worldHost`). The accepted source IS tracked, in `rules.lua`'s `bindings`
-  field — only the display half is missing.
+  text; showing the *accepted* one needs a **script-backed `ui.Host`**. Text-valued
+  bindings are not the gap — they already work (`ui.Value` has a `.text` variant,
+  `Host.VTable.value` returns it, `src/ui/ui.zig:90`, tested at `:150`). The gap is that
+  the only installed host (`render_ui.worldHost`) reads numeric World data components,
+  and nothing exposes the script handler table as a `ui.Host`. That host would live in
+  `src/engine`, so content cannot supply it. The accepted source IS tracked, in
+  `rules.lua`'s `bindings` field — only the display half is missing.
 
 **Known gaps (not this issue's scope, #209):**
 - **No visual focus indicator.** `ui.Widget` has no "focused" styling hook, so a
