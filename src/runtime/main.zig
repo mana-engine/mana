@@ -399,13 +399,16 @@ const ActionMapState = struct {
 /// write the override file if the package script accepted a rebind since the last poll,
 /// and report what happened on `out`.
 ///
-/// **Nothing here is fatal to the session.** A save that fails means this rebind is not
-/// durable — not that the game stops: the live map still swapped (ADR 0041 §3), so the
-/// player keeps playing with the binding they just chose, and the next rebind retries.
-/// The most likely failure is `FileNotFound`, a package with no `save/` directory (the
-/// engine creates none; #240 moves this path to the OS config dir). `OutOfMemory` is a
-/// real resource failure, not a content error, so it alone propagates — the same benign
-/// case / `else => return err` split `loadEffectiveActionMap` uses.
+/// **Nothing here is fatal to the session, but a failed save loses the rebind.** The
+/// file *is* the channel: the live map only swaps when the watcher below detects the
+/// override changing (ADR 0041 §4.3 — persist and apply are one motion), so if the write
+/// fails there is no change to detect, no swap, and the rebind neither persists nor
+/// applies. The session plays on with the bindings it already had, and the next rebind
+/// retries. The most likely failure is `FileNotFound`, a package with no `save/`
+/// directory (the engine creates none, and only `games/menu` ships one today; #240 moves
+/// this path to the OS config dir). `OutOfMemory` is a real resource failure, not a
+/// content error, so it alone propagates — the same benign case / `else => return err`
+/// split `loadEffectiveActionMap` uses.
 ///
 /// A `.unchanged` poll — the steady state, every poll of every session that never
 /// rebinds — logs nothing, writes nothing, and allocates nothing.
@@ -421,7 +424,7 @@ fn persistBindings(
         error.OutOfMemory => return err,
         else => {
             try out.print(
-                "mana: could not save bindings to '{s}' ({s}) — this rebind applies now but will not persist\n",
+                "mana: could not save bindings to '{s}' ({s}) — this rebind was neither saved nor applied\n",
                 .{ path, @errorName(err) },
             );
             try out.flush();
@@ -433,9 +436,10 @@ fn persistBindings(
         .written => |n| try out.print("mana: bindings saved to '{s}' — {d} action(s) overridden\n", .{ path, n }),
         // The driver could not express what the script proposed (an unknown source, an
         // action name that is not a ZON identifier), so it wrote nothing at all rather
-        // than a file the loader could only reject — the last saved bindings stand.
+        // than a file the loader could only reject. No write ⇒ no swap either, same as
+        // the failed-save branch above — the current bindings stand.
         .rejected => |reason| try out.print(
-            "mana: rebind rejected ({s}) — '{s}' not written, keeping the last saved bindings\n",
+            "mana: rebind rejected ({s}) — '{s}' not written; neither saved nor applied, keeping the current bindings\n",
             .{ @tagName(reason), path },
         ),
     }

@@ -130,8 +130,10 @@ deferred (see the last bullet below).
   would rewrite the key slot and corrupt `lua_next`'s traversal), and the stack is
   restored by absolute height (`getTop`/`setTop`) rather than counted pops, since the
   traversal leaves a variable number of values behind on an early error return.
-- **Plain-data leaf types shared with the engine live in `types.zig`**, not in
-  `script.zig` or `lua.zig`. `script.zig` comptime-selects `lua.zig`, so `lua.zig` must
-  not import `script.zig` back — yet the no-Lua stub build still has to name the types
-  the engine's inert `NoopRuntime` mirrors. A third leaf file both import is the way out
+- **Plain-data leaf types shared with the engine live in `types.zig`**, not in `lua.zig`.
+  The reason is the comptime flag, not an import cycle (`lua.zig` importing `script.zig`
+  back builds fine — verified): without `-Denable-lua`, `script.zig` resolves `pub const
+  lua` to an empty `struct {}`, so a type declared in `lua.zig` is unnameable in exactly
+  the build where the engine's inert `NoopRuntime` must still mirror the accessor
+  signatures that use it. A leaf file both the stub and the backend import is the way out
   (the same split `engine` uses for `action_types.zig`).

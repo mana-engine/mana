@@ -87,8 +87,13 @@ fn writeValue(value: anytype, w: *Writer, depth: usize) Writer.Error!void {
             if (value) |v| try writeValue(v, w, depth) else try w.writeAll("null");
         },
         .@"struct" => |s| {
-            // A runtime-named object (`Object(V)`) writes its own field names.
-            if (@hasDecl(T, "zon_object_value")) return writeObject(value, w, depth);
+            // A runtime-named object (`Object(V)`) writes its own field names. The test
+            // is exact — `T` must BE `Object(V)`, not merely carry the marker decl — so
+            // an unrelated struct that happens to declare `zon_object_value` still
+            // serializes as the plain struct it is.
+            if (@hasDecl(T, "zon_object_value") and T == Object(T.zon_object_value)) {
+                return writeObject(value, w, depth);
+            }
             if (s.fields.len == 0) return w.writeAll(".{}");
             try w.writeAll(".{\n");
             inline for (s.fields) |f| {
@@ -324,6 +329,20 @@ test "zon round-trip: an Object nested in a struct parses back through std.zon.p
     const parsed = try parse(struct { items: struct { crate: Inner } }, gpa, z);
     defer free(gpa, parsed);
     try testing.expectEqual(@as(u32, 10), parsed.items.crate.hp);
+}
+
+test "zon serialize: an unrelated struct carrying the marker decl still serializes as a plain struct" {
+    // The `Object` test is by exact type, not by "has the decl" — so a caller's own
+    // struct that happens to declare `zon_object_value` is not hijacked.
+    const Impostor = struct {
+        pub const zon_object_value = u8;
+        fields: u8,
+    };
+    const gpa = testing.allocator;
+    var aw: Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try serialize(Impostor{ .fields = 3 }, &aw.writer);
+    try testing.expectEqualStrings(".{\n    .fields = 3,\n}\n", aw.written());
 }
 
 test "zon serialize: an empty Object writes the empty literal" {

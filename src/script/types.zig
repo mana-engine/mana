@@ -1,9 +1,10 @@
 //! Plain-data leaf types the scripting port hands the engine, independent of which
-//! backend is compiled in. They live in their own file (rather than in `script.zig` or
-//! `lua.zig`) so BOTH can name them without an import cycle: `script.zig`
-//! comptime-selects `lua.zig`, so `lua.zig` must not import `script.zig` back, yet the
-//! no-Lua stub build still has to name the types the engine's inert `NoopRuntime`
-//! mirrors. Mirrors the `action_types.zig` split `engine` uses for the same reason.
+//! backend is compiled in. They live in their own file, rather than in `lua.zig`, because
+//! **`lua.zig` does not exist in a default build**: `script.zig` resolves `pub const lua`
+//! to an empty `struct {}` without `-Denable-lua`, so a type declared there would be
+//! unnameable exactly when the engine's inert `NoopRuntime` needs to mirror the accessor
+//! signatures that use it. A leaf file both the stub and the backend import is the way
+//! out — the same split `engine` uses for `action_types.zig`.
 //!
 //! Nothing here is a Lua type — that invariant ("nothing above `script` sees a Lua
 //! type") is exactly what this file exists to keep.
