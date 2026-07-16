@@ -1,6 +1,6 @@
 # 0041. In-game action-map remapping: capture-next-input, a persisted user override, live swap
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-16
 
 ## Context
@@ -241,6 +241,12 @@ the critical path without committing the project to `save/` as the end-state. **
 final pick between "A now" and "B now, A next" is the reviewer's** — both are designed
 here; the difference is one path-resolution function and when it lands.
 
+**Decision (accepted 2026-07-16): Option B for v1** — ship the machinery against
+`games/<pkg>/save/input.zon` (the zero-new-path-code shortcut, reusing #135's `save/`
+layout); **Option A (the OS config dir) is deferred to follow-up #240**, an isolated
+path-only change that moves the override location with the merge/precedence/reload/
+driver code untouched.
+
 ### 3. Live action-map swap on change (ADR 0005 model)
 
 Applying a binding — or any external edit to either the package `input.zon` or the
@@ -353,8 +359,9 @@ add-on to issue 4, not a hidden dependency.
 - **The controls-screen UI's own missing pieces** — multi-screen switching from
   `on_activate` and a visual focus indicator (ADR 0039 §6) are #135/#209's to ship;
   child issue 5 consumes whatever they land.
-- **Moving the override to the OS config dir**, if the reviewer takes the `save/` v1
-  shortcut (§2.1) — an isolated path-resolution follow-up, everything else identical.
+- **Moving the override to the OS config dir** (**#240**) — the accepted `save/` v1
+  shortcut (§2.1) is followed by this isolated path-resolution change, everything else
+  identical.
 - **Per-device / per-profile override sets** (a keyboard map vs. a pad map, multiple
   named profiles) — one override per package in v1; a profile dimension is additive
   when a game needs it.
@@ -426,32 +433,32 @@ add-on to issue 4, not a hidden dependency.
 surface), and `src/engine/script_runtime.zig` (handler-field accessors) — lanes that
 touch the same one should be sequenced, not run concurrently.
 
-1. **Capture-next-input engine surface + script arm/deliver** — *engine*. Add
+1. **Capture-next-input engine surface + script arm/deliver** (**#235**) — *engine*. Add
    `mana.capture_input`/`mana.cancel_capture` (`src/script/mana.zig`) and the
    `on_input_captured` dispatch (`src/engine/script_runtime.zig`); add the capture
    branch ahead of nav/gameplay routing in `UiInput.keyEdge` + a pad-button edge path
    (`src/engine/ui_dispatch.zig`); digital sources only, device-neutral `source`
    string. Touches `mana.zig`/`ui_dispatch.zig`/`script_runtime.zig`. Independent of
    2–4; foundational for 5.
-2. **User-override load + per-action merge + precedence** — *engine*. Parse a partial
+2. **User-override load + per-action merge + precedence** (**#236**) — *engine*. Parse a partial
    `input.zon` override and merge it over the package map, per-action replace,
    override-wins, producing the effective `ActionMap` (`src/engine/action_map.zig` +
    the loader in `src/runtime/main.zig`). Validation/last-good on a bad override.
    Depends on nothing; feeds 3 and 4.
-3. **`input.zon` live hot-reload + `Sim.action_map` swap + `runPlay` watch** — *engine*.
+3. **`input.zon` live hot-reload + `Sim.action_map` swap + `runPlay` watch** (**#237**) — *engine*.
    Add package `input.zon` + the override to `syncWatchSet`; re-resolve + swap
    `Sim.action_map` at a tick boundary in `onChange`, last-good-wins; **give `runPlay`
    the watch+reload path it lacks** (and, if cheap, `runWatch` a `Sim`). Touches
    `src/runtime/main.zig` + `src/engine/sim.zig`. Depends on 2 (needs the merge to
    re-resolve). Highest merge-contention lane — owns `main.zig`.
-4. **Engine-side persistence driver → override file** — *engine*. Read the accepted
+4. **Engine-side persistence driver → override file** (**#238**) — *engine*. Read the accepted
    bindings off the handler table (a string/table-valued sibling to
    `handlerFieldInt`, `src/engine/script_runtime.zig`) and write the override via
    `data.zon.saveFile`; **wire the driver into `runPlay`** (the #135 driver is
    test-only). *Optional add-on:* retrofit #135's settings persistence into `runPlay`
    on the same seam. Depends on 1 (bindings arrive via capture) + 2 (the override
    shape). Shares `main.zig` with 3 — sequence after 3.
-5. **`games/menu` controls screen + `rules.lua` remap flow** — *content*. A controls
+5. **`games/menu` controls screen + `rules.lua` remap flow** (**#239**) — *content*. A controls
    screen listing actions, each rebindable: on activate → `mana.capture_input`, on
    `on_input_captured` → validate + record the binding into handler-table fields + echo
    in the UI; Escape → `mana.cancel_capture`. Ties 1–4 together end-to-end. Depends on
