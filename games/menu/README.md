@@ -70,13 +70,18 @@ interpreter, no window:
   key and a gamepad button.
 
 **Known gaps the remap content ran into (#239; each is engine work, not content's):**
-- ~~**A captured press still reaches gameplay `on_action`.**~~ **Closed by #246**: ADR
-  0041 §1 says an intercepted edge reaches neither `on_key` nor `on_action`. `Sim.tick`
-  already honoured that for `on_key` (it skips dispatch when `ui_input` claimed the
-  edge); the action-edge loop now does too — it diffs against a per-tick snapshot with
-  every UI-claimed key/pad-button edge masked out, so a bound key or pad button pressed
-  while capture is armed no longer also fires its action. `tests/menu_acceptance.zig`
-  asserts the fixed behavior for both source vocabularies (key and pad button).
+- **A captured press still reaches gameplay `on_action`.** ADR 0041 §1 says an
+  intercepted edge reaches neither `on_key` nor `on_action`. `Sim.tick` already
+  honoured that for `on_key` (it skips dispatch when `ui_input` claimed the edge); the
+  action-edge loop now does too — it diffs against a per-tick snapshot with every
+  UI-claimed key/pad-button edge masked out, so a bound key or pad button pressed
+  while capture is armed no longer also fires its action **on the press edge**
+  (**#246**, `tests/menu_acceptance.zig` asserts the fix for both source
+  vocabularies). The captured press no longer fires the gameplay action; its
+  **release** edge still reaches `on_action` unbalanced (`prev_input` stays raw
+  while the resolver diffs the masked snapshot, so the later up-transition still
+  registers) — tracked in **#256**, the same root cause as `on_key`'s pre-existing
+  release asymmetry (#213).
 - ~~**A script cannot read back its own persisted override.**~~ **Closed by #247** (ADR
   0041 §4 amendment). Lua still has no filesystem (ADR 0003 §7), but the engine now
   *seeds* `bindings` from `save/input.zon` at script load and after each reload
