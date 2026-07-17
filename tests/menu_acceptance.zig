@@ -378,16 +378,14 @@ test "menu controls acceptance: capture -> validate -> record -> persist -> relo
     try std.testing.expectEqual(@as(i64, 2), sim.script_runtime.handlerFieldInt("rejected_bindings").?);
     try std.testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("accepted_bindings").?);
     try std.testing.expectEqual(Outcome.unchanged, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
-    // KNOWN ENGINE GAP, pinned here deliberately (do not "correct" this expectation):
-    // ADR 0041 §1 says a captured edge "does not reach gameplay `on_action`/`on_key`",
-    // and `Sim.tick` honours that for `on_key` (it skips dispatch when `ui_input` claimed
-    // the edge, src/engine/sim.zig:322) but NOT for `on_action`: the action-edge loop
-    // (`:352`) diffs the raw snapshot unconditionally, never consulting capture. So
-    // pressing A while capture is armed fires `interact` at gameplay anyway. Harmless in
-    // this package (a menu with no gameplay), real for a game remapping mid-play.
-    // Closing it is engine work in `sim.zig`; content cannot, and must not, work around
-    // it. This assertion is the honest record — it goes red when the gap is closed.
-    try std.testing.expectEqual(@as(i64, 1), firedCount(&sim, "interact"));
+    // ADR 0041 §1 conformance (issue #246, fixed): a captured edge "does not reach
+    // gameplay `on_action`/`on_key`". `Sim.tick` masks a UI-consumed key/pad-button
+    // out of the snapshot the action-edge loop diffs against (`src/engine/sim.zig`,
+    // `action_input`), the same way it has always skipped `on_key` for a claimed
+    // edge — so A firing the capture-reported "duplicate" rejection above must NOT
+    // also fire `interact` at gameplay. This was a pinned characterization gap
+    // (`firedCount(interact) == 1`) before #246; it is now the ADR-conformant zero.
+    try std.testing.expectEqual(@as(i64, 0), firedCount(&sim, "interact"));
 
     // 5. ACCEPT + RECORD — D is free: the script records it and bumps the revision.
     try tapKey(&sim, .enter);
@@ -427,9 +425,10 @@ test "menu controls acceptance: capture -> validate -> record -> persist -> relo
     try tapKey(&sim, .w);
     try std.testing.expectEqual(@as(i64, 2), firedCount(&sim, "fire"));
     // An action absent from the override still resolves to its package default: A fires
-    // `interact` across the swap (2 = this press, plus the one step 4's gap leaked).
+    // `interact` across the swap. Just this one press — step 4's capture-consumed A
+    // never fired it (the #246 fix), so there is no leaked count to add.
     try tapKey(&sim, .a);
-    try std.testing.expectEqual(@as(i64, 2), firedCount(&sim, "interact"));
+    try std.testing.expectEqual(@as(i64, 1), firedCount(&sim, "interact"));
 }
 
 test "menu controls acceptance: a captured PAD BUTTON persists and applies through the same chain" {
@@ -483,6 +482,12 @@ test "menu controls acceptance: a captured PAD BUTTON persists and applies throu
     try std.testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("accepted_bindings").?);
     try std.testing.expectEqual(Outcome.unchanged, try writer.poll(gpa, io, tmp.dir, "input.zon", &sim.script_runtime));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "input.zon", .{}));
+    // ADR 0041 §1 conformance (issue #246), the PAD half: NORTH is captured (reported,
+    // then rejected as a duplicate) — it must not ALSO fire `interact` at gameplay, the
+    // same gate the key-source case above proves. A gate that only masked `keys` and
+    // left `pad_buttons` unmasked would pass every other assertion in this file and
+    // still leak here (CLAUDE.md's "cover both vocab" lesson) — this is that proof.
+    try std.testing.expectEqual(@as(i64, 0), firedCount(&sim, "interact"));
 
     // ACCEPT — SOUTH is bound to nothing, so it is a legitimate rebind.
     try tapKey(&sim, .enter); // re-arm the still-focused PAUSE row
