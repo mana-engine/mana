@@ -119,6 +119,26 @@ pub const Sim = struct {
     /// (ADR 0021). Defaults empty, so a key held on the very first tick reads as a
     /// press. Not part of the state hash (input never is, ADR 0009).
     prev_input: platform.InputSnapshot = .{},
+    /// Sources whose most recent press edge the UI consumed (ADR 0039 §3 / ADR 0041
+    /// §1) and which are therefore **latched masked** until they physically release —
+    /// the fix for issues #256/#213. `keyEdge`/`padButtonEdge` only ever claim a
+    /// *press* (never a release, ADR 0041 §1.1), so without this a UI-consumed
+    /// press's later release edge reaches gameplay unbalanced (a `.released`
+    /// `on_action`/`on_key` with no matching press). `tick` inserts a source here the
+    /// tick its press is consumed and removes it the tick its release edge arrives,
+    /// masking both edges from `action_input`/`resolved_prev` — never
+    /// `self.prev_input`, which must stay raw so the very next tick's edge detection
+    /// (`now_held != prev_input.contains(k)`) still fires so this latch can even be
+    /// cleared. Two plain stack-resident bitsets (CLAUDE.md invariant #3: no
+    /// per-frame heap alloc), not part of `World`, so — like `prev_input`/`ui_input`
+    /// — never part of `stateHash` (input/UI-consumption state never is, ADR 0009 /
+    /// ADR 0039 §4). **Not** achieved by aliasing `prev_input = action_input`: that
+    /// would instead resurrect a spurious *press* next tick for a key still held
+    /// across the mask boundary — the trap this latch exists to avoid.
+    consumed_keys: platform.KeySet = platform.KeySet.initEmpty(),
+    /// The `platform.GamepadButton` counterpart of `consumed_keys`, same latch
+    /// semantics (ADR 0040 §5 / ADR 0041 §1.1).
+    consumed_pad_buttons: platform.GamepadButtonSet = platform.GamepadButtonSet.initEmpty(),
     /// The active UI screen's focus/dispatch state (ADR 0039; issue #209): `null`
     /// screen by default, so a `Sim` that never sets one behaves exactly as before
     /// this field existed — every key edge falls straight through to `on_key`. The
@@ -308,33 +328,48 @@ pub const Sim = struct {
                 try self.script_runtime.dispatchSceneEnter(scene_name, dc);
             }
             // The action-edge loop below must not see a physical source the UI just
-            // claimed (ADR 0041 §1: a captured — or otherwise UI-consumed — edge "does
-            // not reach gameplay on_action/on_key"). `action_input` starts as this
-            // tick's raw snapshot and has each UI-consumed key/pad-button *removed* as
-            // the loops below discover them, so the action resolver (a pure function of
-            // its snapshot argument, ADR 0040 §6) diffs against a view that never shows
-            // a claimed source as newly held. A stack copy, not a heap alloc (CLAUDE.md
-            // invariant #3).
+            // claimed, nor a source the UI claimed on an EARLIER tick's press that has
+            // only now released (ADR 0041 §1: a captured — or otherwise UI-consumed —
+            // edge "does not reach gameplay on_action/on_key"; #256/#213 extend that to
+            // the release side). `action_input` starts as this tick's raw snapshot and
+            // has each UI-consumed key/pad-button *removed* as the loops below discover
+            // them; `resolved_prev` starts as last tick's raw snapshot (`self.prev_input`
+            // — left untouched, since the *next* tick's edge detection still needs it
+            // raw) and has a *latched* source removed the tick its release edge is
+            // masked, so the action resolver (a pure function of its two snapshot
+            // arguments, ADR 0040 §6) diffs two views that never show a claimed source
+            // transitioning at all — neither on the press nor on the balancing release.
+            // Two stack copies, not a heap alloc (CLAUDE.md invariant #3).
             var action_input = self.input;
+            var resolved_prev = self.prev_input;
             // Keyboard edges (ADR 0021, ordered per ADR 0039 §3): for every key whose
             // held-state changed since last tick, in Key-enum order (deterministic),
             // the active UI screen (if any) gets first refusal — a focus-nav/activate
             // or capture press edge it claims fires on_focus/on_activate/
             // on_input_captured instead of on_key, and never reaches gameplay (ADR
             // 0039 §3, ADR 0041 §1) — including the action resolver below, via
-            // `action_input`. Only an edge the UI does not claim (no screen active, a
-            // release edge, or a key with no UI meaning) dispatches on_key, host-live
-            // and before timers, exactly as before this field existed. The temporary
-            // screen layout `ui_input.keyEdge` needs is scratch-arena backed (issue
-            // #153: no per-frame heap alloc in the hot loop).
+            // `action_input`. A consumed press also latches the source into
+            // `self.consumed_keys` (#256/#213): `keyEdge` itself only ever claims a
+            // press (ADR 0041 §1.1), so the matching release edge — whichever later
+            // tick it lands on — is masked here too (`resolved_prev`) and the latch is
+            // then cleared, instead of falling through to `on_key`/the action resolver
+            // unbalanced. Only a key with no UI meaning (never latched, never
+            // consumed) dispatches on_key, host-live and before timers, exactly as
+            // before this field existed. The temporary screen layout `ui_input.keyEdge`
+            // needs is scratch-arena backed (issue #153: no per-frame heap alloc in the
+            // hot loop).
             inline for (comptime std.enums.values(platform.Key)) |k| {
                 const now_held = self.input.keys.contains(k);
                 if (now_held != self.prev_input.keys.contains(k)) {
                     const ui_consumed = try self.ui_input.keyEdge(ctx.scratch, &self.script_runtime, dc, k, now_held);
-                    if (!ui_consumed) {
-                        try self.script_runtime.dispatchKey(@tagName(k), now_held, dc);
-                    } else {
+                    if (ui_consumed) {
+                        self.consumed_keys.insert(k);
                         action_input.keys.remove(k);
+                    } else if (!now_held and self.consumed_keys.contains(k)) {
+                        self.consumed_keys.remove(k);
+                        resolved_prev.keys.remove(k);
+                    } else {
+                        try self.script_runtime.dispatchKey(@tagName(k), now_held, dc);
                     }
                 }
             }
@@ -346,31 +381,41 @@ pub const Sim = struct {
             // `on_input_captured` with a `pad_`-prefixed source, ADR 0041 §1). Unlike
             // keys there is **no** gameplay fall-through: raw pad buttons have no
             // `on_key`-analogue event (a bound button *action* is diffed separately
-            // below, ADR 0040 §2). A consumed press is masked out of `action_input`
-            // exactly like the key loop, so a bound action does not see it either; an
-            // unconsumed pad-button edge simply does nothing at this layer. Runs off
-            // `prev_input` (still last tick's snapshot here), so it must precede the
-            // reset below, exactly like the key loop.
+            // below, ADR 0040 §2). A consumed press is masked out of `action_input` and
+            // latched into `self.consumed_pad_buttons` exactly like the key loop
+            // (#256/#213), so its later release is masked out of `resolved_prev` too
+            // instead of leaking into the action resolver; an unconsumed, unlatched
+            // pad-button edge simply does nothing at this layer. Runs off `prev_input`
+            // (still last tick's snapshot here), so it must precede the reset below,
+            // exactly like the key loop.
             inline for (comptime std.enums.values(platform.GamepadButton)) |b| {
                 const now_held = self.input.pad_buttons.contains(b);
                 if (now_held != self.prev_input.pad_buttons.contains(b)) {
                     const ui_consumed = try self.ui_input.padButtonEdge(&self.script_runtime, dc, b, now_held);
-                    if (ui_consumed) action_input.pad_buttons.remove(b);
+                    if (ui_consumed) {
+                        self.consumed_pad_buttons.insert(b);
+                        action_input.pad_buttons.remove(b);
+                    } else if (!now_held and self.consumed_pad_buttons.contains(b)) {
+                        self.consumed_pad_buttons.remove(b);
+                        resolved_prev.pad_buttons.remove(b);
+                    }
                 }
             }
             // Action edges (ADR 0040 §2, gated per ADR 0041 §1): with a borrowed action
-            // map, diff each `button` action's OR-combined held-state between last tick
-            // and `action_input` (this tick's snapshot with every UI-claimed key/pad-
-            // button edge masked out above) — the same device-agnostic diff the key loop
-            // does, now blind to a source the UI already consumed — and dispatch
-            // `on_action` host-live, before timers, in the map's stable binding order. An
-            // `axis1d`/`axis2d` action never fires an edge (it is polled). No map ⇒ no
-            // action events, as before this field existed. Runs off `prev_input` (still
-            // last tick's snapshot here), so it must precede the reset below.
+            // map, diff each `button` action's OR-combined held-state between
+            // `resolved_prev` (last tick's snapshot, with any now-releasing latched
+            // source also masked out, #256/#213) and `action_input` (this tick's
+            // snapshot with every UI-claimed key/pad-button edge masked out above) —
+            // the same device-agnostic diff the key loop does, now blind to a source
+            // the UI already consumed on either edge of its press/release pair — and
+            // dispatch `on_action` host-live, before timers, in the map's stable
+            // binding order. An `axis1d`/`axis2d` action never fires an edge (it is
+            // polled). No map ⇒ no action events, as before this field existed. Runs
+            // off `resolved_prev`, so it must precede the `self.prev_input` reset below.
             if (self.action_map) |map| {
                 for (map.bindings) |b| {
                     if (b.action.type != .button) continue;
-                    switch (action_map.resolveButtonEdge(b.action, action_input, self.prev_input)) {
+                    switch (action_map.resolveButtonEdge(b.action, action_input, resolved_prev)) {
                         .none => {},
                         .pressed => try self.script_runtime.dispatchAction(b.name, true, dc),
                         .released => try self.script_runtime.dispatchAction(b.name, false, dc),
@@ -1254,4 +1299,167 @@ test "sim: a gamepad-button press, while capture is armed, fires on_input_captur
     // capture already disarmed — no second delivery.
     try sim.tick();
     try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("captures").?);
+}
+
+// --- Latched release masking (issues #256/#213) ------------------------------------
+//
+// The suite above only ever counts `on_key`/`on_action` **presses** (or, like
+// `games/menu/scripts/rules.lua:193`, discards releases outright) — exactly why the
+// bug this section pins went unnoticed through #246's own review. Every test below
+// counts releases *specifically*, since a UI-consumed press's `.released` transition
+// is a distinct dispatch (`dispatchAction`/`dispatchKey` called with `pressed =
+// false`) that a presses-only counter cannot observe.
+
+test "sim: a UI-consumed key press's later release edge does not leak into on_key either (issue #213)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    var sim = Sim.init(testing.allocator, 1.0);
+    defer sim.deinit();
+    try sim.loadScript(
+        \\local t = { key_presses = 0, key_releases = 0, focuses = 0 }
+        \\function t.on_key(ev)
+        \\  if ev.pressed then t.key_presses = t.key_presses + 1
+        \\  else t.key_releases = t.key_releases + 1 end
+        \\end
+        \\function t.on_focus(ev) t.focuses = t.focuses + 1 end
+        \\return t
+    );
+    sim.ui_input.setScreen(&ui_input_two_buttons, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+
+    // Right-arrow is a recognized nav key: the UI claims the press (bootstraps
+    // focus onto "a"), so on_key must not fire for it.
+    var right = platform.KeySet.initEmpty();
+    right.insert(.right);
+    sim.setInput(.{ .keys = right });
+    try sim.tick();
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("focuses").?);
+    try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("key_presses").?);
+
+    // Hold the key one extra tick (no edge): must not perturb the latch.
+    try sim.tick();
+    try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("key_releases").?);
+
+    sim.setInput(.{}); // release right
+    try sim.tick(); // #213: the balancing release must ALSO never reach on_key
+    try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("key_releases").?);
+
+    // The latch is source-scoped, not a global kill switch: a key with no UI
+    // meaning still round-trips both edges through on_key exactly as before.
+    var w = platform.KeySet.initEmpty();
+    w.insert(.w);
+    sim.setInput(.{ .keys = w });
+    try sim.tick();
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("key_presses").?);
+    sim.setInput(.{});
+    try sim.tick();
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("key_releases").?);
+}
+
+test "sim: a captured key press's later release edge does not leak into on_action (issue #256, key half)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    const gpa = testing.allocator;
+    // `jump` (space) is the source capture will claim; `dash` (a, uncaptured) proves
+    // the latch is scoped to the claimed source, not a blanket on_action kill switch.
+    const src: [:0]const u8 =
+        \\.{
+        \\    .actions = .{
+        \\        .jump = .{ .type = .button, .keys = .{.space} },
+        \\        .dash = .{ .type = .button, .keys = .{.a} },
+        \\    },
+        \\}
+    ;
+    const map = try action_map.parse(gpa, src);
+    defer action_map.free(gpa, map);
+
+    var sim = Sim.init(gpa, 1.0);
+    defer sim.deinit();
+    sim.action_map = &map;
+    try sim.loadScript(
+        \\local t = { presses = 0, releases = 0, captures = 0 }
+        \\function t.on_scene_enter(ev) mana.capture_input("rebind") end
+        \\function t.on_input_captured(ev) t.captures = t.captures + 1 end
+        \\function t.on_action(ev)
+        \\  if ev.pressed then t.presses = t.presses + 1 else t.releases = t.releases + 1 end
+        \\end
+        \\return t
+    );
+    sim.enterScene("main");
+
+    var space = platform.KeySet.initEmpty();
+    space.insert(.space);
+    sim.setInput(.{ .keys = space });
+    try sim.tick(); // on_scene_enter arms capture; the space press is captured
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("captures").?);
+    try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("presses").?);
+
+    sim.setInput(.{}); // release space
+    try sim.tick(); // #256: the balancing release must ALSO never reach on_action
+    try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("releases").?);
+
+    // "a" was never captured: `dash` still round-trips press+release normally.
+    var a = platform.KeySet.initEmpty();
+    a.insert(.a);
+    sim.setInput(.{ .keys = a });
+    try sim.tick();
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("presses").?);
+    sim.setInput(.{});
+    try sim.tick();
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("releases").?);
+}
+
+test "sim: a captured pad-button press's later release edge does not leak into on_action (issue #256, pad half)" {
+    if (!script.lua_enabled) return error.SkipZigTest;
+
+    // The pad-button vocabulary twin of the key test above — CLAUDE.md's own lesson
+    // ("a test asserting only the key half…shipping a reachable bug") applied here:
+    // `consumed_pad_buttons` is a distinct latch from `consumed_keys`, so a fix (or a
+    // regression) that only masked keys would pass every key-only assertion and
+    // still leak a pad-button release.
+    const gpa = testing.allocator;
+    const src: [:0]const u8 =
+        \\.{
+        \\    .actions = .{
+        \\        .dash = .{ .type = .button, .pad_buttons = .{.south} },
+        \\        .brake = .{ .type = .button, .pad_buttons = .{.east} },
+        \\    },
+        \\}
+    ;
+    const map = try action_map.parse(gpa, src);
+    defer action_map.free(gpa, map);
+
+    var sim = Sim.init(gpa, 1.0);
+    defer sim.deinit();
+    sim.action_map = &map;
+    try sim.loadScript(
+        \\local t = { presses = 0, releases = 0, captures = 0 }
+        \\function t.on_scene_enter(ev) mana.capture_input("rebind") end
+        \\function t.on_input_captured(ev) t.captures = t.captures + 1 end
+        \\function t.on_action(ev)
+        \\  if ev.pressed then t.presses = t.presses + 1 else t.releases = t.releases + 1 end
+        \\end
+        \\return t
+    );
+    sim.enterScene("main");
+
+    var south = platform.GamepadButtonSet.initEmpty();
+    south.insert(.south);
+    sim.setInput(.{ .pad_buttons = south });
+    try sim.tick(); // on_scene_enter arms capture; the south press is captured
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("captures").?);
+    try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("presses").?);
+
+    sim.setInput(.{}); // release south
+    try sim.tick(); // #256 pad half: the balancing release must ALSO never reach on_action
+    try testing.expectEqual(@as(i64, 0), sim.script_runtime.handlerFieldInt("releases").?);
+
+    // EAST was never captured: `brake` still round-trips press+release normally.
+    var east = platform.GamepadButtonSet.initEmpty();
+    east.insert(.east);
+    sim.setInput(.{ .pad_buttons = east });
+    try sim.tick();
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("presses").?);
+    sim.setInput(.{});
+    try sim.tick();
+    try testing.expectEqual(@as(i64, 1), sim.script_runtime.handlerFieldInt("releases").?);
 }
