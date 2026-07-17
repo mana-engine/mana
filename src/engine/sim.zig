@@ -307,21 +307,34 @@ pub const Sim = struct {
                 self.pending_scene = null;
                 try self.script_runtime.dispatchSceneEnter(scene_name, dc);
             }
+            // The action-edge loop below must not see a physical source the UI just
+            // claimed (ADR 0041 §1: a captured — or otherwise UI-consumed — edge "does
+            // not reach gameplay on_action/on_key"). `action_input` starts as this
+            // tick's raw snapshot and has each UI-consumed key/pad-button *removed* as
+            // the loops below discover them, so the action resolver (a pure function of
+            // its snapshot argument, ADR 0040 §6) diffs against a view that never shows
+            // a claimed source as newly held. A stack copy, not a heap alloc (CLAUDE.md
+            // invariant #3).
+            var action_input = self.input;
             // Keyboard edges (ADR 0021, ordered per ADR 0039 §3): for every key whose
             // held-state changed since last tick, in Key-enum order (deterministic),
             // the active UI screen (if any) gets first refusal — a focus-nav/activate
-            // press edge it claims fires on_focus/on_activate instead of on_key, and
-            // never reaches gameplay. Only an edge the UI does not claim (no screen
-            // active, a release edge, or a key with no UI meaning) dispatches on_key,
-            // host-live and before timers, exactly as before this field existed. The
-            // temporary screen layout `ui_input.keyEdge` needs is scratch-arena backed
-            // (issue #153: no per-frame heap alloc in the hot loop).
+            // or capture press edge it claims fires on_focus/on_activate/
+            // on_input_captured instead of on_key, and never reaches gameplay (ADR
+            // 0039 §3, ADR 0041 §1) — including the action resolver below, via
+            // `action_input`. Only an edge the UI does not claim (no screen active, a
+            // release edge, or a key with no UI meaning) dispatches on_key, host-live
+            // and before timers, exactly as before this field existed. The temporary
+            // screen layout `ui_input.keyEdge` needs is scratch-arena backed (issue
+            // #153: no per-frame heap alloc in the hot loop).
             inline for (comptime std.enums.values(platform.Key)) |k| {
                 const now_held = self.input.keys.contains(k);
                 if (now_held != self.prev_input.keys.contains(k)) {
                     const ui_consumed = try self.ui_input.keyEdge(ctx.scratch, &self.script_runtime, dc, k, now_held);
                     if (!ui_consumed) {
                         try self.script_runtime.dispatchKey(@tagName(k), now_held, dc);
+                    } else {
+                        action_input.keys.remove(k);
                     }
                 }
             }
@@ -333,18 +346,23 @@ pub const Sim = struct {
             // `on_input_captured` with a `pad_`-prefixed source, ADR 0041 §1). Unlike
             // keys there is **no** gameplay fall-through: raw pad buttons have no
             // `on_key`-analogue event (a bound button *action* is diffed separately
-            // below, ADR 0040 §2), so an unconsumed pad-button edge simply does
-            // nothing. Runs off `prev_input` (still last tick's snapshot here), so it
-            // must precede the reset below, exactly like the key loop.
+            // below, ADR 0040 §2). A consumed press is masked out of `action_input`
+            // exactly like the key loop, so a bound action does not see it either; an
+            // unconsumed pad-button edge simply does nothing at this layer. Runs off
+            // `prev_input` (still last tick's snapshot here), so it must precede the
+            // reset below, exactly like the key loop.
             inline for (comptime std.enums.values(platform.GamepadButton)) |b| {
                 const now_held = self.input.pad_buttons.contains(b);
                 if (now_held != self.prev_input.pad_buttons.contains(b)) {
-                    _ = try self.ui_input.padButtonEdge(&self.script_runtime, dc, b, now_held);
+                    const ui_consumed = try self.ui_input.padButtonEdge(&self.script_runtime, dc, b, now_held);
+                    if (ui_consumed) action_input.pad_buttons.remove(b);
                 }
             }
-            // Action edges (ADR 0040 §2): with a borrowed action map, diff each `button`
-            // action's OR-combined held-state between last tick and this one — the exact
-            // snapshot diff the key loop above does, but device-agnostic — and dispatch
+            // Action edges (ADR 0040 §2, gated per ADR 0041 §1): with a borrowed action
+            // map, diff each `button` action's OR-combined held-state between last tick
+            // and `action_input` (this tick's snapshot with every UI-claimed key/pad-
+            // button edge masked out above) — the same device-agnostic diff the key loop
+            // does, now blind to a source the UI already consumed — and dispatch
             // `on_action` host-live, before timers, in the map's stable binding order. An
             // `axis1d`/`axis2d` action never fires an edge (it is polled). No map ⇒ no
             // action events, as before this field existed. Runs off `prev_input` (still
@@ -352,7 +370,7 @@ pub const Sim = struct {
             if (self.action_map) |map| {
                 for (map.bindings) |b| {
                     if (b.action.type != .button) continue;
-                    switch (action_map.resolveButtonEdge(b.action, self.input, self.prev_input)) {
+                    switch (action_map.resolveButtonEdge(b.action, action_input, self.prev_input)) {
                         .none => {},
                         .pressed => try self.script_runtime.dispatchAction(b.name, true, dc),
                         .released => try self.script_runtime.dispatchAction(b.name, false, dc),
