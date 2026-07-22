@@ -53,3 +53,4 @@ built to that contract (as its own task that adds the ziglua dependency).
 | 0039 | UI input events: `on_click`/`on_focus`/`on_activate` | accepted |
 | 0040 | Data-driven action-map: typed (device-agnostic) actions + gamepad | accepted |
 | 0041 | In-game action-map remapping: capture-next-input, a persisted user override, live swap | accepted (amended #247: §4 gains a step 0 — the engine seeds the script's bindings field from the override on disk; §4 alone assumed a filesystem read ADR 0003 §7 denies) |
+| 0042 | Screen switching: a globbed `screens/` set, a named screen request, one active screen | proposed |
